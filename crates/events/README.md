@@ -72,8 +72,10 @@ session_id, kinds }`, `RetentionPolicy { max_events, max_age }`, `ReplayPage`,
   offered to a bounded live queue (default 1024 events, at most 4 MiB). Delivery is
   in cursor order without duplicates or gaps. Publishers never block: a full queue
   marks the subscriber lagged and drops its queue; the subscriber then catches up
-  from disk after the last cursor it delivered and rejoins. Dropping a subscription
-  unregisters it.
+  from disk after the last cursor it delivered and rejoins. A successful legacy
+  import also sends existing subscribers through disk catch-up before later live
+  events; if import retention removed unseen history, they report `CursorExpired`
+  rather than skipping it. Dropping a subscription unregisters it.
 - **Ephemeral events** (`agent.delta`, `process.output`) are never stored and take
   no cursor; their envelope carries the latest durable cursor. They reach live
   subscribers only, and are lost while a subscriber lags.

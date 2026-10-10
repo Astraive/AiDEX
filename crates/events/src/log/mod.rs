@@ -294,6 +294,13 @@ impl EventLog {
         let (outcome, state) =
             schema::import_file(&mut inner.connection, legacy_path, &self.shared.retention)?;
         inner.last_cursor = state.last_cursor;
+        if matches!(outcome, LegacyImport::Imported { events } if events > 0) {
+            // Import commits a new durable range without offering its rows live.
+            // Reset subscribers through disk catch-up before any later append.
+            for slot in &inner.subscribers {
+                slot.mark_lagged();
+            }
+        }
         Ok(outcome)
     }
 
