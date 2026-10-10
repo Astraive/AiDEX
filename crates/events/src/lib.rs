@@ -32,4 +32,4 @@ pub use log::{
 pub use redact::{redact_text, sanitize_text};
 pub use sanitize::MAX_EVENT_BYTES;
 pub use sink::{EventSink, MemoryEventSink, NullEventSink};
-pub use subscription::Subscription;
+pub use subscription::{Subscription, SubscriptionItem};

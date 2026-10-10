@@ -297,9 +297,10 @@ impl EventLog {
         Ok(outcome)
     }
 
-    /// Stream events matching `filter` strictly after `after`: persisted history
-    /// first (paged from disk), then live events, in cursor order without duplicates
-    /// or gaps. Uses [`subscription::DEFAULT_CAPACITY`] for the live queue.
+    /// Stream matching events and consumed durable watermarks strictly after
+    /// `after`: persisted history first, then live deliveries, without duplicates
+    /// or gaps. Watermarks follow the matching events they cover. Uses
+    /// [`subscription::DEFAULT_CAPACITY`] for the live event queue.
     pub fn subscribe(
         &self,
         filter: EventFilter,

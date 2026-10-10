@@ -4,6 +4,7 @@ mod common;
 
 use aidex_events::{
     Cursor, EventEnvelope, EventError, EventFilter, EventKind, RetentionPolicy, Subscription,
+    SubscriptionItem,
     subscription::MAX_QUEUED_BYTES,
 };
 use common::{id, session_scope, task_started, temp_log, ws};
@@ -16,10 +17,15 @@ use std::{
 const PATIENCE: Duration = Duration::from_secs(10);
 
 fn next(subscription: &mut Subscription) -> EventEnvelope {
-    subscription
-        .next_timeout(PATIENCE)
-        .unwrap()
-        .expect("an event within the timeout")
+    loop {
+        if let SubscriptionItem::Event(event) = subscription
+            .next_timeout(PATIENCE)
+            .unwrap()
+            .expect("a delivery within the timeout")
+        {
+            return event;
+        }
+    }
 }
 
 fn drain(subscription: &mut Subscription) -> Vec<u64> {
@@ -28,7 +34,9 @@ fn drain(subscription: &mut Subscription) -> Vec<u64> {
         .next_timeout(Duration::from_millis(50))
         .unwrap()
     {
-        seen.push(event.cursor.get());
+        if let SubscriptionItem::Event(event) = event {
+            seen.push(event.cursor.get());
+        }
     }
     seen
 }
@@ -215,7 +223,10 @@ fn filtered_subscriptions_and_ephemeral_events() {
     assert_eq!(drain(&mut tasks), [1, 3]);
     let names: Vec<_> =
         std::iter::from_fn(|| everything.next_timeout(Duration::from_millis(50)).unwrap())
-            .map(|event| (event.cursor.get(), event.name()))
+            .filter_map(|item| match item {
+                SubscriptionItem::Event(event) => Some((event.cursor.get(), event.name())),
+                SubscriptionItem::Watermark(_) => None,
+            })
             .collect();
     assert_eq!(
         names,
@@ -280,4 +291,153 @@ fn subscription_reports_history_removed_before_it_was_delivered() {
             .subscribe_with_capacity(EventFilter::all(), Cursor::ZERO, 0),
         Err(EventError::InvalidLimit { .. })
     ));
+}
+
+#[test]
+fn filtered_live_progress_survives_retention_and_reconnect() {
+    // Exercise each filter independently: every durable nonmatch must advance the
+    // stream, without filling even a one-event live queue.
+    for filter in [
+        EventFilter::for_workspace(ws()),
+        EventFilter::for_session(id("ses_other")),
+        EventFilter::all().with_kind("agent"),
+    ] {
+        let fixture = temp_log(RetentionPolicy::max_events(2));
+        let mut subscription = fixture
+            .log
+            .subscribe_with_capacity(filter.clone(), Cursor::ZERO, 1)
+            .unwrap();
+        assert_eq!(subscription.try_next().unwrap(), None);
+        for cursor in 1..=8 {
+            fixture
+                .log
+                .append(
+                    aidex_events::EventScope::session(id("ws_other"), id("ses_one")),
+                    task_started(&format!("t{cursor}")),
+                )
+                .unwrap();
+        }
+        assert_eq!(subscription.queued(), 0);
+        assert_eq!(subscription.lag_count(), 0);
+        assert_eq!(
+            subscription.try_next().unwrap(),
+            Some(SubscriptionItem::Watermark(Cursor::new(8)))
+        );
+        assert_eq!(subscription.try_next().unwrap(), None);
+        drop(subscription);
+        // The old matching cursor is expired, despite no matching events being
+        // missed; the exposed consumed watermark reconnects without that error.
+        assert!(matches!(
+            fixture.log.subscribe(filter.clone(), Cursor::ZERO),
+            Err(EventError::CursorExpired { .. })
+        ));
+        let mut resumed = fixture.log.subscribe(filter, Cursor::new(8)).unwrap();
+        assert_eq!(resumed.try_next().unwrap(), None);
+    }
+}
+
+#[test]
+fn history_watermarks_never_overtake_pending_matches_or_live_events() {
+    let fixture = temp_log(RetentionPolicy::UNBOUNDED);
+    for cursor in 1..=300 {
+        let scope = if cursor <= 260 {
+            session_scope()
+        } else {
+            aidex_events::EventScope::workspace(id("ws_other"))
+        };
+        fixture.log.append(scope, task_started(&format!("t{cursor}"))).unwrap();
+    }
+    let mut subscription = fixture
+        .log
+        .subscribe(EventFilter::for_workspace(ws()), Cursor::ZERO)
+        .unwrap();
+    fixture.log.append(session_scope(), task_started("live")).unwrap();
+    for cursor in 1..=260 {
+        assert!(matches!(
+            subscription.try_next().unwrap(),
+            Some(SubscriptionItem::Event(event)) if event.cursor == Cursor::new(cursor)
+        ));
+    }
+    assert_eq!(
+        subscription.try_next().unwrap(),
+        Some(SubscriptionItem::Watermark(Cursor::new(300)))
+    );
+    assert_eq!(next(&mut subscription).cursor, Cursor::new(301));
+    assert_eq!(subscription.try_next().unwrap(), None);
+}
+
+#[test]
+fn live_watermarks_preserve_matching_and_ephemeral_delivery_order() {
+    let fixture = temp_log(RetentionPolicy::UNBOUNDED);
+    let mut subscription = fixture
+        .log
+        .subscribe(EventFilter::for_workspace(ws()), Cursor::ZERO)
+        .unwrap();
+    assert_eq!(subscription.try_next().unwrap(), None);
+    let first = fixture.log.append(session_scope(), task_started("first")).unwrap();
+    fixture
+        .log
+        .append(aidex_events::EventScope::workspace(id("ws_other")), task_started("skip"))
+        .unwrap();
+    let delta = fixture
+        .log
+        .append(session_scope(), EventKind::AgentDelta { text: "partial".into() })
+        .unwrap();
+    let last = fixture.log.append(session_scope(), task_started("last")).unwrap();
+    fixture
+        .log
+        .append(aidex_events::EventScope::workspace(id("ws_other")), task_started("tail"))
+        .unwrap();
+    assert_eq!(subscription.try_next().unwrap(), Some(SubscriptionItem::Event(first)));
+    assert_eq!(
+        subscription.try_next().unwrap(),
+        Some(SubscriptionItem::Watermark(Cursor::new(2)))
+    );
+    assert_eq!(subscription.try_next().unwrap(), Some(SubscriptionItem::Event(delta)));
+    assert_eq!(subscription.try_next().unwrap(), Some(SubscriptionItem::Event(last)));
+    assert_eq!(
+        subscription.try_next().unwrap(),
+        Some(SubscriptionItem::Watermark(Cursor::new(4)))
+    );
+    assert_eq!(subscription.try_next().unwrap(), None);
+}
+
+#[test]
+fn overflow_replays_matches_before_exposing_filtered_progress() {
+    let fixture = temp_log(RetentionPolicy::UNBOUNDED);
+    let mut subscription = fixture
+        .log
+        .subscribe_with_capacity(EventFilter::for_workspace(ws()), Cursor::ZERO, 1)
+        .unwrap();
+    assert_eq!(subscription.try_next().unwrap(), None);
+    let first = fixture.log.append(session_scope(), task_started("first")).unwrap();
+    fixture
+        .log
+        .append(aidex_events::EventScope::workspace(id("ws_other")), task_started("skip"))
+        .unwrap();
+    fixture
+        .log
+        .append(session_scope(), EventKind::AgentDelta { text: "lost on overflow".into() })
+        .unwrap();
+    assert_eq!(subscription.lag_count(), 1);
+    let last = fixture.log.append(session_scope(), task_started("last")).unwrap();
+    fixture
+        .log
+        .append(aidex_events::EventScope::workspace(id("ws_other")), task_started("tail"))
+        .unwrap();
+    assert_eq!(subscription.try_next().unwrap(), Some(SubscriptionItem::Event(first)));
+    assert_eq!(subscription.try_next().unwrap(), Some(SubscriptionItem::Event(last)));
+    assert_eq!(
+        subscription.try_next().unwrap(),
+        Some(SubscriptionItem::Watermark(Cursor::new(4)))
+    );
+    assert_eq!(subscription.try_next().unwrap(), None);
+    fixture
+        .log
+        .append(aidex_events::EventScope::workspace(id("ws_other")), task_started("new"))
+        .unwrap();
+    assert_eq!(
+        subscription.try_next().unwrap(),
+        Some(SubscriptionItem::Watermark(Cursor::new(5)))
+    );
 }

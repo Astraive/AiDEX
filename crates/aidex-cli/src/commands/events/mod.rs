@@ -2,7 +2,8 @@
 //!
 //! `show` prints one replay page (`events.replay`). `tail` prints everything after a
 //! cursor and exits, or with `--follow` streams `events.subscribe`, reconnecting with
-//! backoff after transient disconnects and resuming after the last printed cursor.
+//! backoff after transient disconnects and resuming after the last processed
+//! durable event or consumed watermark.
 //! Human output is one line per event; `--json` prints envelopes as JSON lines
 //! (`show --json` prints the page as one JSON document).
 

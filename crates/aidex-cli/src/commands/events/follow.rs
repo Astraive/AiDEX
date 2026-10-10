@@ -1,21 +1,22 @@
 //! `aidex events tail --follow`: stream, reconnect with backoff, resume exactly.
 //!
-//! The loop owns the acknowledged cursor: it advances only after a durable event's
-//! line was written and flushed, every reconnect asks for events strictly after it,
-//! and a durable event at or before it is never printed again. Transient failures
-//! (daemon stopped, restarting, or dropped us as a slow consumer) reconnect with
-//! exponential backoff; anything else, including an expired cursor, ends the command.
+//! The loop owns the acknowledged cursor: durable events advance it only after
+//! their lines were written and flushed; ordered watermarks advance it across
+//! filtered-out durable events without printing. Every reconnect resumes strictly
+//! after it, and an acknowledged durable event is never printed again. Transient
+//! failures reconnect with exponential backoff; all other errors end the command.
 
 use super::event_error;
 use crate::{
     commands::daemon::connect_root,
     exit::{CliError, Exit},
 };
-use aidex_events::{Cursor, EventEnvelope, EventFilter};
+use aidex_events::{Cursor, EventEnvelope, EventFilter, SubscriptionItem};
 use aidexd::{
     ClientError,
     methods::events::{
-        ERROR_NOTIFICATION, EVENT_NOTIFICATION, SUBSCRIBE, StreamError, decode_event,
+        ERROR_NOTIFICATION, EVENT_NOTIFICATION, SUBSCRIBE, StreamError, StreamWatermark,
+        WATERMARK_NOTIFICATION, decode_event,
     },
 };
 use serde_json::{Value, json};
@@ -35,13 +36,13 @@ pub(crate) enum StreamEnd {
 
 /// A connection-scoped event stream (the daemon, or a fake in tests).
 pub(crate) trait EventSource {
-    /// Stream events strictly after `after` into `deliver` until the stream ends
-    /// (`Ok`) or fails. `deliver` errors are fatal and must be returned as such.
+    /// Stream ordered events and watermarks strictly after `after` into `deliver`
+    /// until the stream ends (`Ok`) or fails. Delivery errors are fatal.
     fn stream(
         &mut self,
         after: Cursor,
         filter: &EventFilter,
-        deliver: &mut dyn FnMut(&EventEnvelope) -> Result<(), CliError>,
+        deliver: &mut dyn FnMut(&SubscriptionItem) -> Result<(), CliError>,
     ) -> Result<(), StreamEnd>;
 }
 
@@ -70,17 +71,27 @@ pub(crate) fn follow(
     loop {
         let mut progressed = false;
         let requested = acknowledged;
-        let outcome = source.stream(requested, filter, &mut |event| {
-            if event.is_durable() && event.cursor <= acknowledged {
-                return Ok(());
+        let outcome = source.stream(requested, filter, &mut |item| {
+            match item {
+                SubscriptionItem::Event(event) => {
+                    if event.is_durable() && event.cursor <= acknowledged {
+                        return Ok(());
+                    }
+                    emit(event).map_err(|error| {
+                        CliError::new(Exit::Failure, format!("cannot write events: {error}"))
+                    })?;
+                    if event.is_durable() {
+                        acknowledged = event.cursor;
+                    }
+                    progressed = true;
+                }
+                SubscriptionItem::Watermark(cursor) => {
+                    if *cursor > acknowledged {
+                        acknowledged = *cursor;
+                        progressed = true;
+                    }
+                }
             }
-            emit(event).map_err(|error| {
-                CliError::new(Exit::Failure, format!("cannot write events: {error}"))
-            })?;
-            if event.is_durable() {
-                acknowledged = event.cursor;
-            }
-            progressed = true;
             Ok(())
         });
         let reason = match outcome {
@@ -145,7 +156,7 @@ impl EventSource for DaemonSource {
         &mut self,
         after: Cursor,
         filter: &EventFilter,
-        deliver: &mut dyn FnMut(&EventEnvelope) -> Result<(), CliError>,
+        deliver: &mut dyn FnMut(&SubscriptionItem) -> Result<(), CliError>,
     ) -> Result<(), StreamEnd> {
         let mut client = connect_root(&self.root).map_err(classify)?;
         let mut subscription = client
@@ -160,7 +171,18 @@ impl EventSource for DaemonSource {
                             format!("daemon sent an invalid event: {error}"),
                         ))
                     })?;
-                    deliver(&event).map_err(StreamEnd::Fatal)?;
+                    deliver(&SubscriptionItem::Event(event)).map_err(StreamEnd::Fatal)?;
+                }
+                Ok(Some(notification)) if notification.method == WATERMARK_NOTIFICATION => {
+                    let watermark: StreamWatermark = serde_json::from_value(notification.params)
+                        .map_err(|error| {
+                            StreamEnd::Fatal(CliError::new(
+                                Exit::Failure,
+                                format!("daemon sent an invalid event watermark: {error}"),
+                            ))
+                        })?;
+                    deliver(&SubscriptionItem::Watermark(watermark.cursor))
+                        .map_err(StreamEnd::Fatal)?;
                 }
                 Ok(Some(notification)) if notification.method == ERROR_NOTIFICATION => {
                     return Err(StreamEnd::Fatal(stream_error(notification.params)));
@@ -215,7 +237,7 @@ mod tests {
             &mut self,
             after: Cursor,
             _filter: &EventFilter,
-            deliver: &mut dyn FnMut(&EventEnvelope) -> Result<(), CliError>,
+            deliver: &mut dyn FnMut(&SubscriptionItem) -> Result<(), CliError>,
         ) -> Result<(), StreamEnd> {
             self.requests.push(after.get());
             let (count, end) = self.sessions.pop_front().expect("scripted session");
@@ -232,7 +254,7 @@ mod tests {
                 })
                 .take(count);
             for event in duplicate.chain(newer) {
-                deliver(event).map_err(StreamEnd::Fatal)?;
+                deliver(&SubscriptionItem::Event(event.clone())).map_err(StreamEnd::Fatal)?;
             }
             match end {
                 End::Transient => Err(StreamEnd::Transient("daemon closed the connection".into())),
@@ -376,6 +398,194 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    struct ScriptedSource {
+        sessions: VecDeque<(Vec<SubscriptionItem>, End)>,
+        requests: Vec<u64>,
+        delivered: usize,
+    }
+
+    impl EventSource for ScriptedSource {
+        fn stream(
+            &mut self,
+            after: Cursor,
+            _filter: &EventFilter,
+            deliver: &mut dyn FnMut(&SubscriptionItem) -> Result<(), CliError>,
+        ) -> Result<(), StreamEnd> {
+            self.requests.push(after.get());
+            let (items, end) = self.sessions.pop_front().expect("scripted session");
+            for item in items {
+                deliver(&item).map_err(StreamEnd::Fatal)?;
+                self.delivered += 1;
+            }
+            match end {
+                End::Transient => Err(StreamEnd::Transient("daemon restarted".into())),
+                End::Ended => Ok(()),
+                End::Fatal => Err(StreamEnd::Fatal(CliError::new(Exit::Cancelled, "script done"))),
+            }
+        }
+    }
+
+    #[test]
+    fn ephemeral_cursors_and_stale_watermarks_never_move_the_resume_cursor() {
+        let mut source = ScriptedSource {
+            sessions: VecDeque::from([
+                (vec![
+                    SubscriptionItem::Watermark(Cursor::new(5)),
+                    SubscriptionItem::Event(envelope(99, false)),
+                ], End::Transient),
+                (vec![SubscriptionItem::Watermark(Cursor::new(4))], End::Transient),
+                (Vec::new(), End::Fatal),
+            ]),
+            requests: Vec::new(),
+            delivered: 0,
+        };
+        let mut printed = Vec::new();
+        let mut clock = FakeClock::default();
+        let error = follow(
+            &mut source,
+            Cursor::new(5),
+            &EventFilter::all(),
+            &mut |event| {
+                printed.push(event.cursor.get());
+                Ok(())
+            },
+            &mut clock,
+        ).unwrap_err();
+        assert_eq!(error.exit, Exit::Cancelled);
+        assert_eq!(source.requests, [5, 5, 5]);
+        assert_eq!(printed, [99]);
+        assert_eq!(clock.sleeps, [INITIAL_BACKOFF, INITIAL_BACKOFF * 2]);
+    }
+
+    #[test]
+    fn watermarks_resume_without_printing_or_regressing_and_keep_ephemeral_events() {
+        let mut source = ScriptedSource {
+            sessions: VecDeque::from([
+                (vec![
+                    SubscriptionItem::Event(envelope(1, true)),
+                    SubscriptionItem::Watermark(Cursor::new(4)),
+                    SubscriptionItem::Watermark(Cursor::new(3)),
+                    SubscriptionItem::Event(envelope(4, false)),
+                ], End::Transient),
+                (vec![
+                    SubscriptionItem::Event(envelope(5, true)),
+                    SubscriptionItem::Watermark(Cursor::new(8)),
+                ], End::Fatal),
+            ]),
+            requests: Vec::new(),
+            delivered: 0,
+        };
+        let mut printed = Vec::new();
+        let mut clock = FakeClock::default();
+        let error = follow(
+            &mut source,
+            Cursor::ZERO,
+            &EventFilter::all().with_kind("task").with_kind("agent.delta"),
+            &mut |event| {
+                printed.push((event.cursor.get(), event.is_durable()));
+                Ok(())
+            },
+            &mut clock,
+        ).unwrap_err();
+        assert_eq!(error.exit, Exit::Cancelled);
+        assert_eq!(printed, [(1, true), (4, false), (5, true)]);
+        assert_eq!(source.requests, [0, 4]);
+        assert_eq!(clock.sleeps, [INITIAL_BACKOFF]);
+    }
+
+    #[test]
+    fn a_failed_matching_write_prevents_acknowledging_a_later_watermark() {
+        let mut source = ScriptedSource {
+            sessions: VecDeque::from([(
+                vec![
+                    SubscriptionItem::Event(envelope(1, true)),
+                    SubscriptionItem::Watermark(Cursor::new(8)),
+                ],
+                End::Transient,
+            )]),
+            requests: Vec::new(),
+            delivered: 0,
+        };
+        let mut clock = FakeClock::default();
+        let error = follow(
+            &mut source,
+            Cursor::ZERO,
+            &EventFilter::all(),
+            &mut |_| Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")),
+            &mut clock,
+        ).unwrap_err();
+        assert_eq!(error.exit, Exit::Failure);
+        assert_eq!(source.delivered, 0);
+        assert_eq!(source.requests, [0]);
+        assert!(clock.sleeps.is_empty());
+    }
+
+    #[test]
+    fn filtered_follow_reconnects_after_consumed_retained_progress() {
+        struct LogSource {
+            log: aidex_events::EventLog,
+            requests: Vec<u64>,
+        }
+        impl EventSource for LogSource {
+            fn stream(
+                &mut self,
+                after: Cursor,
+                filter: &EventFilter,
+                deliver: &mut dyn FnMut(&SubscriptionItem) -> Result<(), CliError>,
+            ) -> Result<(), StreamEnd> {
+                self.requests.push(after.get());
+                let mut subscription = self.log.subscribe(filter.clone(), after).map_err(|error| {
+                    StreamEnd::Fatal(CliError::new(Exit::NotFound, error.to_string()))
+                })?;
+                let range = if self.requests.len() == 1 { 1..=10 } else { 11..=11 };
+                for cursor in range {
+                    let event = envelope(cursor, true);
+                    let scope = if cursor == 1 || cursor == 11 {
+                        event.scope
+                    } else {
+                        aidex_events::EventScope::workspace(aidex_core::EntityId::new("other").unwrap())
+                    };
+                    self.log.append(scope, event.event).unwrap();
+                    let item = subscription.try_next().unwrap().expect("event or watermark");
+                    deliver(&item).map_err(StreamEnd::Fatal)?;
+                }
+                assert_eq!(subscription.try_next().unwrap(), None);
+                if self.requests.len() == 1 {
+                    Err(StreamEnd::Transient("daemon restarted".into()))
+                } else {
+                    Err(StreamEnd::Fatal(CliError::new(Exit::Cancelled, "script done")))
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut source = LogSource {
+            log: aidex_events::EventLog::open(
+                root.path().join("events.sqlite3"),
+                aidex_events::RetentionPolicy::max_events(2),
+            ).unwrap(),
+            requests: Vec::new(),
+        };
+        let filter = EventFilter::for_workspace(aidex_core::EntityId::new("ws").unwrap());
+        let mut printed = Vec::new();
+        let error = follow(
+            &mut source,
+            Cursor::ZERO,
+            &filter,
+            &mut |event| {
+                printed.push(event.cursor.get());
+                Ok(())
+            },
+            &mut FakeClock::default(),
+        ).unwrap_err();
+        assert_eq!(error.exit, Exit::Cancelled);
+        assert_eq!(source.requests, [0, 10]);
+        assert_eq!(printed, [1, 11]);
+        assert!(matches!(
+            source.log.subscribe(filter, Cursor::new(1)),
+            Err(aidex_events::EventError::CursorExpired { .. })
+        ));
     }
 
     #[test]

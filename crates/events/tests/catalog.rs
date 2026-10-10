@@ -4,7 +4,7 @@ mod common;
 
 use aidex_events::{
     Cursor, ENVELOPE_VERSION, EVENT_NAMES, EventEnvelope, EventError, EventFilter, EventKind,
-    EventScope, MAX_EVENT_BYTES, MessageRole, RetentionPolicy, redact,
+    EventScope, MAX_EVENT_BYTES, MessageRole, RetentionPolicy, SubscriptionItem, redact,
 };
 use common::{id, samples, session_scope, temp_log, ws};
 use serde_json::{Value, json};
@@ -159,7 +159,7 @@ fn every_text_bearing_kind_is_redacted_before_storage_and_delivery() {
                 .next_timeout(std::time::Duration::from_secs(5))
                 .unwrap()
                 .unwrap();
-            assert_eq!(delivered, returned);
+            assert_eq!(delivered, SubscriptionItem::Event(returned.clone()));
             let wire = serde_json::to_value(&returned).unwrap();
             assert!(leaks(&wire).is_empty(), "{} leaked {wire}", returned.name());
             if has_text {

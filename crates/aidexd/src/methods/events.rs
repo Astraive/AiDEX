@@ -3,10 +3,12 @@
 //! - `events.replay {after?, filter?, limit?}` → one [`ReplayPage`] strictly after `after`.
 //! - `events.latest {}` → `{latest_cursor, oldest_cursor}`.
 //! - `events.subscribe {after?, filter?}` (stream) → `events.event` notifications carrying
-//!   [`EventEnvelope`]s in cursor order: persisted history first, then live events. If the
-//!   stream cannot continue without a gap it sends one `events.error` and ends.
-//!   A client that is too slow is disconnected by the transport (`slow_consumer`) and
-//!   resubscribes after the last cursor it processed.
+//!   [`EventEnvelope`]s and `events.watermark` notifications carrying [`StreamWatermark`],
+//!   in order: persisted history first, then live events. A watermark consumes
+//!   filtered-out durable events only after preceding matching events. If the stream
+//!   cannot continue without a gap it sends one `events.error` and ends.
+//!   A slow client is disconnected (`slow_consumer`) and resubscribes after its
+//!   last processed durable event or watermark.
 
 use crate::{
     errors::RpcError,
@@ -15,7 +17,7 @@ use crate::{
     services::Services,
     stream::NotificationSink,
 };
-use aidex_events::{Cursor, EventError, EventFilter, MAX_PAGE_SIZE, Subscription};
+use aidex_events::{Cursor, EventError, EventFilter, MAX_PAGE_SIZE, Subscription, SubscriptionItem};
 /// Result of `events.replay`; `events.event` notifications carry an [`EventEnvelope`].
 pub use aidex_events::{EventEnvelope, ReplayPage};
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,8 @@ pub const LATEST: &str = "events.latest";
 pub const SUBSCRIBE: &str = "events.subscribe";
 /// Stream notification carrying one envelope.
 pub const EVENT_NOTIFICATION: &str = "events.event";
+/// Stream notification carrying consumed durable progress, not an event.
+pub const WATERMARK_NOTIFICATION: &str = "events.watermark";
 /// Final stream notification when the subscription cannot continue.
 pub const ERROR_NOTIFICATION: &str = "events.error";
 
@@ -81,6 +85,15 @@ pub struct Subscribed {
     pub after: Cursor,
     /// Newest durable cursor when the subscription was registered.
     pub latest_cursor: Cursor,
+}
+
+/// Payload of an ordered `events.watermark` notification.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StreamWatermark {
+    /// Every durable event through here matched and was sent earlier, or did not
+    /// match this subscription's filter. Acknowledge after preceding deliveries.
+    pub cursor: Cursor,
 }
 
 /// Payload of an `events.error` notification.
@@ -161,20 +174,29 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     })
 }
 
-/// Forward envelopes until the client unsubscribes or disconnects. Dropping the
+/// Forward ordered events and watermarks until the client unsubscribes or disconnects. Dropping the
 /// sink afterwards ends the stream with `aidex.unsubscribed`.
 fn pump(mut subscription: Subscription, sink: &NotificationSink) {
     while !sink.is_closed() {
         match subscription.next_timeout(STREAM_POLL) {
-            Ok(Some(envelope)) => {
-                let data = match serde_json::to_value(&envelope) {
+            Ok(Some(item)) => {
+                let (method, data) = match item {
+                    SubscriptionItem::Event(envelope) => {
+                        (EVENT_NOTIFICATION, serde_json::to_value(envelope))
+                    }
+                    SubscriptionItem::Watermark(cursor) => (
+                        WATERMARK_NOTIFICATION,
+                        serde_json::to_value(StreamWatermark { cursor }),
+                    ),
+                };
+                let data = match data {
                     Ok(data) => data,
                     Err(error) => {
                         notify_error(sink, "internal", error.to_string(), None);
                         return;
                     }
                 };
-                if sink.notify(EVENT_NOTIFICATION, data).is_err() {
+                if sink.notify(method, data).is_err() {
                     return;
                 }
             }
