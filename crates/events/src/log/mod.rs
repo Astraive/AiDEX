@@ -34,7 +34,7 @@ pub const DEFAULT_MAX_EVENTS: u64 = 100_000;
 pub struct RetentionPolicy {
     /// Keep at most this many of the newest events.
     pub max_events: Option<u64>,
-    /// Remove events older than this (by `occurred_at`).
+    /// Remove only the leading run of events older than this (by `occurred_at`).
     pub max_age: Option<Duration>,
 }
 

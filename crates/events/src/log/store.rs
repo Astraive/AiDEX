@@ -114,16 +114,20 @@ pub(crate) fn prune(
     }
     if let Some(max_age) = retention.max_age {
         let cutoff = now_ms.saturating_sub(duration_ms(max_age));
-        let oldest_expired: Option<i64> = connection
+        // Count retention may already remove a fresh row. Beyond that boundary,
+        // age retention must stop at the first fresh row, regardless of clock order.
+        let first_fresh: Option<i64> = connection
             .query_row(
-                "SELECT MAX(cursor) FROM event_log WHERE occurred_ms < ?1",
-                [cutoff],
+                "SELECT MIN(cursor) FROM event_log WHERE cursor > ?2 AND occurred_ms >= ?1",
+                params![cutoff, Cursor::new(boundary).to_sql()?],
                 |row| row.get(0),
             )
             .map_err(storage)?;
-        if let Some(cursor) = oldest_expired {
-            boundary = boundary.max(Cursor::from_sql(cursor)?.get());
-        }
+        let age_boundary = match first_fresh {
+            Some(cursor) => Cursor::from_sql(cursor)?.get() - 1,
+            None => state.last_cursor.get(),
+        };
+        boundary = boundary.max(age_boundary);
     }
     if boundary <= state.pruned_through.get() {
         return Ok(0);

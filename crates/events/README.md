@@ -61,6 +61,9 @@ session_id, kinds }`, `RetentionPolicy { max_events, max_age }`, `ReplayPage`,
   subscribing after a cursor whose successors were removed fails with
   `CursorExpired { requested, oldest_available }`; a cursor the log never assigned
   fails with `CursorAhead`.
+  Age retention stops at the first fresh retained event, even when wall-clock
+  timestamps run backwards; expired events after it remain until the leading
+  history expires or count retention removes it.
 - **Replay exactness.** `replay(filter, after, limit)` returns matching events with
   cursor `> after` in cursor order. `next_cursor` is where to resume; without
   `has_more` it is the latest cursor, so filtered readers skip ahead.
