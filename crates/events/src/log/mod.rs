@@ -116,7 +116,6 @@ impl EventLog {
         retention.validate()?;
         let path = path.as_ref().to_path_buf();
         let mut connection = schema::open_connection(&path)?;
-        schema::prepare(&mut connection)?;
         let state = {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)

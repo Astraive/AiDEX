@@ -84,7 +84,8 @@ session_id, kinds }`, `RetentionPolicy { max_events, max_age }`, `ReplayPage`,
   and unknown envelope versions are rejected. Envelope version 2 (PR #40's `Event`
   record was version 1).
 - **Schema safety.** A `schema_version` table records schema 2; newer or unknown
-  schemas and non-event databases are refused untouched. PR #40's
+  schemas and non-event databases are refused untouched, before enabling WAL.
+  PR #40's
   `events(workspace_id, sequence, session_id, body)` table is migrated in place in
   one transaction (rows imported in their original write order, then the old table
   is dropped); a corrupt row fails the migration and leaves the database unchanged.

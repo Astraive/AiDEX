@@ -73,7 +73,7 @@ pub(crate) fn refuse_symlinks(path: &Path) -> Result<(), EventError> {
     Ok(())
 }
 
-/// Open read-write with WAL, full synchronous commits, and a busy timeout.
+/// Open, prepare the schema, then enable WAL with full synchronous commits.
 pub(crate) fn open_connection(path: &Path) -> Result<Connection, EventError> {
     refuse_symlinks(path)?;
     match path.parent() {
@@ -85,10 +85,11 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection, EventError> {
         }
         _ => {}
     }
-    let connection = Connection::open(path).map_err(storage)?;
+    let mut connection = Connection::open(path).map_err(storage)?;
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(storage)?;
+    prepare(&mut connection)?;
     connection
         .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         .map_err(storage)?;

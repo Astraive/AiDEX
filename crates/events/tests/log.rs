@@ -350,8 +350,9 @@ fn newer_schemas_and_foreign_databases_are_refused() {
     drop(EventLog::open(&path, RetentionPolicy::UNBOUNDED).unwrap());
     rusqlite::Connection::open(&path)
         .unwrap()
-        .execute("UPDATE schema_version SET version = 99", [])
+        .execute_batch("PRAGMA journal_mode=DELETE; UPDATE schema_version SET version = 99;")
         .unwrap();
+    let newer_before = std::fs::read(&path).unwrap();
     assert_eq!(
         EventLog::open(&path, RetentionPolicy::UNBOUNDED).err(),
         Some(EventError::IncompatibleSchema {
@@ -359,16 +360,26 @@ fn newer_schemas_and_foreign_databases_are_refused() {
             supported: 2
         })
     );
+    assert_eq!(std::fs::read(&path).unwrap(), newer_before);
 
     let foreign = dir.path().join("other.sqlite3");
     rusqlite::Connection::open(&foreign)
         .unwrap()
         .execute_batch("CREATE TABLE kv (key TEXT, value TEXT);")
         .unwrap();
+    let foreign_before = std::fs::read(&foreign).unwrap();
     assert!(matches!(
         EventLog::open(&foreign, RetentionPolicy::UNBOUNDED),
         Err(EventError::Migration(_))
     ));
+    assert_eq!(std::fs::read(&foreign).unwrap(), foreign_before);
+    for database in [&path, &foreign] {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = database.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            assert!(!std::path::Path::new(&sidecar).exists());
+        }
+    }
     // The foreign database was not modified.
     let tables: i64 = rusqlite::Connection::open(&foreign)
         .unwrap()
