@@ -90,7 +90,9 @@ session_id, kinds }`, `RetentionPolicy { max_events, max_age }`, `ReplayPage`,
   one transaction (rows imported in their original write order, then the old table
   is dropped); a corrupt row fails the migration and leaves the database unchanged.
   `import_legacy` imports a separate PR #40 file read-only, once (recorded in
-  `event_migrations`), and only into an empty log. Symlinked database paths
+  `event_migrations`), and only into an empty log. Import retention and its cursor
+  boundary are committed with the imported rows, so the configured bound applies
+  immediately. Symlinked database paths
   (including `-wal`/`-shm`/`-journal` sidecars) are refused.
 
 ## Migration of PR #40 records

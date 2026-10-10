@@ -336,3 +336,51 @@ fn a_separate_v1_file_is_imported_once_read_only() {
         Err(aidex_events::EventError::Migration(_))
     ));
 }
+
+#[test]
+fn separate_import_applies_retention_before_returning() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy_path = dir.path().join("legacy.sqlite");
+    write_v1_database(&legacy_path, V1_ROWS);
+    let path = db_path(dir.path());
+    let log = EventLog::open(&path, RetentionPolicy::max_events(3)).unwrap();
+    let imported = V1_ROWS.len() as u64;
+    assert_eq!(
+        log.import_legacy(&legacy_path).unwrap(),
+        LegacyImport::Imported { events: imported }
+    );
+    assert_eq!(log.latest_cursor().unwrap(), Cursor::new(imported));
+    assert_eq!(log.oldest_cursor().unwrap(), Some(Cursor::new(imported - 2)));
+    assert!(matches!(
+        log.replay(&EventFilter::all(), Cursor::ZERO, 256),
+        Err(aidex_events::EventError::CursorExpired { .. })
+    ));
+    let page = log
+        .replay(&EventFilter::all(), Cursor::new(imported - 3), 256)
+        .unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .map(|event| event.cursor.get())
+            .collect::<Vec<_>>(),
+        [imported - 2, imported - 1, imported]
+    );
+    // Retention and its cursor boundary are already visible to another connection.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let (count, pruned): (u64, u64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM event_log), pruned_through FROM event_log_state",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((count, pruned), (3, imported - 3));
+    let recorded: u64 = connection
+        .query_row(
+            "SELECT events FROM event_migrations WHERE name = 'v1-file-import'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, imported);
+}

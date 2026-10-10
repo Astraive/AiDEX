@@ -11,7 +11,10 @@ use std::{
 use aidex_core::Timestamp;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 
-use super::store::{self, State};
+use super::{
+    RetentionPolicy,
+    store::{self, State},
+};
 use crate::{EventError, catalog::import_v1_body, error::storage, sanitize};
 
 /// Current schema. Version 1 is PR #40's `events(workspace_id, sequence, session_id, body)`.
@@ -252,6 +255,7 @@ pub enum LegacyImport {
 pub(crate) fn import_file(
     connection: &mut Connection,
     bodies: &[String],
+    retention: &RetentionPolicy,
 ) -> Result<(LegacyImport, State), EventError> {
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -265,7 +269,9 @@ pub(crate) fn import_file(
     }
     let events = import_v1(&tx, bodies)?;
     record_migration(&tx, FILE_IMPORT_MIGRATION, events)?;
-    let state = store::read_state(&tx)?;
+    let mut state = store::read_state(&tx)?;
+    store::prune(&tx, retention, &mut state, Timestamp::now().unix_millis())?;
+    store::write_state(&tx, &state)?;
     tx.commit().map_err(storage)?;
     Ok((LegacyImport::Imported { events }, state))
 }
