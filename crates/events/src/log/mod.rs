@@ -288,11 +288,11 @@ impl EventLog {
     /// Runs at most once per log and only while this log is empty; the v1 file is
     /// never modified. Events are imported in their original order with fresh
     /// cursors and the import time as `occurred_at`.
+    /// Already-imported and nonempty targets skip without opening the v1 file.
     pub fn import_legacy(&self, legacy_path: &Path) -> Result<LegacyImport, EventError> {
-        let bodies = schema::read_v1_file(legacy_path)?;
         let mut inner = self.lock();
         let (outcome, state) =
-            schema::import_file(&mut inner.connection, &bodies, &self.shared.retention)?;
+            schema::import_file(&mut inner.connection, legacy_path, &self.shared.retention)?;
         inner.last_cursor = state.last_cursor;
         Ok(outcome)
     }

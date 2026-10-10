@@ -251,10 +251,10 @@ pub enum LegacyImport {
     SkippedNonEmpty,
 }
 
-/// Import `bodies` into an empty log once, recorded by a migration marker.
+/// Check the target state before reading and importing a separate v1 file.
 pub(crate) fn import_file(
     connection: &mut Connection,
-    bodies: &[String],
+    legacy_path: &Path,
     retention: &RetentionPolicy,
 ) -> Result<(LegacyImport, State), EventError> {
     let tx = connection
@@ -267,7 +267,8 @@ pub(crate) fn import_file(
     if state.last_cursor.get() > 0 {
         return Ok((LegacyImport::SkippedNonEmpty, state));
     }
-    let events = import_v1(&tx, bodies)?;
+    let bodies = read_v1_file(legacy_path)?;
+    let events = import_v1(&tx, &bodies)?;
     record_migration(&tx, FILE_IMPORT_MIGRATION, events)?;
     let mut state = store::read_state(&tx)?;
     store::prune(&tx, retention, &mut state, Timestamp::now().unix_millis())?;

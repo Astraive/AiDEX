@@ -330,11 +330,52 @@ fn a_separate_v1_file_is_imported_once_read_only() {
     );
     assert_eq!(other.latest_cursor().unwrap(), Cursor::new(1));
 
-    // Something that is not a v1 log is refused.
+    // An empty target still refuses a source that is not a v1 log.
+    let empty =
+        EventLog::open(dir.path().join("empty.sqlite3"), RetentionPolicy::UNBOUNDED).unwrap();
     assert!(matches!(
-        other.import_legacy(&db_path(dir.path())),
+        empty.import_legacy(&db_path(dir.path())),
         Err(aidex_events::EventError::Migration(_))
     ));
+}
+
+#[test]
+fn skipped_imports_do_not_open_the_legacy_source() {
+    for rows in [V1_ROWS, &[][..]] {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.sqlite");
+        write_v1_database(&legacy_path, rows);
+        let path = db_path(dir.path());
+        let log = EventLog::open(&path, RetentionPolicy::UNBOUNDED).unwrap();
+        assert_eq!(
+            log.import_legacy(&legacy_path).unwrap(),
+            LegacyImport::Imported { events: rows.len() as u64 }
+        );
+        // Neither an invalid source nor a missing source is opened after the marker,
+        // including when the first import was empty and last_cursor is still zero.
+        fs::write(&legacy_path, b"no longer a database").unwrap();
+        assert_eq!(
+            log.import_legacy(&legacy_path).unwrap(),
+            LegacyImport::AlreadyImported
+        );
+        fs::remove_file(&legacy_path).unwrap();
+        drop(log);
+        let reopened = EventLog::open(&path, RetentionPolicy::UNBOUNDED).unwrap();
+        assert_eq!(
+            reopened.import_legacy(&legacy_path).unwrap(),
+            LegacyImport::AlreadyImported
+        );
+        let nonempty =
+            EventLog::open(dir.path().join("nonempty.sqlite3"), RetentionPolicy::UNBOUNDED)
+                .unwrap();
+        nonempty
+            .append(EventScope::global(), EventKind::DriveSafeToRemove {})
+            .unwrap();
+        assert_eq!(
+            nonempty.import_legacy(&legacy_path).unwrap(),
+            LegacyImport::SkippedNonEmpty
+        );
+    }
 }
 
 #[test]
