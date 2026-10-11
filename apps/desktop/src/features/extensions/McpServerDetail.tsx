@@ -1,106 +1,233 @@
-import { ActivityLog, InlineCode, KeyValueList, SectionHeader } from "@aidex/ui/components";
-import { KeyIcon, PlayIcon, RefreshIcon, XIcon } from "@aidex/ui/icons";
-import { Badge, Button, Stack, StatusIndicator, Text } from "@aidex/ui/primitives";
-import { useToast } from "../../app/providers/toast";
-import type { McpServer, ServerStatus } from "./sample";
+import { useState } from "react";
+import { CodeBlock, Notice, SectionHeader } from "@aidex/ui/components";
+import { Button, Card, Select, Stack, Text } from "@aidex/ui/primitives";
+import type { McpServerSummary } from "@aidex/client/dto/extensions";
+import { call } from "@aidex/client/rpc";
+import { toAidexError } from "@aidex/client/errors";
+import { useRpc } from "../../hooks/useRpc";
+import { permissionOptions } from "../agent-center/runtimeSelection";
+import { useExtensionAction } from "./useExtensionAction";
 
-type Props = { server: McpServer };
-
-const statusTone: Record<ServerStatus, "success" | "warning" | "neutral"> = {
-  Connected: "success",
-  "Needs authentication": "warning",
-  Stopped: "neutral",
-};
-
-export function ServerStatusIndicator({ status }: { status: ServerStatus }) {
-  return <StatusIndicator tone={statusTone[status]} label={status} />;
-}
-
-const preview = (action: string) => `Preview: ${action} will be available when AiDEX Core is connected.`;
-
-function ServerActions({ server }: Props) {
-  const notify = useToast();
-  if (server.status === "Stopped") {
-    return (
-      <Button variant="outline" icon={<PlayIcon />} onClick={() => notify(preview(`starting ${server.name}`))}>
-        Start
-      </Button>
-    );
-  }
+export function McpServerDetail({
+  server,
+  onEdit,
+  onChanged,
+}: {
+  server: McpServerSummary;
+  onEdit: () => void;
+  onChanged: () => void;
+}) {
+  const workspaces = useRpc("workspace.list");
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [profile, setProfile] = useState("supervised");
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string>();
+  const action = useExtensionAction(onChanged);
+  const scope = {
+    id: server.id,
+    workspace_id: workspaceId,
+    profile,
+    full_access: profile === "full_access",
+  };
+  const allowed = (grants: string[], value: string) =>
+    grants.includes("*") || grants.includes(value);
+  const canConnect =
+    !server.connecting &&
+    server.enabled &&
+    server.trusted &&
+    !!workspaceId &&
+    allowed(server.workspace_ids, workspaceId) &&
+    allowed(server.profiles, profile);
   return (
-    <>
-      <Button variant="outline" icon={<RefreshIcon />} onClick={() => notify(preview(`restarting ${server.name}`))}>
-        Restart
-      </Button>
-      <Button variant="ghost" icon={<XIcon />} onClick={() => notify(preview(`disconnecting ${server.name}`))}>
-        Disconnect
-      </Button>
-    </>
-  );
-}
-
-/** Detail pane for the selected MCP server: connection, tools, authentication, and recent log. */
-export function McpServerDetail({ server }: Props) {
-  const notify = useToast();
-  const headingId = `mcp-detail-${server.id}`;
-  const authenticated = !server.auth.required;
-
-  return (
-    <section aria-labelledby={headingId}>
-      <Stack gap={6}>
+    <Card padding="md">
+      <Stack gap={4}>
         <SectionHeader
-          title={<span id={headingId}>{server.name}</span>}
-          actions={
-            <Stack direction="row" gap={2}>
-              <ServerActions server={server} />
-            </Stack>
+          title={server.name}
+          meta={
+            server.connecting
+              ? "Connecting…"
+              : server.connected
+                ? "Connected"
+                : "Disconnected"
           }
         />
-        <KeyValueList
-          items={[
-            { label: "Status", value: <ServerStatusIndicator status={server.status} /> },
-            { label: "Transport", value: server.transport },
-            { label: server.transport === "HTTP" ? "URL" : "Command", value: <InlineCode>{server.endpoint}</InlineCode> },
+        {(cancelError ||
+          action.error ||
+          server.last_error ||
+          workspaces.error) && (
+          <Notice tone="danger">
+            {cancelError ??
+              action.error ??
+              server.last_error ??
+              workspaces.error?.message}
+          </Notice>
+        )}
+        {action.message && <Notice tone="success">{action.message}</Notice>}
+        <Text>
+          {server.transport.kind === "stdio"
+            ? `${server.transport.command} ${server.transport.args.join(" ")}`
+            : server.transport.url}
+        </Text>
+        <Text tone="muted">
+          Workspace grants: {server.workspace_ids.join(", ") || "none"} ·
+          Profiles: {server.profiles.join(", ") || "none"}
+        </Text>
+        <Select
+          label="Connection workspace"
+          disabled={action.busy || server.connecting}
+          value={workspaceId}
+          options={[
+            { value: "", label: "Choose a granted workspace" },
+            ...(workspaces.data?.workspaces ?? []).map((workspace) => ({
+              value: workspace.id,
+              label: workspace.name,
+              disabled:
+                workspace.availability.state !== "available" ||
+                !allowed(server.workspace_ids, workspace.id),
+            })),
           ]}
+          onChange={(event) => setWorkspaceId(event.target.value)}
         />
-        <Stack gap={3}>
-          <SectionHeader level={3} title="Exposed tools" meta={authenticated ? `${server.tools.length} tools` : "Not available"} />
-          {authenticated ? (
-            <Stack direction="row" gap={2} wrap>
-              {server.tools.map((tool) => (
-                <Badge key={tool} tone="neutral">
-                  {tool}
-                </Badge>
-              ))}
-            </Stack>
-          ) : (
-            <Text tone="muted">This server's tools are listed once you authenticate. Until then, agents can't use them.</Text>
-          )}
-        </Stack>
-        <Stack gap={3}>
-          <SectionHeader
-            level={3}
-            title="Authentication"
-            actions={
-              authenticated ? null : (
-                <Button
-                  variant="outline"
-                  icon={<KeyIcon />}
-                  onClick={() => notify(preview(`authenticating ${server.name} through the vault`))}
-                >
-                  Authenticate
-                </Button>
+        <Select
+          label="Connection permission profile"
+          disabled={action.busy || server.connecting}
+          value={profile}
+          options={permissionOptions.map((option) => ({
+            ...option,
+            disabled: !allowed(server.profiles, option.value),
+          }))}
+          onChange={(event) => setProfile(event.target.value)}
+        />
+        {profile === "full_access" && (
+          <Notice tone="warning">
+            Full access permits the MCP process to run as your current user.
+            Server grants still restrict which AiDEX sessions may call it.
+          </Notice>
+        )}
+        {!server.trusted && (
+          <Notice>
+            Trust and explicitly grant this server a workspace and permission
+            profile before connecting.
+          </Notice>
+        )}
+        <Stack direction="row" gap={2} wrap>
+          <Button
+            disabled={action.busy || !canConnect}
+            onClick={() =>
+              void action.act(
+                () => call("extensions.mcp.connect", scope),
+                "MCP connection requested.",
               )
             }
-          />
-          <StatusIndicator tone={authenticated ? "success" : "warning"} label={server.auth.status} />
-          <Text tone="muted">Secrets live in the encrypted AiDEX vault and are passed to the server only when it starts.</Text>
+          >
+            Connect
+          </Button>
+          <Button
+            variant="outline"
+            disabled={action.busy || !canConnect}
+            onClick={() =>
+              void action.act(
+                () => call("extensions.mcp.discover", scope),
+                "Tool discovery requested.",
+              )
+            }
+          >
+            Test and discover tools
+          </Button>
+          <Button
+            variant="outline"
+            disabled={action.busy || !canConnect}
+            onClick={() =>
+              void action.act(async () => {
+                await call("extensions.mcp.disconnect", { id: server.id });
+                await call("extensions.mcp.connect", scope);
+              }, "MCP restart requested.")
+            }
+          >
+            Restart
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={action.busy || !server.connected}
+            onClick={() =>
+              void action.act(
+                () => call("extensions.mcp.disconnect", { id: server.id }),
+                "MCP disconnected.",
+              )
+            }
+          >
+            Disconnect
+          </Button>
+          {(action.busy || server.connecting) && (
+            <Button
+              variant="outline"
+              disabled={cancelling}
+              onClick={() => {
+                setCancelling(true);
+                setCancelError(undefined);
+                void call("extensions.mcp.cancel", { id: server.id })
+                  .then(onChanged)
+                  .catch((caught) =>
+                    setCancelError(toAidexError(caught).message),
+                  )
+                  .finally(() => setCancelling(false));
+              }}
+            >
+              {cancelling ? "Cancelling…" : "Cancel connection request"}
+            </Button>
+          )}
+          {!server.plugin_id && (
+            <Button variant="ghost" onClick={onEdit}>
+              Edit configuration
+            </Button>
+          )}
         </Stack>
-        <Stack gap={3}>
-          <SectionHeader level={3} title="Recent log" />
-          <ActivityLog aria-label={`${server.name} log`} entries={server.log} />
-        </Stack>
+        {server.plugin_id && (
+          <Text tone="muted">
+            Configuration is managed by plugin {server.plugin_id}.
+          </Text>
+        )}
+        <Text tone="muted">
+          Secret references:{" "}
+          {Object.keys(server.secret_refs).join(", ") || "none"} · Catalog
+          revision: {server.catalog_revision || "not discovered"}
+        </Text>
+        <SectionHeader
+          title="Discovered tools"
+          meta={`${server.tools.length}`}
+        />
+        <Text tone="muted">
+          Native invocation tool: {server.call_tool_name}. Stdio calls require
+          full access; HTTPS calls use broker approval in supervised mode.
+        </Text>
+        {server.owner_session_id && (
+          <Text tone="muted">Connection owner: {server.owner_session_id}</Text>
+        )}
+        {server.tools.map((tool) => (
+          <details key={tool.name}>
+            <summary>
+              {tool.name} · {tool.description}
+            </summary>
+            <CodeBlock
+              title="Input schema"
+              language="json"
+              code={JSON.stringify(tool.inputSchema, null, 2)}
+            />
+            {tool.outputSchema != null && (
+              <CodeBlock
+                title="Output schema"
+                language="json"
+                code={JSON.stringify(tool.outputSchema, null, 2)}
+              />
+            )}
+          </details>
+        ))}
+        {!server.tools.length && (
+          <Text tone="muted">
+            Connect and discover to inspect the server's real tools.
+          </Text>
+        )}
       </Stack>
-    </section>
+    </Card>
   );
 }

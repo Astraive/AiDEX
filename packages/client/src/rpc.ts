@@ -11,6 +11,8 @@ import type {
   VaultLockResult,
   VaultStatus,
   VaultUnlockParams,
+  SecretMeta,
+  SecretSetParams,
 } from "./dto/vault";
 import type {
   SelectedWorkspace,
@@ -43,6 +45,38 @@ import type {
   InferenceStatus,
   ManagedModel,
 } from "./dto/inference";
+import type {
+  RuntimeConfig,
+  RuntimeDriver,
+  RuntimeDriverInfo,
+  RuntimeHealth,
+  RuntimeInstall,
+  RuntimeModel,
+  RuntimeAccountStatus,
+  RuntimeLoginStatus,
+  AuthStart,
+  AuthStatus,
+  ExecutionStatus,
+} from "./dto/runtimes";
+import type {
+  SkillSummary,
+  SkillDocument,
+  McpServerConfig,
+  McpServerSummary,
+  PluginManifest,
+  PluginSummary,
+  ExtensionScope,
+  CatalogSnapshot,
+  MarketplaceCatalog,
+} from "./dto/extensions";
+import type { SearchProvider, WebStatus } from "./dto/web";
+import type {
+  UpdateStatus,
+  UpdateSourceParams,
+  CheckReport,
+  ApplyReport,
+  RollbackReport,
+} from "./dto/updates";
 
 /**
  * Daemon methods the apps use, with their params and results. Add an entry when a screen needs a
@@ -50,6 +84,148 @@ import type {
  * `events.subscribe` go through `subscribe`.
  */
 export type RpcMethods = {
+  "update.status": { params: undefined; result: UpdateStatus };
+  "update.check": { params: UpdateSourceParams; result: CheckReport };
+  "update.apply": { params: UpdateSourceParams; result: ApplyReport };
+  "update.rollback": {
+    params: { allow_unsigned?: boolean } | undefined;
+    result: RollbackReport;
+  };
+  "network.status": {
+    params: undefined;
+    result: { offline: boolean; network: "online" | "offline" };
+  };
+  "network.offline": {
+    params: { enabled: boolean };
+    result: { offline: boolean; network: "online" | "offline" };
+  };
+  "runtime.account.status": {
+    params: { id: string };
+    result: RuntimeAccountStatus;
+  };
+  "runtime.profile.import": {
+    params: { id: string; source: string };
+    result: RuntimeAccountStatus;
+  };
+  "runtime.login.start": { params: { id: string }; result: RuntimeLoginStatus };
+  "runtime.login.status": {
+    params: { id: string; flow_id: string };
+    result: RuntimeLoginStatus;
+  };
+  "runtime.login.cancel": {
+    params: { id: string; flow_id: string };
+    result: RuntimeLoginStatus;
+  };
+  "runtime.login.logout": {
+    params: { id: string };
+    result: RuntimeAccountStatus;
+  };
+  "extensions.marketplace.list": {
+    params: undefined;
+    result: MarketplaceCatalog;
+  };
+  "extensions.marketplace.install": {
+    params: {
+      id: string;
+      version: string;
+      package_digest: string;
+      trusted: boolean;
+      workspace_ids: string[];
+      profiles: string[];
+    };
+    result: PluginSummary;
+  };
+  "web.status": { params: undefined; result: WebStatus };
+  "web.configure": {
+    params: { provider: SearchProvider; enabled: boolean; api_key?: string };
+    result: WebStatus;
+  };
+  "web.disconnect": { params: undefined; result: WebStatus };
+  "extensions.skills.list": { params: undefined; result: SkillSummary[] };
+  "extensions.skills.read": { params: { id: string }; result: SkillDocument };
+  "extensions.skills.save": {
+    params: { id: string; content: string; expected_digest?: string };
+    result: SkillSummary;
+  };
+  "extensions.skills.import": {
+    params: {
+      content: string;
+      trusted: boolean;
+      workspace_ids: string[];
+      profiles: string[];
+    };
+    result: SkillSummary;
+  };
+  "extensions.skills.enable": {
+    params: { id: string; enabled: boolean };
+    result: SkillSummary;
+  };
+  "extensions.skills.remove": {
+    params: { id: string };
+    result: { removed: boolean };
+  };
+  "extensions.plugins.list": { params: undefined; result: PluginSummary[] };
+  "extensions.plugins.install": {
+    params: { manifest: PluginManifest; files: Record<string, string> };
+    result: PluginSummary;
+  };
+  "extensions.plugins.enable": {
+    params: { id: string; enabled: boolean };
+    result: PluginSummary;
+  };
+  "extensions.plugins.remove": {
+    params: { id: string };
+    result: { removed: boolean };
+  };
+  "extensions.mcp.list": { params: undefined; result: McpServerSummary[] };
+  "extensions.mcp.upsert": {
+    params: { config: McpServerConfig };
+    result: McpServerSummary;
+  };
+  "extensions.mcp.remove": {
+    params: { id: string };
+    result: { removed: boolean };
+  };
+  "extensions.mcp.connect": {
+    params: ExtensionScope & { id: string };
+    result: McpServerSummary;
+  };
+  "extensions.mcp.discover": {
+    params: ExtensionScope & { id: string };
+    result: McpServerSummary;
+  };
+  "extensions.mcp.disconnect": {
+    params: { id: string };
+    result: McpServerSummary;
+  };
+  "extensions.mcp.cancel": { params: { id: string }; result: McpServerSummary };
+  "extensions.catalog": { params: ExtensionScope; result: CatalogSnapshot };
+  "runtime.catalog": { params: undefined; result: RuntimeDriverInfo[] };
+  "runtime.list": { params: undefined; result: { runtimes: RuntimeConfig[] } };
+  "runtime.config.get": { params: { id: string }; result: RuntimeConfig };
+  "runtime.config.save": { params: RuntimeConfig; result: RuntimeConfig };
+  "runtime.add": { params: RuntimeConfig; result: RuntimeConfig };
+  "runtime.update": { params: RuntimeConfig; result: RuntimeConfig };
+  "runtime.remove": { params: { id: string }; result: { removed: boolean } };
+  "runtime.health": { params: { id: string }; result: RuntimeHealth };
+  "runtime.models": {
+    params: { id: string };
+    result: { models: RuntimeModel[] };
+  };
+  "runtime.install": {
+    params: { driver: RuntimeDriver; source?: string };
+    result: RuntimeInstall;
+  };
+  "runtime.auth.start": { params: { id: string }; result: AuthStart };
+  "runtime.auth.status": {
+    params: { id: string; flow_id?: string };
+    result: AuthStatus;
+  };
+  "runtime.auth.cancel": {
+    params: { id: string; flow_id: string };
+    result: AuthStatus;
+  };
+  "execution.status": { params: undefined; result: ExecutionStatus };
   "inference.catalog": { params: undefined; result: InferenceCatalog };
   "inference.status": { params: undefined; result: InferenceStatus };
   "inference.import": {
@@ -105,8 +281,14 @@ export type RpcMethods = {
     result: { workspace: Workspace; deleted_data: boolean };
   };
   "conversation.list": {
-    params: undefined;
-    result: { sessions: SessionSummary[] };
+    params: { offset?: number; limit?: number } | undefined;
+    result: {
+      sessions: SessionSummary[];
+      total_sessions: number;
+      offset: number;
+      next_offset: number | null;
+      truncated: boolean;
+    };
   };
   "conversation.create": { params: SessionConfig; result: SessionDetail };
   "conversation.get": {
@@ -133,7 +315,13 @@ export type RpcMethods = {
   };
   "checkpoint.list": {
     params: { session_id: string; offset?: number; limit?: number };
-    result: { checkpoints: Checkpoint[]; total_checkpoints: number };
+    result: {
+      checkpoints: Checkpoint[];
+      total_checkpoints: number;
+      offset: number;
+      next_offset: number | null;
+      truncated: boolean;
+    };
   };
   "checkpoint.compare": {
     params: { session_id: string; id: string };
@@ -167,8 +355,19 @@ export type RpcMethods = {
   "run.cancel": { params: { id: string }; result: Run };
   "run.resume": { params: { id: string }; result: Run };
   "approval.list": {
-    params: { run_id?: string };
-    result: { approvals: Approval[] };
+    params: {
+      run_id?: string;
+      status?: "pending" | "approved" | "denied" | "expired";
+      offset?: number;
+      limit?: number;
+    };
+    result: {
+      approvals: Approval[];
+      total_approvals: number;
+      offset: number;
+      next_offset: number | null;
+      truncated: boolean;
+    };
   };
   "approval.respond": {
     params: {
@@ -204,8 +403,17 @@ export type RpcMethods = {
     result: { provider_id: string; status: string; message?: string };
   };
   "vault.secret.set": {
-    params: { name: string; value: string; consumers: string[]; kind?: string };
-    result: unknown;
+    params: SecretSetParams;
+    result: SecretMeta;
+  };
+  "vault.secret.list": { params: undefined; result: { secrets: SecretMeta[] } };
+  "vault.secret.delete": {
+    params: { name: string };
+    result: { deleted: SecretMeta };
+  };
+  "vault.passphrase.change": {
+    params: { old_passphrase?: string; new_passphrase: string };
+    result: { changed: boolean };
   };
   "daemon.status": { params: undefined; result: DaemonStatus };
   "daemon.ping": { params: undefined; result: { pong: true } };

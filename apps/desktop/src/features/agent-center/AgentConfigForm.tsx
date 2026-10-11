@@ -1,101 +1,166 @@
-import { useRef, useState, type FormEvent } from "react";
-import { SectionHeader } from "@aidex/ui/components";
-import { RefreshIcon } from "@aidex/ui/icons";
-import { Button, Divider, Grid, Select, Stack, TextArea } from "@aidex/ui/primitives";
-import { useToast } from "../../app/providers/toast";
-import { modelOptions } from "../../lib/sample/models";
-import { fallbackModelOptions, hasErrors, validateConfig } from "./agentConfig";
-import { HarnessSection } from "./HarnessSection";
-import { PermissionsSection } from "./PermissionsSection";
-import type { AgentConfig, SampleAgent } from "./sample";
+import { useState, type FormEvent } from "react";
+import { Notice, SectionHeader } from "@aidex/ui/components";
+import {
+  Button,
+  Grid,
+  Select,
+  Stack,
+  TextArea,
+  TextField,
+} from "@aidex/ui/primitives";
+import { toAidexError } from "@aidex/client/errors";
+import { usePreferences } from "../../app/providers/preferences";
+import { useRpc } from "../../hooks/useRpc";
+import { permissionOptions } from "./runtimeSelection";
+import { SkillSelection } from "../extensions/SkillSelection";
 
-type Props = { agent: SampleAgent };
-
-/**
- * Editable copy of an agent's settings. Mount with `key={agent.id}` so switching agents starts from that agent's
- * defaults. Nothing is persisted: Save explains that Core is needed, Reset restores the sample defaults.
- */
-export function AgentConfigForm({ agent }: Props) {
-  const notify = useToast();
-  const [config, setConfig] = useState<AgentConfig>(agent.config);
-  const [showErrors, setShowErrors] = useState(false);
-  const formRef = useRef<HTMLFormElement>(null);
-  const errors = showErrors ? validateConfig(config) : {};
-
-  const update = <Key extends keyof AgentConfig>(key: Key, value: AgentConfig[Key]) =>
-    setConfig((current) => ({ ...current, [key]: value }));
-
-  const save = (event: FormEvent<HTMLFormElement>) => {
+export function AgentConfigForm() {
+  const preferences = usePreferences();
+  const models = useRpc("model.list");
+  const skills = useRpc("extensions.skills.list");
+  const [config, setConfig] = useState(() => ({ ...preferences.settings }));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [saved, setSaved] = useState(false);
+  const options =
+    models.data?.models
+      .filter((model) => model.capabilities.chat)
+      .map((model) => ({
+        value: `${model.model.provider_id}/${model.model.model_id}`,
+        label: model.display_name,
+      })) ?? [];
+  const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (hasErrors(validateConfig(config))) {
-      setShowErrors(true);
-      // Errors render on the next commit; then move focus to the first invalid field, as the vault form does.
-      requestAnimationFrame(() => formRef.current?.querySelector<HTMLElement>("[aria-invalid='true']")?.focus());
-      return;
+    setBusy(true);
+    setError(undefined);
+    setSaved(false);
+    try {
+      if (
+        !Number.isInteger(config.max_steps) ||
+        config.max_steps < 1 ||
+        config.max_steps > 128 ||
+        !Number.isInteger(config.max_tokens) ||
+        config.max_tokens < 1 ||
+        config.max_tokens > 32768
+      )
+        throw new Error("Use 1–128 steps and 1–32768 output tokens.");
+      await preferences.updateSettings({
+        model_id: config.model_id,
+        instructions: config.instructions,
+        skill_ids: config.skill_ids ?? [],
+        fallback_model: config.fallback_model,
+        permission_mode: config.permission_mode,
+        max_steps: config.max_steps,
+        max_tokens: config.max_tokens,
+      });
+      setSaved(true);
+    } catch (caught) {
+      setError(toAidexError(caught).message);
+    } finally {
+      setBusy(false);
     }
-    setShowErrors(false);
-    notify(`Preview: saving settings for ${agent.name} will be available when AiDEX Core is connected.`);
   };
-
-  const reset = () => {
-    setConfig(agent.config);
-    setShowErrors(false);
-    notify(`Restored the default settings for ${agent.name}.`);
-  };
-
   return (
-    <form ref={formRef} onSubmit={save} noValidate aria-label={`${agent.name} settings`}>
-      <Stack gap={10}>
-        <section>
-          <Stack gap={4}>
-            <SectionHeader title="Instructions" />
-            <TextArea
-              label="System prompt"
-              hint="Sent at the start of every run. Workspace rules files are added after it."
-              monospace
-              rows={8}
-              spellCheck={false}
-              value={config.instructions}
-              onChange={(event) => update("instructions", event.target.value)}
-            />
-          </Stack>
-        </section>
-        <section>
-          <Stack gap={4}>
-            <SectionHeader title="Model" />
-            <Grid columns={2} gap={4}>
-              <Select
-                label="Default model"
-                options={modelOptions}
-                value={config.modelId}
-                onChange={(event) => update("modelId", event.target.value)}
-              />
-              <Select
-                label="Fallback model"
-                hint="Used when the default model is unavailable."
-                options={fallbackModelOptions}
-                value={config.fallbackModelId}
-                onChange={(event) => update("fallbackModelId", event.target.value)}
-              />
-            </Grid>
-          </Stack>
-        </section>
-        <PermissionsSection permissions={config.permissions} onChange={(permissions) => update("permissions", permissions)} />
-        <HarnessSection
-          values={config}
-          errors={errors}
-          onChange={(patch) => setConfig((current) => ({ ...current, ...patch }))}
+    <form onSubmit={(event) => void save(event)}>
+      <Stack gap={5}>
+        {(error || models.error) && (
+          <Notice tone="danger">{error ?? models.error?.message}</Notice>
+        )}
+        {saved && (
+          <Notice tone="success">Defaults saved for new conversations.</Notice>
+        )}
+        <SectionHeader title="Instructions" />
+        <TextArea
+          label="Agent instructions"
+          value={config.instructions}
+          rows={8}
+          maxLength={32768}
+          onChange={(event) =>
+            setConfig({ ...config, instructions: event.target.value })
+          }
         />
-        <Stack gap={6}>
-          <Divider />
-          <Stack direction="row" gap={3} justify="end" wrap>
-            <Button variant="ghost" size="md" icon={<RefreshIcon />} onClick={reset}>
-              Reset
-            </Button>
-            <Button variant="primary" size="md" type="submit">
-              Save
-            </Button>
-          </Stack>
+        <Grid columns={2} gap={4}>
+          <Select
+            label="Default provider model"
+            options={[{ value: "", label: "Use provider default" }, ...options]}
+            value={config.model_id}
+            onChange={(event) =>
+              setConfig({ ...config, model_id: event.target.value })
+            }
+          />
+          <Select
+            label="Fallback provider model"
+            options={[{ value: "", label: "No fallback" }, ...options]}
+            value={config.fallback_model ?? ""}
+            onChange={(event) =>
+              setConfig({
+                ...config,
+                fallback_model: event.target.value || null,
+              })
+            }
+          />
+        </Grid>
+        <Select
+          label="Permission mode"
+          options={permissionOptions}
+          value={config.permission_mode ?? "supervised"}
+          onChange={(event) =>
+            setConfig({
+              ...config,
+              permission_mode: event.target
+                .value as typeof config.permission_mode,
+            })
+          }
+          hint="Auto currently uses supervised review. Shell execution on Windows requires full access."
+        />
+        <Grid columns={2} gap={4}>
+          <TextField
+            label="Maximum steps"
+            type="number"
+            required
+            min={1}
+            max={128}
+            value={config.max_steps}
+            onChange={(event) =>
+              setConfig({ ...config, max_steps: Number(event.target.value) })
+            }
+          />
+          <TextField
+            label="Maximum output tokens"
+            type="number"
+            required
+            min={1}
+            max={32768}
+            value={config.max_tokens}
+            onChange={(event) =>
+              setConfig({ ...config, max_tokens: Number(event.target.value) })
+            }
+          />
+        </Grid>
+        <SectionHeader title="Selected skill defaults" />
+        <SkillSelection
+          skills={skills.data ?? []}
+          selectedIds={config.skill_ids ?? []}
+          onChange={(skill_ids) => setConfig({ ...config, skill_ids })}
+          disabled={busy}
+          loading={skills.loading}
+          error={skills.error?.message}
+        />
+        <Stack direction="row" gap={2}>
+          <Button type="submit" disabled={busy}>
+            {busy ? "Saving…" : "Save defaults"}
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy}
+            onClick={() => {
+              setConfig({ ...preferences.settings });
+              setSaved(false);
+              setError(undefined);
+            }}
+          >
+            Discard changes
+          </Button>
         </Stack>
       </Stack>
     </form>

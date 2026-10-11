@@ -41,6 +41,8 @@ pub struct SessionConfig {
     #[serde(default)]
     pub runtime_id: Option<String>,
     #[serde(default)]
+    pub skill_ids: Vec<String>,
+    #[serde(default)]
     pub instructions: String,
     #[serde(default)]
     pub fallback_model: Option<String>,
@@ -68,6 +70,21 @@ fn default_tokens() -> u32 {
 impl SessionConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.max_steps == 0
+            || self.skill_ids.len() > 32
+            || self.skill_ids.iter().any(|id| {
+                id.is_empty()
+                    || id.len() > 64
+                    || !id.as_bytes()[0].is_ascii_lowercase()
+                    || !id.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                    })
+            })
+            || self
+                .skill_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.skill_ids.len()
             || self.max_steps > 128
             || self.max_tokens == 0
             || self.max_tokens > 32768
@@ -91,6 +108,10 @@ pub struct Run {
     pub parent_run_id: Option<String>,
     pub status: RunStatus,
     pub steps: u32,
+    #[serde(default)]
+    pub inference_retries: u32,
+    #[serde(default)]
+    pub context_trimmed_messages: u32,
     pub error: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -115,6 +136,9 @@ pub struct Approval {
     pub arguments: serde_json::Value,
     pub fingerprint: String,
     pub status: String,
+    /// Internal correlation for a waiting MCP call, never a runtime credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

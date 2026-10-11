@@ -273,6 +273,8 @@ impl SessionStore {
                 parent_run_id: parent.clone(),
                 status: RunStatus::Pending,
                 steps: 0,
+                inference_retries: 0,
+                context_trimmed_messages: 0,
                 error: None,
                 created_at: now(),
                 updated_at: now(),

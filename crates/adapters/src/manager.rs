@@ -24,6 +24,7 @@ pub struct RuntimeManager {
     network: NetworkGate,
     changes: Mutex<()>,
     executors: Mutex<BTreeMap<String, (String, Arc<ExternalRuntime>)>>,
+    accounts: crate::profiles::Accounts,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,10 +52,25 @@ impl RuntimeManager {
         sandbox: Sandbox,
         network_gate: NetworkGate,
     ) -> Result<Self, RuntimeError> {
+        let private = drive_root.join("private");
+        Self::open_with_private(drive_root, private, vault, auth, sandbox, network_gate)
+    }
+    /// Daemon composition passes the private directory declared by DrivePaths.
+    pub fn open_with_private(
+        drive_root: PathBuf,
+        private_root: PathBuf,
+        vault: Arc<VaultService>,
+        auth: Arc<AuthService>,
+        sandbox: Sandbox,
+        network_gate: NetworkGate,
+    ) -> Result<Self, RuntimeError> {
         let root = drive_root
             .canonicalize()
             .map_err(|_| error("state_unavailable", "Runtime drive unavailable"))?;
-        let state = Arc::new(State::new(root.join("private"), vault)?);
+        migrate_legacy_records(&root.join("private"), &private_root)?;
+        let state = Arc::new(State::new(private_root, vault)?);
+        let accounts =
+            crate::profiles::Accounts::new(state.clone(), sandbox.clone(), network_gate.clone());
         Ok(Self {
             root,
             state,
@@ -63,6 +79,7 @@ impl RuntimeManager {
             network: network_gate,
             changes: Mutex::new(()),
             executors: Mutex::new(BTreeMap::new()),
+            accounts,
         })
     }
     pub fn catalog(&self) -> Vec<DriverInfo> {
@@ -172,8 +189,12 @@ impl RuntimeManager {
             .map_err(|_| error("state_unavailable", "Runtime registry unavailable"))?;
         let mut out = vec![];
         cache.retain(|id, _| configs.iter().any(|c| c.enabled && c.id == *id));
-        for config in configs.into_iter().filter(|c| c.enabled) {
+        for mut config in configs.into_iter().filter(|c| c.enabled) {
             validate_config(&config)?;
+            config.executable = self
+                .executable(&config.executable)?
+                .to_string_lossy()
+                .into_owned();
             let signature =
                 aidex_native_sessions::digest(serde_json::to_vec(&config).unwrap().as_slice());
             let entry = cache.entry(config.id.clone()).or_insert_with(|| {
@@ -224,6 +245,14 @@ impl RuntimeManager {
         }
         .to_owned();
         let mut authenticated = false;
+        if config.driver == Driver::Codex
+            && config.profile.is_some()
+            && matches!(config.auth, RuntimeAuth::None)
+        {
+            let native = self.account_status(id)?;
+            authenticated = native.authenticated;
+            status = native.status;
+        }
         if let RuntimeAuth::CodexOauth { provider_id } = &config.auth {
             authenticated = self
                 .auth
@@ -238,6 +267,7 @@ impl RuntimeManager {
         let mut protocol_ready = false;
         if installed
             && config.enabled
+            && !self.state.login_pending(id)?
             && matches!(
                 config.driver,
                 Driver::Codex | Driver::Pi | Driver::Omp | Driver::Muse
@@ -280,6 +310,7 @@ impl RuntimeManager {
             max_tokens: 1,
             runtime_ref: None,
             approvals: vec![],
+            bridge: None,
         };
         self.executor(id)?.discover_models(&r)
     }
@@ -321,66 +352,204 @@ impl RuntimeManager {
                     "Requested runtime artifact is not declared by the bundle",
                 )
             })?;
-        let path = self.root.join(portable(Path::new(&component.path))?);
-        let canonical = path.canonicalize().map_err(|_| {
-            error(
-                "installer_unavailable",
-                "Bundled runtime artifact is absent",
-            )
-        })?;
-        if !canonical.starts_with(&self.root) {
-            return Err(error("integrity_failed", "Runtime artifact escapes bundle"));
-        }
-        let bytes = std::fs::read(&canonical)
-            .map_err(|_| error("installer_unavailable", "Runtime artifact cannot be read"))?;
-        if bytes.len() > 256 * 1024 * 1024 {
-            return Err(error(
-                "integrity_failed",
-                "Runtime artifact exceeds package limit",
-            ));
-        }
-        let digest = aidex_native_sessions::digest(&bytes);
-        if digest != component.sha256 {
-            return Err(error(
-                "integrity_failed",
-                "Bundled runtime artifact hash does not match verified component manifest",
-            ));
-        }
-        let name = canonical
-            .file_name()
-            .ok_or_else(|| error("installer_unavailable", "Runtime artifact filename invalid"))?;
-        let dir = self
-            .root
-            .join("runtimes")
-            .join(format!("{:?}", driver).to_lowercase());
-        std::fs::create_dir_all(&dir).map_err(|_| {
-            error(
-                "installer_unavailable",
-                "Runtime installation directory unavailable",
-            )
-        })?;
-        let dest = dir.join(name);
-        if dest.exists() {
-            return Err(error(
-                "conflict",
-                "Runtime component already exists; update requires explicit replacement",
-            ));
-        }
-        std::fs::copy(&canonical, &dest).map_err(|_| {
-            error(
-                "installer_unavailable",
-                "Runtime component cannot be copied",
-            )
-        })?;
-        Ok(InstallResult {
-            driver,
-            executable: portable(dest.strip_prefix(&self.root).unwrap())?,
-            verified_sha256: digest,
-        })
+        let relative = portable(Path::new(&component.path))?;
+        crate::install::place(&self.root, driver, &relative, &component.sha256)
     }
+
     pub fn auth(&self) -> &Arc<AuthService> {
         &self.auth
     }
+    pub fn cancel_logins(&self) -> Result<(), RuntimeError> {
+        self.accounts.cancel_all()
+    }
+    pub fn shutdown(&self) -> Result<(), RuntimeError> {
+        let cancelled = self.cancel_logins();
+        let report = self
+            .sandbox
+            .registry()
+            .shutdown(aidex_sandbox::StopReason::DaemonShutdown);
+        if !report.is_clean() {
+            return Err(error(
+                "process_shutdown_failed",
+                "A native runtime tree could not be confirmed terminated",
+            ));
+        }
+        if cancelled.is_err() {
+            self.cancel_logins()?;
+        }
+        self.executors
+            .lock()
+            .map_err(|_| error("state_unavailable", "Runtime registry unavailable"))?
+            .clear();
+        Ok(())
+    }
+    pub fn account_status(&self, id: &str) -> Result<crate::RuntimeAccountStatus, RuntimeError> {
+        let mut config = self.get(id)?;
+        config.executable = self
+            .executable(&config.executable)?
+            .to_string_lossy()
+            .into_owned();
+        self.accounts.status(&config)
+    }
+    pub fn import_profile(
+        &self,
+        id: &str,
+        source: &Path,
+    ) -> Result<crate::RuntimeAccountStatus, RuntimeError> {
+        let mut config = self.get(id)?;
+        self.accounts.supported(&config)?;
+        config.profile = Some(crate::profiles::profile_id(&config));
+        config.auth = RuntimeAuth::None;
+        if !self.sandbox.registry().is_empty() {
+            return Err(error(
+                "runtime_busy",
+                "Stop active external runtimes before importing an account",
+            ));
+        }
+        let mut resolved = config.clone();
+        resolved.executable = self
+            .executable(&config.executable)?
+            .to_string_lossy()
+            .into_owned();
+        let status = self.accounts.import(&resolved, source)?;
+        self.save(config)?;
+        Ok(status)
+    }
+    pub fn login_start(&self, id: &str) -> Result<crate::RuntimeLoginStatus, RuntimeError> {
+        let mut config = self.get(id)?;
+        self.accounts.supported(&config)?;
+        if !(self.network)() {
+            return Err(error(
+                "offline_refused",
+                "Enable network access before starting official CLI login",
+            ));
+        }
+        let original = config.clone();
+        config.profile = Some(crate::profiles::profile_id(&config));
+        config.auth = RuntimeAuth::None;
+        let mut config = self.save(config)?;
+        config.executable = self
+            .executable(&config.executable)?
+            .to_string_lossy()
+            .into_owned();
+        match self.accounts.start(config) {
+            Ok(status) => Ok(status),
+            Err(e) => {
+                self.save(original)?;
+                Err(e)
+            }
+        }
+    }
+    pub fn login_status(
+        &self,
+        id: &str,
+        flow_id: &str,
+    ) -> Result<crate::RuntimeLoginStatus, RuntimeError> {
+        self.get(id)?;
+        self.accounts.flow(id, flow_id, false)
+    }
+    pub fn login_cancel(
+        &self,
+        id: &str,
+        flow_id: &str,
+    ) -> Result<crate::RuntimeLoginStatus, RuntimeError> {
+        self.accounts.flow(id, flow_id, true)
+    }
+    pub fn logout(&self, id: &str) -> Result<crate::RuntimeAccountStatus, RuntimeError> {
+        let mut config = self.get(id)?;
+        self.accounts.supported(&config)?;
+        self.accounts.cancel_runtime(id)?;
+        if !self.sandbox.registry().is_empty() {
+            return Err(error(
+                "runtime_busy",
+                "Stop active runtimes before signing out",
+            ));
+        }
+        config.executable = self
+            .executable(&config.executable)?
+            .to_string_lossy()
+            .into_owned();
+        self.accounts.logout(&config)
+    }
+}
+fn migrate_legacy_records(legacy: &Path, destination: &Path) -> Result<(), RuntimeError> {
+    if legacy == destination
+        || !legacy.join("runtime-config.sealed").exists()
+        || destination.join("runtime-config.sealed").exists()
+    {
+        return Ok(());
+    }
+    let legacy_meta = std::fs::symlink_metadata(legacy)
+        .map_err(|_| error("state_unavailable", "Legacy runtime records unavailable"))?;
+    if !legacy_meta.is_dir() || legacy_meta.file_type().is_symlink() {
+        return Err(error(
+            "state_corrupt",
+            "Legacy runtime directory is invalid",
+        ));
+    }
+    std::fs::create_dir_all(destination)
+        .map_err(|_| error("state_unavailable", "Managed runtime directory unavailable"))?;
+    if std::fs::symlink_metadata(destination).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(error(
+            "state_corrupt",
+            "Managed runtime directory is invalid",
+        ));
+    }
+    let mut records = Vec::new();
+    for entry in std::fs::read_dir(legacy)
+        .map_err(|_| error("state_unavailable", "Legacy runtime records unavailable"))?
+    {
+        let entry =
+            entry.map_err(|_| error("state_unavailable", "Legacy runtime records unavailable"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let known = name == "runtime-config.sealed"
+            || ["profile-", "runtime-"].iter().any(|prefix| {
+                name.strip_prefix(prefix)
+                    .and_then(|n| n.strip_suffix(".sealed"))
+                    .is_some_and(|s| {
+                        (s.len() == 64 || (s.len() == 129 && s.as_bytes()[64] == b'-'))
+                            && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+                    })
+            });
+        if !known {
+            continue;
+        }
+        let m = entry
+            .metadata()
+            .map_err(|_| error("state_unavailable", "Legacy runtime record unavailable"))?;
+        if entry.file_type().is_ok_and(|t| t.is_symlink())
+            || !m.is_file()
+            || m.len() > crate::state::MAX_STATE as u64 + 64
+        {
+            return Err(error("state_corrupt", "Legacy runtime record is invalid"));
+        }
+        records.push((name, entry.path()));
+        if records.len() > 4096 {
+            return Err(error("state_limit", "Too many legacy runtime records"));
+        }
+    }
+    // Config commits last; a partial copy can be retried without reading secrets.
+    records.sort_by_key(|(name, _)| name == "runtime-config.sealed");
+    for (name, source) in records {
+        let target = destination.join(name);
+        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(error(
+                "state_corrupt",
+                "Runtime migration target is invalid",
+            ));
+        }
+        if !target.exists() {
+            std::fs::copy(source, target).map_err(|_| {
+                error(
+                    "state_unavailable",
+                    "Legacy runtime ciphertext cannot be copied",
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 fn portable(path: &Path) -> Result<String, RuntimeError> {
     if path

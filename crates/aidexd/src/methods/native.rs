@@ -150,6 +150,19 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         let s = services.clone();
         router.register(method, move |_, p| {
             let p: SendParams = parse_params(p)?;
+            let config = s
+                .native()
+                .store()
+                .get(&p.session_id)
+                .map_err(native_error)?
+                .configuration;
+            if config
+                .runtime_id
+                .as_deref()
+                .is_some_and(|id| id != "native")
+            {
+                s.ensure_runtime_registry().map_err(native_error)?;
+            }
             if method == "agent.start"
                 && s.native()
                     .store()
@@ -183,6 +196,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let s = services.clone();
     router.register("run.resume", move |_, p| {
         let p: IdParams = parse_params(p)?;
+        s.ensure_runtime_registry().map_err(native_error)?;
         to_result(&view::run(&s.native().resume(&p.id).map_err(native_error)?))
     })?;
     let s = services.clone();
@@ -200,6 +214,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let s = services.clone();
     router.register("approval.respond", move |_, p| {
         let p: RespondParams = parse_params(p)?;
+        s.ensure_runtime_registry().map_err(native_error)?;
         to_result(&view::run(
             &s.native()
                 .respond(&p.id, &p.fingerprint, p.approved, &p.command_id)
@@ -248,7 +263,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         to_result(&p.configuration)
     })?;
     let s = services.clone();
-    router.register("execution.status",move|_,p|{expect_no_params(&p)?;let sessions=s.native().store().list().map_err(native_error)?;let runs=s.native().store().run_summaries().map_err(native_error)?;view::bounded(json!({"capabilities":s.native().capabilities(),"total_sessions":sessions.len(),"sessions":sessions.into_iter().take(100).collect::<Vec<_>>(),"total_runs":runs.len(),"runs":runs.into_iter().take(1000).collect::<Vec<_>>(),"runtime_descriptors":s.native().runtime_descriptors()}),false)})?;
+    router.register("execution.status",move|_,p|{expect_no_params(&p)?;s.ensure_runtime_registry().map_err(native_error)?;let sessions=s.native().store().list().map_err(native_error)?;let runs=s.native().store().run_summaries().map_err(native_error)?;view::bounded(json!({"capabilities":s.native().capabilities(),"total_sessions":sessions.len(),"sessions":sessions.into_iter().take(100).collect::<Vec<_>>(),"total_runs":runs.len(),"runs":runs.into_iter().take(1000).collect::<Vec<_>>(),"runtime_descriptors":s.native().runtime_descriptors()}),false)})?;
     let s = services.clone();
     router.register("checkpoint.list",move|_,p|{#[derive(Deserialize)]#[serde(deny_unknown_fields)]struct Params{session_id:String,#[serde(default)]offset:Option<usize>,#[serde(default)]limit:Option<usize>}let p:Params=parse_params(p)?;let s=s.native().store().get(&p.session_id).map_err(native_error)?;let total=s.checkpoints.len();let offset=p.offset.unwrap_or(0).min(total);let end=(offset+view::page_limit(p.limit)?).min(total);view::bounded(json!({"checkpoints":s.checkpoints[offset..end].iter().map(view::checkpoint).collect::<Vec<_>>(),"offset":offset,"total_checkpoints":total,"next_offset":(end<total).then_some(end),"truncated":end<total}),false)})?;
     let s = services.clone();

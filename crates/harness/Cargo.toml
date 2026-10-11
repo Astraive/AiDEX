@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 [dependencies]
 aidex-core = { path = "../core" }
+aidex-runtime-bridge = { path = "../runtime-bridge" }
 aidex-native-sessions = { path = "../native-sessions" }
 aidex-providers = { path = "../providers" }
 aidex-events = { path = "../events" }

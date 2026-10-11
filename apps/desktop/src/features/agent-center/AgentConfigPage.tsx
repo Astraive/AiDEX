@@ -1,42 +1,69 @@
-import { PageHeader } from "@aidex/ui/components";
+import { Notice, PageHeader } from "@aidex/ui/components";
 import { PageFrame } from "@aidex/ui/desktop";
-import { DownloadIcon } from "@aidex/ui/icons";
-import { Badge, Button, Stack, Text } from "@aidex/ui/primitives";
+import { Stack, Text } from "@aidex/ui/primitives";
 import { useNavigation } from "../../app/providers/navigation";
+import { usePreferences } from "../../app/providers/preferences";
+import { useRpc } from "../../hooks/useRpc";
+import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import { AgentConfigForm } from "./AgentConfigForm";
-import { agentById, statusLabel } from "./sample";
-import { useAgentActions } from "./useAgentActions";
+import { RuntimeConfigForm } from "./RuntimeConfigForm";
 
-/** Settings for one agent; the route `id` names it (unknown ids fall back to AiDEX Native). */
 export function AgentConfigPage() {
-  const { route, back, canGoBack, replace } = useNavigation();
-  const actions = useAgentActions();
-  const agent = agentById(route.id);
-  const installed = agent.status !== "not-installed";
-
+  const { route, replace } = useNavigation();
+  const preferences = usePreferences();
+  const native = route.id === "native";
+  const runtime = useRpc(
+    "runtime.config.get",
+    { id: route.id ?? "" },
+    { enabled: !!route.id && !native },
+  );
+  const catalog = useRpc("runtime.catalog");
   return (
     <PageFrame width="narrow">
-      <PageHeader
-        back={{ label: "Agents", onClick: () => (canGoBack ? back() : replace({ page: "agents" })) }}
-        title={agent.name}
-        description={agent.description}
-        meta={
-          <Stack direction="row" gap={3} align="center" wrap>
-            <Badge tone={installed ? "success" : "neutral"}>{statusLabel[agent.status]}</Badge>
-            <Text as="span" tone="secondary">
-              {agent.runtime}
-            </Text>
-          </Stack>
-        }
-        actions={
-          installed ? undefined : (
-            <Button variant="outline" size="md" icon={<DownloadIcon />} onClick={() => actions.install(agent)}>
-              Install
-            </Button>
+      <Stack gap={5}>
+        <PageHeader
+          title={
+            native
+              ? "AiDEX Native defaults"
+              : route.id
+                ? `Runtime · ${route.id}`
+                : "Add external runtime"
+          }
+          description={
+            native
+              ? "Saved on the drive and applied to new conversations."
+              : "Each instance owns its executable, credentials, and native conversation history."
+          }
+          back={{ label: "Agents", onClick: () => replace({ page: "agents" }) }}
+        />
+        <CoreStatusNotice requires="daemon" />
+        {(runtime.error || catalog.error || preferences.error) && (
+          <Notice tone="danger">
+            {runtime.error?.message ??
+              catalog.error?.message ??
+              preferences.error}
+          </Notice>
+        )}
+        {native ? (
+          preferences.loaded ? (
+            <AgentConfigForm />
+          ) : (
+            <Text tone="muted">Loading saved defaults…</Text>
           )
-        }
-      />
-      <AgentConfigForm key={agent.id} agent={agent} />
+        ) : catalog.data && (!route.id || runtime.data) ? (
+          <RuntimeConfigForm
+            key={route.id ?? "new"}
+            initial={runtime.data}
+            catalog={catalog.data}
+            onSaved={(id) => {
+              runtime.refetch();
+              replace({ page: "agent-config", id });
+            }}
+          />
+        ) : (
+          <Text tone="muted">Loading runtime configuration…</Text>
+        )}
+      </Stack>
     </PageFrame>
   );
 }

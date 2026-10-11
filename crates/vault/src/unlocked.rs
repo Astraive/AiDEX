@@ -114,6 +114,14 @@ impl UnlockedVault {
             .map(|entry| entry.meta(&self.header.vault_id))
     }
 
+    pub fn secret_version(&self, name: &SecretName) -> Result<crate::SecretVersion, VaultError> {
+        let entry = self.entry(name)?;
+        Ok(crate::SecretVersion {
+            secret_ref: entry.meta(&self.header.vault_id).secret_ref,
+            revision: entry.revision,
+        })
+    }
+
     /// Store or replace a secret. Replacing keeps its id (and live handles, if the new
     /// policy still allows their consumer) and writes the value to a fresh record file.
     pub fn put(

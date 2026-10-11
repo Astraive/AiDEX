@@ -1,0 +1,15 @@
+[package]
+name = "aidex-runtime-bridge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[dependencies]
+aidex-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+getrandom = "0.3"
+zeroize = "1"
+[lints]
+workspace = true

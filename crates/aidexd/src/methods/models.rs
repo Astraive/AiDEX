@@ -406,6 +406,13 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             .offline()
             .set_offline(params.enabled)
             .map_err(|error| RpcError::service(error.code(), error.to_string()))?;
+        if params.enabled {
+            // Close already admitted network work and idle processes with keys.
+            // The live gate above also rejects racing reconnects.
+            shared.native().cancel_all();
+            shared.extensions().disconnect_all();
+            let _ = shared.runtime().cancel_logins();
+        }
         models.observer().observe(&ModelEvent::NetworkModeChanged {
             offline: params.enabled,
         });

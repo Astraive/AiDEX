@@ -48,10 +48,13 @@ dependencies = [
  "aidex-events",
  "aidex-native-sessions",
  "aidex-providers",
+ "aidex-runtime-bridge",
  "aidex-sandbox",
  "aidex-vault",
+ "base64 0.22.1",
  "chacha20poly1305",
  "getrandom 0.3.4",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -158,6 +161,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aidex-extensions"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "aidex-policy",
+ "aidex-sandbox",
+ "aidex-tools",
+ "aidex-vault",
+ "aidex-workspace",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
 name = "aidex-harness"
 version = "0.1.0"
 dependencies = [
@@ -166,6 +188,7 @@ dependencies = [
  "aidex-native-sessions",
  "aidex-policy",
  "aidex-providers",
+ "aidex-runtime-bridge",
  "aidex-sandbox",
  "aidex-tools",
  "aidex-workspace",
@@ -204,6 +227,7 @@ version = "0.1.0"
 dependencies = [
  "aidex-core",
  "aidex-providers",
+ "aidex-runtime-bridge",
  "aidex-vault",
  "chacha20poly1305",
  "getrandom 0.3.4",
@@ -259,6 +283,18 @@ dependencies = [
  "aidex-core",
  "aidex-providers",
  "serde",
+]
+
+[[package]]
+name = "aidex-runtime-bridge"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -350,6 +386,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aidex-web"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "aidex-policy",
+ "aidex-tools",
+ "aidex-vault",
+ "reqwest 0.12.28",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "aidex-workspace"
 version = "0.1.0"
 dependencies = [
@@ -373,6 +426,7 @@ dependencies = [
  "aidex-core",
  "aidex-drive",
  "aidex-events",
+ "aidex-extensions",
  "aidex-harness",
  "aidex-host",
  "aidex-inference",
@@ -382,8 +436,10 @@ dependencies = [
  "aidex-router",
  "aidex-sandbox",
  "aidex-sessions",
+ "aidex-tools",
  "aidex-updater",
  "aidex-vault",
+ "aidex-web",
  "aidex-workspace",
  "getrandom 0.3.4",
  "serde",

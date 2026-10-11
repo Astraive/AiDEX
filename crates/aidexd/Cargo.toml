@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 aidex-context = { path = "../context" }
+aidex-extensions = { path = "../extensions" }
+aidex-web = { path = "../web" }
+aidex-tools = { path = "../tools" }
 aidex-native-sessions = { path = "../native-sessions" }
 aidex-adapters = { path = "../adapters" }
 aidex-sandbox = { path = "../sandbox" }

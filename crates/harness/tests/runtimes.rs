@@ -8,7 +8,7 @@ use aidex_vault::{KdfParams, SecretString, VaultService, VaultServiceConfig};
 use serde_json::json;
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -64,9 +64,217 @@ fn fixture() -> (
     );
     (drive, ws, engine, session.id)
 }
+
+struct Continuity {
+    resume: bool,
+    requests: Mutex<Vec<RuntimeRequest>>,
+}
+impl RuntimeExecutor for Continuity {
+    fn descriptor(&self) -> RuntimeDescriptor {
+        RuntimeDescriptor {
+            id: "fixture-runtime".into(),
+            name: "continuity".into(),
+            modes: vec![Mode::Agent],
+            permission_modes: vec![PermissionMode::Supervised],
+            supports_resume: self.resume,
+            supports_approvals: false,
+        }
+    }
+    fn validate(&self, _: &RuntimeRequest) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+    fn execute(
+        &self,
+        request: &RuntimeRequest,
+        _: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+        _: &CancelToken,
+    ) -> Result<RuntimeResponse, RuntimeError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(RuntimeResponse {
+            status: RuntimeStatus::Completed,
+            runtime_ref: Some(json!({"thread_id":"durable-thread"})),
+            message: Some(ChatMessage::assistant("continued")),
+        })
+    }
+}
+
+#[test]
+fn external_followup_uses_saved_reference_and_resume_operation() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Arc::new(Continuity {
+        resume: true,
+        requests: Mutex::new(vec![]),
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let first = e.start(&s, "initial", "initial", None).unwrap();
+    assert_eq!(wait(&e, &first.id).status, RunStatus::Completed);
+    let second = e.start(&s, "continue", "continue", None).unwrap();
+    assert_eq!(wait(&e, &second.id).status, RunStatus::Completed);
+    let requests = runtime.requests.lock().unwrap();
+    assert_eq!(requests[0].operation, RuntimeOperation::Start);
+    assert_eq!(requests[1].operation, RuntimeOperation::Resume);
+    assert_eq!(
+        requests[1].runtime_ref,
+        Some(json!({"thread_id":"durable-thread"}))
+    );
+    assert_eq!(requests[1].model.as_deref(), Some("runtime-model"));
+}
+
+#[test]
+fn external_followup_without_resume_capability_fails_explicitly() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Arc::new(Continuity {
+        resume: false,
+        requests: Mutex::new(vec![]),
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let first = e.start(&s, "initial", "initial", None).unwrap();
+    assert_eq!(wait(&e, &first.id).status, RunStatus::Completed);
+    assert!(
+        e.start(&s, "continue", "continue", None)
+            .unwrap_err()
+            .contains("resume")
+    );
+    assert_eq!(runtime.requests.lock().unwrap().len(), 1);
+}
 struct Boundary {
     effects: AtomicUsize,
     unsafe_ref: bool,
+}
+
+struct EarlyIdentity {
+    store: Arc<SessionStore>,
+    unsafe_ref: bool,
+    saw_saved: AtomicUsize,
+    paused: AtomicUsize,
+}
+impl RuntimeExecutor for EarlyIdentity {
+    fn descriptor(&self) -> RuntimeDescriptor {
+        RuntimeDescriptor {
+            id: "fixture-runtime".into(),
+            name: "early identity".into(),
+            modes: vec![Mode::Agent],
+            permission_modes: vec![PermissionMode::Supervised],
+            supports_resume: true,
+            supports_approvals: false,
+        }
+    }
+    fn validate(&self, _: &RuntimeRequest) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+    fn execute(
+        &self,
+        request: &RuntimeRequest,
+        on: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+        _: &CancelToken,
+    ) -> Result<RuntimeResponse, RuntimeError> {
+        let reference = if self.unsafe_ref {
+            json!({"access_token":"fixture-secret"})
+        } else {
+            json!({"runtime_id":"fixture-runtime","native_session_id":"early-native-session","run_id":request.run_id,"session_id":request.session_id,"snapshot_digest":"sealed-snapshot"})
+        };
+        let control = on(&RuntimeEvent::SessionStarted {
+            runtime_ref: reference.clone(),
+        });
+        if control == RuntimeControl::Pause {
+            self.paused.fetch_add(1, Ordering::SeqCst);
+        }
+        if control == RuntimeControl::Continue
+            && self
+                .store
+                .run(&request.run_id)
+                .unwrap()
+                .runtime_ref
+                .as_ref()
+                == Some(&reference)
+        {
+            self.saw_saved.fetch_add(1, Ordering::SeqCst);
+        }
+        Err(RuntimeError {
+            code: "injected_stop".into(),
+            message: "stop before prompting or effects".into(),
+        })
+    }
+}
+
+#[test]
+fn native_identity_is_saved_before_runtime_callback_continues() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Arc::new(EarlyIdentity {
+        store: e.store().clone(),
+        unsafe_ref: false,
+        saw_saved: AtomicUsize::new(0),
+        paused: AtomicUsize::new(0),
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let run = e.start(&s, "prompt", "early-identity", None).unwrap();
+    assert_eq!(wait(&e, &run.id).status, RunStatus::Failed);
+    assert_eq!(runtime.saw_saved.load(Ordering::SeqCst), 1);
+    let saved = e.store().run(&run.id).unwrap().runtime_ref.unwrap();
+    assert_eq!(saved["native_session_id"], "early-native-session");
+    assert_eq!(e.store().get(&s).unwrap().runtime_ref, Some(saved));
+}
+
+#[test]
+fn child_native_identity_never_replaces_root_session_reference() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Arc::new(EarlyIdentity {
+        store: e.store().clone(),
+        unsafe_ref: false,
+        saw_saved: AtomicUsize::new(0),
+        paused: AtomicUsize::new(0),
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let root = e
+        .store()
+        .begin(&s, "root", "root-placeholder", None)
+        .unwrap();
+    let parent_reference = json!({"thread_id":"root-native-session"});
+    e.store()
+        .update(&s, |session| {
+            session.runtime_ref = Some(parent_reference.clone());
+            session
+                .runs
+                .iter_mut()
+                .find(|run| run.id == root.id)
+                .unwrap()
+                .runtime_ref = Some(parent_reference.clone());
+            Ok(())
+        })
+        .unwrap();
+    let child = e
+        .start(&s, "child", "child-identity", Some(root.id.clone()))
+        .unwrap();
+    assert_eq!(wait(&e, &child.id).status, RunStatus::Failed);
+    assert!(e.store().run(&child.id).unwrap().runtime_ref.is_some());
+    assert_eq!(
+        e.store().get(&s).unwrap().runtime_ref,
+        Some(parent_reference)
+    );
+    e.cancel(&root.id).unwrap();
+}
+
+#[test]
+fn unsafe_native_start_identity_is_rejected_before_persistence() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Arc::new(EarlyIdentity {
+        store: e.store().clone(),
+        unsafe_ref: true,
+        saw_saved: AtomicUsize::new(0),
+        paused: AtomicUsize::new(0),
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let run = e.start(&s, "prompt", "unsafe-identity", None).unwrap();
+    assert_eq!(wait(&e, &run.id).status, RunStatus::Failed);
+    assert!(e.store().run(&run.id).unwrap().runtime_ref.is_none());
+    assert!(e.store().get(&s).unwrap().runtime_ref.is_none());
+    assert_eq!(runtime.saw_saved.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.paused.load(Ordering::SeqCst), 1);
 }
 impl RuntimeExecutor for Boundary {
     fn descriptor(&self) -> RuntimeDescriptor {

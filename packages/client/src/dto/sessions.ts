@@ -1,10 +1,7 @@
 /** Bounded public projections from aidexd::methods::native_view. */
 export type ConversationMode = "chat" | "plan" | "agent";
 export type PermissionMode =
-  | "supervised"
-  | "auto_accept_edits"
-  | "auto"
-  | "full_access";
+  "supervised" | "auto_accept_edits" | "auto" | "full_access";
 export type RunStatus =
   | "pending"
   | "running"
@@ -43,6 +40,7 @@ export type SessionConfig = {
   max_steps?: number;
   max_tokens?: number;
   instructions?: string;
+  skill_ids?: string[];
   fallback_model?: string | null;
 };
 export type Run = {

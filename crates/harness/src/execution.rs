@@ -1,11 +1,14 @@
 //! Provider turns and scoped tool exchange; no blind retry of side effects.
-use crate::{NativeEngine, broker::Prepared};
+use crate::{
+    NativeEngine,
+    broker::{PrepareError, Prepared},
+};
 use aidex_core::{CancelToken, EntityId, WorkspacePath};
-use aidex_events::{EventKind, Outcome};
+use aidex_events::EventKind;
 use aidex_native_sessions::*;
 use aidex_providers::{ChatMessage, ChatRequest, ModelId, ToolChoice, ToolSpec};
 use aidex_tools::PermitIssuer;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 impl NativeEngine {
     pub(crate) fn append_result(&self, id: &str, call: &str, result: String) -> Result<(), String> {
         let run = self.store.run(id)?;
@@ -87,7 +90,14 @@ impl NativeEngine {
                     )?;
                     continue;
                 }
-                let mut prepared = self.broker.prepare(&s, call)?;
+                let mut prepared = match self.broker.prepare(&s, call) {
+                    Ok(prepared) => prepared,
+                    Err(PrepareError::Repairable { code, message }) => {
+                        self.append_result(id, &call.id, serde_json::json!({"is_error":true,"code":code,"message":aidex_events::redact_text(&message),"effect":"not_started"}).to_string())?;
+                        continue;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
                 prepared.context.cancel = tool_cancel.clone();
                 let call_id = prepared.plan.call_id().clone();
                 self.emit(
@@ -110,6 +120,7 @@ impl NativeEngine {
                         runtime_id: None,
                         runtime_request_id: None,
                         runtime_ref: None,
+                        bridge_call_id: None,
                         preview: prepared
                             .plan
                             .preview()
@@ -180,11 +191,12 @@ impl NativeEngine {
             if !s.configuration.instructions.trim().is_empty() {
                 messages.push(ChatMessage::system(s.configuration.instructions.clone()));
             }
+            messages.extend(self.workspace_context(&s, &run)?);
             if let Some(workspace) = &s.configuration.workspace_id {
                 let memory = self.store.memory_list(workspace)?;
-                let index = self.inspect(
-                    Some(workspace),
-                    "fs.list",
+                let index = self.read_context(
+                    &s,
+                    "fs_list",
                     serde_json::json!({"recursive":true,"max_entries":200,"max_depth":3}),
                 )?;
                 messages.push(ChatMessage::user(format!(
@@ -213,12 +225,22 @@ impl NativeEngine {
                 request.tools = self
                     .broker
                     .tools
-                    .specs()
+                    .descriptors()
                     .into_iter()
-                    .map(|spec| ToolSpec {
-                        name: spec.name,
-                        description: spec.description,
-                        parameters: spec.parameters,
+                    .filter(|descriptor| {
+                        s.configuration.permission_mode == PermissionMode::FullAccess
+                            || !descriptor
+                                .capabilities
+                                .iter()
+                                .any(|tag| tag == "permissions:full_access")
+                    })
+                    .map(|descriptor| {
+                        let spec = descriptor.spec();
+                        ToolSpec {
+                            name: spec.name,
+                            description: spec.description,
+                            parameters: spec.parameters,
+                        }
                     })
                     .collect();
                 request.tools.push(ToolSpec{name:"agent_spawn".into(),description:"Start a bounded child sharing this workspace and permission mode. Its status never completes the parent.".into(),parameters:serde_json::json!({"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"],"additionalProperties":false})});
@@ -264,14 +286,10 @@ impl NativeEngine {
                 Ok(())
             })?;
             if calls.is_empty() {
+                if self.settle_children(id, cancel)? {
+                    continue;
+                }
                 self.transition(id, RunStatus::Completed, None)?;
-                self.emit(
-                    &run.session_id,
-                    EventKind::AgentFinished {
-                        agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
-                        outcome: Outcome::Succeeded,
-                    },
-                );
                 return Ok(());
             }
         }
@@ -287,13 +305,6 @@ impl NativeEngine {
         if run.status == RunStatus::Cancelled {
             return Err("run cancelled".into());
         }
-        self.emit(
-            &run.session_id,
-            EventKind::ToolStarted {
-                call_id: p.plan.call_id().clone(),
-            },
-        );
-        let started = Instant::now();
         let output = self.broker.execute(p, issuer)?;
         let mut checkpoints = vec![];
         for (path, before) in &p.before {
@@ -320,14 +331,12 @@ impl NativeEngine {
             s.checkpoints.extend(checkpoints);
             Ok(())
         })?;
-        self.emit(
-            &run.session_id,
-            EventKind::ToolCompleted {
-                call_id: p.plan.call_id().clone(),
-                duration_ms: started.elapsed().as_millis() as u64,
-                summary: "native tool completed; output in encrypted history".into(),
-            },
-        );
-        self.append_result(id, &call.id, output.content.to_string())
+        // Complete results and applied diffs stay in encrypted history; public
+        // lifecycle events carry only metadata through the broker's sink.
+        self.append_result(
+            id,
+            &call.id,
+            serde_json::to_string(&output).map_err(|e| e.to_string())?,
+        )
     }
 }

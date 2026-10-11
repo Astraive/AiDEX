@@ -1,0 +1,17 @@
+{
+  "manifest": {
+    "id": "aidex-build",
+    "name": "AiDEX Build Diagnostics",
+    "version": "1.0.0",
+    "description": "Diagnose build failures and verify a targeted repair.",
+    "trusted": false,
+    "enabled": false,
+    "workspace_ids": [],
+    "profiles": [],
+    "skills": [{"path": "skills/build-diagnostics/SKILL.md"}],
+    "mcp_servers": []
+  },
+  "files": {
+    "skills/build-diagnostics/SKILL.md": "---\nname: build-diagnostics\ndescription: Diagnose a failing build from evidence and verify a focused repair\n---\nInspect the project's documented build commands and toolchain configuration. Run the smallest authorized command that reproduces the failure, read the first causal diagnostic, and trace its source before changing code. Check whether configuration, inputs, generated files or toolchain selection explain the problem. Apply a focused repair and repeat the failing check. Report its exit status and any remaining diagnostics. Do not install dependencies, alter global tools or broaden execution permissions without the user's authorization.\n"
+  }
+}

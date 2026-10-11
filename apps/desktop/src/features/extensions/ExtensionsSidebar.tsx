@@ -1,51 +1,77 @@
 import { SidebarItem, SidebarSection } from "@aidex/ui/desktop";
-import type { ComponentType } from "react";
-import { LayersIcon, PuzzleIcon, ServerIcon, type IconProps } from "@aidex/ui/icons";
+import { useEffect } from "react";
+import { LayersIcon, PuzzleIcon, ServerIcon } from "@aidex/ui/icons";
 import { useNavigation } from "../../app/providers/navigation";
+import { useRpc } from "../../hooks/useRpc";
 import { SectionSidebar } from "../../layouts/SectionSidebar";
-import { tabOf, type PageTab } from "../../lib/routes";
-import { extensionShortcuts, installedPlugins, mcpServers, sampleSkills } from "./sample";
-
-type ExtensionsTab = PageTab<"extensions">;
-
-const browseItems = [
-  { tab: "skills", label: "Skills", Icon: LayersIcon, count: sampleSkills.length },
-  { tab: "mcp", label: "MCP servers", Icon: ServerIcon, count: mcpServers.length },
-  { tab: "plugins", label: "Plugins", Icon: PuzzleIcon, count: installedPlugins.length },
-] as const satisfies readonly { tab: ExtensionsTab; label: string; Icon: ComponentType<IconProps>; count: number }[];
-
-/** Shortcut items reuse their tab's icon so they don't imply an enabled state the sidebar can't know. */
-function TabIcon({ tab }: { tab: ExtensionsTab }) {
-  const item = browseItems.find((entry) => entry.tab === tab);
-  return item ? <item.Icon /> : null;
-}
+import { tabOf } from "../../lib/routes";
 
 export function ExtensionsSidebar() {
   const { route, replace } = useNavigation();
   const tab = tabOf(route, "extensions");
-
+  const skills = useRpc("extensions.skills.list");
+  const servers = useRpc("extensions.mcp.list");
+  const plugins = useRpc("extensions.plugins.list");
+  useEffect(() => {
+    const refresh = () => {
+      skills.refetch();
+      servers.refetch();
+      plugins.refetch();
+    };
+    window.addEventListener("aidex:extensions-changed", refresh);
+    return () =>
+      window.removeEventListener("aidex:extensions-changed", refresh);
+  }, [skills.refetch, servers.refetch, plugins.refetch]);
   return (
-    <SectionSidebar title="Plugins">
+    <SectionSidebar title="Extensions">
       <SidebarSection title="Browse">
-        {browseItems.map(({ tab: itemTab, label, Icon, count }) => (
-          <SidebarItem
-            key={itemTab}
-            label={label}
-            icon={<Icon />}
-            count={count}
-            active={tab === itemTab}
-            onSelect={() => replace({ page: "extensions", tab: itemTab })}
-          />
-        ))}
+        <SidebarItem
+          label="Skills"
+          icon={<LayersIcon />}
+          count={skills.data?.length}
+          active={tab === "skills"}
+          onSelect={() => replace({ page: "extensions", tab: "skills" })}
+        />
+        <SidebarItem
+          label="MCP servers"
+          icon={<ServerIcon />}
+          count={servers.data?.length}
+          active={tab === "mcp"}
+          onSelect={() => replace({ page: "extensions", tab: "mcp" })}
+        />
+        <SidebarItem
+          label="Plugins"
+          icon={<PuzzleIcon />}
+          count={plugins.data?.length}
+          active={tab === "plugins"}
+          onSelect={() => replace({ page: "extensions", tab: "plugins" })}
+        />
       </SidebarSection>
-      <SidebarSection title="Shortcuts">
-        {extensionShortcuts.map((item) => (
+      <SidebarSection title="Enabled skills">
+        {skills.data
+          ?.filter((skill) => skill.enabled)
+          .map((skill) => (
+            <SidebarItem
+              key={skill.id}
+              label={skill.name}
+              icon={<LayersIcon />}
+              active={tab === "skills" && route.id === skill.id}
+              onSelect={() =>
+                replace({ page: "extensions", tab: "skills", id: skill.id })
+              }
+            />
+          ))}
+      </SidebarSection>
+      <SidebarSection title="MCP instances">
+        {servers.data?.map((server) => (
           <SidebarItem
-            key={item.id}
-            label={item.label}
-            icon={<TabIcon tab={item.tab} />}
-            active={tab === item.tab && route.id === item.id}
-            onSelect={() => replace({ page: "extensions", tab: item.tab, id: item.id })}
+            key={server.id}
+            label={server.name}
+            icon={<ServerIcon />}
+            active={tab === "mcp" && route.id === server.id}
+            onSelect={() =>
+              replace({ page: "extensions", tab: "mcp", id: server.id })
+            }
           />
         ))}
       </SidebarSection>

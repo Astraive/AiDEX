@@ -1,81 +1,94 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { PageHeader } from "@aidex/ui/components";
 import { PageFrame } from "@aidex/ui/desktop";
-import { GridIcon, PlusIcon } from "@aidex/ui/icons";
-import { Button, TabPanel, Tabs } from "@aidex/ui/primitives";
+import { PlusIcon } from "@aidex/ui/icons";
+import { Button, Stack, TabPanel, Tabs } from "@aidex/ui/primitives";
 import { useNavigation } from "../../app/providers/navigation";
-import { useToast } from "../../app/providers/toast";
+import { useRpc } from "../../hooks/useRpc";
 import { tabOf, type PageTab } from "../../lib/routes";
-import { McpPanel } from "./McpPanel";
-import { PluginsPanel, type PluginView } from "./PluginsPanel";
+import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import { SkillsPanel } from "./SkillsPanel";
-import { installedPlugins, mcpServers, sampleSkills } from "./sample";
-import { useToggles } from "./useToggles";
-
-type ExtensionsTab = PageTab<"extensions">;
-
-const TABS_ID = "extensions-tabs";
-
-const tabItems = [
-  { value: "skills", label: "Skills", count: sampleSkills.length },
-  { value: "mcp", label: "MCP servers", count: mcpServers.length },
-  { value: "plugins", label: "Plugins", count: installedPlugins.length },
-] as const satisfies readonly { value: ExtensionsTab; label: string; count: number }[];
+import { McpPanel } from "./McpPanel";
+import { PluginsPanel } from "./PluginsPanel";
+import { WebSearchPanel } from "./WebSearchPanel";
 
 export function ExtensionsPage() {
   const { route, replace } = useNavigation();
-  const notify = useToast();
   const tab = tabOf(route, "extensions");
-  // Toggles and the plugin view live here so they survive switching tabs.
-  const skillToggles = useToggles(sampleSkills);
-  const pluginToggles = useToggles(installedPlugins);
-  const [pluginView, setPluginView] = useState<PluginView>("installed");
-
-  // A sidebar shortcut to an installed plugin shows the installed view, where its card is marked.
-  useEffect(() => {
-    if (tab === "plugins" && route.id) setPluginView("installed");
-  }, [tab, route.id]);
-
-  const primary: Record<ExtensionsTab, { label: string; onClick: () => void }> = {
-    skills: {
-      label: "Install skill",
-      onClick: () => notify("Preview: installing skills will be available when AiDEX Core is connected."),
-    },
-    mcp: {
-      label: "Add server",
-      onClick: () => notify("Preview: adding MCP servers will be available when AiDEX Core is connected."),
-    },
-    plugins: { label: "Browse marketplace", onClick: () => setPluginView("marketplace") },
+  const skills = useRpc("extensions.skills.list");
+  const servers = useRpc("extensions.mcp.list");
+  const plugins = useRpc("extensions.plugins.list");
+  const [adding, setAdding] = useState(false);
+  const refresh = () => {
+    skills.refetch();
+    servers.refetch();
+    plugins.refetch();
+    window.dispatchEvent(new Event("aidex:extensions-changed"));
   };
-  const action = primary[tab];
-
+  const action = {
+    skills: "Import skill",
+    mcp: "Add MCP server",
+    plugins: "Install plugin bundle",
+  }[tab];
   return (
     <PageFrame width="default">
-      <PageHeader
-        title="Plugins"
-        description="Reusable skills, MCP servers, and extensions in one place."
-        actions={
-          <Button variant="primary" icon={tab === "plugins" ? <GridIcon /> : <PlusIcon />} onClick={action.onClick}>
-            {action.label}
-          </Button>
-        }
-      />
-      <Tabs
-        id={TABS_ID}
-        label="Plugin sections"
-        variant="underline"
-        items={tabItems}
-        value={tab}
-        onValueChange={(next) => replace({ page: "extensions", tab: next })}
-      />
-      {/* Panels are keyed by the route id so a sidebar shortcut re-opens them with that item selected. */}
-      <TabPanel tabsId={TABS_ID} value={tab}>
-        {tab === "skills" ? <SkillsPanel key={route.id} toggles={skillToggles} initialEditingId={route.id} /> : null}
-        {tab === "mcp" ? <McpPanel key={route.id} initialServerId={route.id} /> : null}
-        {tab === "plugins" ? (
-          <PluginsPanel view={pluginView} onViewChange={setPluginView} toggles={pluginToggles} focusId={route.id} />
-        ) : null}
-      </TabPanel>
+      <Stack gap={5}>
+        <PageHeader
+          title="Extensions"
+          description="Portable skills, scoped MCP servers, and plugin contributions."
+          actions={
+            <Button icon={<PlusIcon />} onClick={() => setAdding(true)}>
+              {action}
+            </Button>
+          }
+        />
+        <CoreStatusNotice requires="daemon" />
+        <Tabs
+          id="extensions-tabs"
+          label="Extension sections"
+          variant="underline"
+          value={tab}
+          items={[
+            { value: "skills", label: "Skills", count: skills.data?.length },
+            { value: "mcp", label: "MCP servers", count: servers.data?.length },
+            { value: "plugins", label: "Plugins", count: plugins.data?.length },
+          ]}
+          onValueChange={(next: PageTab<"extensions">) => {
+            setAdding(false);
+            replace({ page: "extensions", tab: next });
+          }}
+        />
+        <TabPanel tabsId="extensions-tabs" value={tab}>
+          {tab === "skills" && (
+            <Stack gap={5}>
+              <SkillsPanel
+                key={route.id}
+                initialEditingId={route.id}
+                adding={adding}
+                onCloseImport={() => setAdding(false)}
+                onChanged={refresh}
+              />
+              <WebSearchPanel />
+            </Stack>
+          )}
+          {tab === "mcp" && (
+            <McpPanel
+              key={route.id}
+              initialServerId={route.id}
+              adding={adding}
+              onCloseAdd={() => setAdding(false)}
+              onChanged={refresh}
+            />
+          )}
+          {tab === "plugins" && (
+            <PluginsPanel
+              adding={adding}
+              onCloseInstall={() => setAdding(false)}
+              onChanged={refresh}
+            />
+          )}
+        </TabPanel>
+      </Stack>
     </PageFrame>
   );
 }

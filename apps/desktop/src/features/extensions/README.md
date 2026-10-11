@@ -1,16 +1,12 @@
-# Extensions feature
+# Extensions
 
-The Plugins screen (route `extensions`) for skills, MCP servers, and plugins, plus its sidebar. Everything is composed from `@aidex/ui`; the data is sample data in `sample.ts` until AiDEX Core exposes installed skills, MCP servers, plugins, and the marketplace.
+Skills, plugins, and MCP instances use the `extensions.*` daemon API documented in `crates/extensions/API.md`. Lists contain installed records only; enable switches await persisted writes and refetch on success.
 
-| File | Shows |
-| --- | --- |
-| `ExtensionsPage.tsx` | Header with a tab-dependent primary action and underline tabs bound to the route tab (`skills`, `mcp`, `plugins`). Holds enable toggles and the plugin view so they survive tab switches. |
-| `SkillsPanel.tsx` | Search and status filter, skills grouped by category with enable switches; "Edit" opens a split list / editor. |
-| `SkillEditor.tsx` | Monospace SKILL.md editor with Save (preview toast) and Cancel. |
-| `McpPanel.tsx` | Split server list and detail for the selected server. |
-| `McpServerDetail.tsx` | Status, transport, command or URL, exposed tools, authentication, recent log, and Start / Restart / Disconnect actions. |
-| `PluginsPanel.tsx` | Installed and Marketplace views: plugin cards with permission badges, enable switches, Install, and the sandboxing note. |
-| `ExtensionsSidebar.tsx` | Browse (tabs, active by tab) and Enabled shortcuts, which open a tab with an item selected through the route `id`. |
-| `useToggles.ts` | In-memory on/off state for skills and plugins. |
+- Skills import complete SKILL.md content with explicit trust/workspace/profile grants. Editing sends the saved digest to detect concurrent changes. Plugin-contributed skills are read-only here and updated by replacing their bundle.
+- Plugins browse a versioned first-party catalog bundled with AiDEX; installation binds the reviewed package version/digest and requires explicit trust plus nonempty workspace/profile grants. External bundles can also be imported from reviewed JSON manifests and declared skill-content maps. Enable/remove actions affect the installed contributions. The bundled catalog is distinct from an online vendor marketplace.
+- MCP configuration contains literal stdio executable/argv or an HTTPS URL, bounds, grants, and vault secret references. Connect/test/discover/restart/disconnect/cancel operate on the selected registered workspace and exact permission profile. Full access is explicit. Tools, invocation names, and schemas come from actual discovery; connection errors are shown directly. HTTPS and stdio call tools expose their separate approval and permission requirements.
+- `WebSearchPanel` connects Brave or Tavily search for native agent tools. Metadata and API keys use `web.*`; keys are cleared from the form after saving and never stored in preferences. Credential presence remains distinct from live provider verification.
 
-Enable switches and selection are local UI state; install, add, save, authenticate, and server actions show a "Preview" toast until Core is connected.
+Empty grants deny access. `*` explicitly grants all workspaces or profiles. Lists and sidebars do not start MCP processes. Browser OAuth and fabricated server logs are not presented as available MCP features.
+
+MCP connect/discover may return an asynchronous `connecting` summary. The panel polls only while a connection job is pending, keeps cancellation available after the start RPC returns, and distinguishes a requested connection from a completed tool catalog.

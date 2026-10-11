@@ -1,7 +1,7 @@
 //! Native ownership of execution permits and the tool registry.
 use crate::launcher::NativeLauncher;
 use aidex_core::{EntityId, WorkspacePath};
-use aidex_events::NullEventSink;
+use aidex_events::EventSink;
 use aidex_native_sessions::{PermissionMode, SessionDetail};
 use aidex_policy::{
     EvaluationContext, HostTrust, NetworkMode, PolicySet, PrivacyMode, Profile, ProjectRules,
@@ -19,6 +19,53 @@ pub(crate) struct Broker {
     pub sandbox: Sandbox,
     pub workspaces: Arc<WorkspaceRegistry>,
     scratch: PathBuf,
+    events: Arc<dyn EventSink>,
+}
+pub(crate) enum PrepareError {
+    Fatal(String),
+    Repairable { code: String, message: String },
+}
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fatal(message) | Self::Repairable { message, .. } => f.write_str(message),
+        }
+    }
+}
+impl From<String> for PrepareError {
+    fn from(value: String) -> Self {
+        Self::Fatal(value)
+    }
+}
+impl From<&str> for PrepareError {
+    fn from(value: &str) -> Self {
+        Self::Fatal(value.into())
+    }
+}
+impl From<PrepareError> for String {
+    fn from(value: PrepareError) -> Self {
+        value.to_string()
+    }
+}
+fn planning_error(error: aidex_tools::ToolError) -> PrepareError {
+    use aidex_tools::{InputError, ToolError};
+    let repairable = matches!(
+        &error,
+        ToolError::UnknownTool(_)
+            | ToolError::NotFound { .. }
+            | ToolError::WrongKind { .. }
+            | ToolError::TooLarge { .. }
+            | ToolError::Conflict { .. }
+            | ToolError::PatchFailed { .. }
+    ) || matches!(&error, ToolError::InvalidInput { reason, .. } if *reason != InputError::InvalidPath);
+    if repairable {
+        PrepareError::Repairable {
+            code: error.reason().into(),
+            message: error.to_string(),
+        }
+    } else {
+        PrepareError::Fatal(error.to_string())
+    }
 }
 pub(crate) struct Prepared {
     pub context: ToolContext,
@@ -115,19 +162,25 @@ impl Broker {
         }
         Ok(())
     }
-    pub fn new(workspaces: Arc<WorkspaceRegistry>, scratch: PathBuf) -> Self {
+    pub fn new(
+        workspaces: Arc<WorkspaceRegistry>,
+        scratch: PathBuf,
+        tools: ToolRegistry,
+        events: Arc<dyn EventSink>,
+    ) -> Self {
         Self {
-            tools: ToolRegistry::with_builtin_tools(),
+            tools,
             sandbox: Sandbox::locate(),
             workspaces,
             scratch,
+            events: Arc::new(crate::telemetry::ToolEventSink(events)),
         }
     }
     pub fn prepare(
         &self,
         s: &SessionDetail,
         call: &aidex_providers::ToolCall,
-    ) -> Result<Prepared, String> {
+    ) -> Result<Prepared, PrepareError> {
         let workspace = s
             .configuration
             .workspace_id
@@ -142,14 +195,30 @@ impl Broker {
             handle.id().clone(),
             EntityId::generate("call").map_err(|e| e.to_string())?,
             Arc::new(handle.root().clone()),
-            Arc::new(NullEventSink),
+            self.events.clone(),
         );
-        let tool = self
-            .tools
-            .resolve_model_name(&call.name)
-            .ok_or("unknown native tool")?;
+        let tool =
+            self.tools
+                .resolve_model_name(&call.name)
+                .ok_or_else(|| PrepareError::Repairable {
+                    code: "unknown_tool".into(),
+                    message: "unknown native tool; use the offered catalog".into(),
+                })?;
+        if self.tools.descriptor(tool).is_some_and(|d| {
+            d.capabilities
+                .iter()
+                .any(|c| c == "permissions:full_access")
+        }) && s.configuration.permission_mode != PermissionMode::FullAccess
+        {
+            return Err(PrepareError::Fatal(
+                "tool requires explicit full_access permission".into(),
+            ));
+        }
         let input: serde_json::Value =
-            serde_json::from_str(&call.arguments).map_err(|_| "invalid tool arguments JSON")?;
+            serde_json::from_str(&call.arguments).map_err(|_| PrepareError::Repairable {
+                code: "invalid_input".into(),
+                message: "invalid tool arguments JSON".into(),
+            })?;
         if tool.as_str() == "fs.delete" {
             if input
                 .get("recursive")
@@ -181,7 +250,7 @@ impl Broker {
         let plan = self
             .tools
             .plan(&context, tool, input)
-            .map_err(|e| e.to_string())?;
+            .map_err(planning_error)?;
         let (policies, policy_fingerprint) =
             self.policy_state(Some(&handle.root().display_root()), Some(handle.id()))?;
         let profile = if s.configuration.permission_mode == PermissionMode::FullAccess {
@@ -200,7 +269,7 @@ impl Broker {
         for intent in plan.intents() {
             let d = evaluate(&policies, &evaluation, &intent);
             if d.verdict.is_deny() {
-                return Err(format!("policy denied: {}", d.reason));
+                return Err(format!("policy denied: {}", d.reason).into());
             }
             if d.rate_limit.is_some() {
                 return Err("rate-limited tools unavailable in native v1".into());
@@ -239,6 +308,8 @@ impl Broker {
             self.scratch.clone(),
             plan.fingerprint(),
             level,
+            context.events.clone(),
+            context.scope(),
         ));
         let context = context.with_launcher(launcher);
         let mut before = vec![];

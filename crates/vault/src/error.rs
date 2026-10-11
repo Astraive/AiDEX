@@ -40,6 +40,8 @@ pub enum HandleDenial {
     ConsumerMismatch,
     /// The secret was deleted after the handle was issued.
     SecretDeleted,
+    /// An approval was bound to an older credential record revision.
+    RevisionChanged,
     /// The secret's policy no longer allows the handle's consumer.
     PolicyRevoked,
 }
@@ -54,6 +56,7 @@ impl HandleDenial {
             Self::Expired => "handle_expired",
             Self::ConsumerMismatch => "consumer_mismatch",
             Self::SecretDeleted => "secret_deleted",
+            Self::RevisionChanged => "secret_revision_changed",
             Self::PolicyRevoked => "policy_revoked",
         }
     }

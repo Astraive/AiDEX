@@ -12,6 +12,25 @@ use std::{
     time::{Duration, Instant},
 };
 impl NativeEngine {
+    fn reserve_inference_retry(&self, run: &Run) -> Result<(), String> {
+        self.store.update(&run.session_id, |session| {
+            let maximum = session.configuration.max_steps;
+            let run = session
+                .runs
+                .iter_mut()
+                .find(|r| r.id == run.id)
+                .ok_or("run not found")?;
+            if run.steps >= maximum {
+                return Err("native run step budget exhausted before inference retry".into());
+            }
+            if run.status == aidex_native_sessions::RunStatus::Cancelled {
+                return Err("run cancelled".into());
+            }
+            run.steps += 1;
+            run.inference_retries = run.inference_retries.saturating_add(1);
+            Ok(())
+        })
+    }
     fn validate_model(
         &self,
         target: &ModelRef,
@@ -98,9 +117,20 @@ impl NativeEngine {
                 if let StreamEvent::TextDelta { text } = event {
                     partial.push_str(text);
                     if let Some(scope) = &scope {
-                        let _ = self
-                            .events
-                            .emit(scope.clone(), EventKind::AgentDelta { text: text.clone() });
+                        if let Ok(agent_id) = EntityId::new(&run.id) {
+                            let _ = self.events.emit(
+                                scope.clone(),
+                                EventKind::AgentRunDelta {
+                                    agent_id,
+                                    text: text.clone(),
+                                },
+                            );
+                        }
+                        if run.parent_run_id.is_none() {
+                            let _ = self
+                                .events
+                                .emit(scope.clone(), EventKind::AgentDelta { text: text.clone() });
+                        }
                     }
                     if last.elapsed() >= Duration::from_millis(100) || partial.len() - saved >= 4096
                     {
@@ -149,8 +179,53 @@ impl NativeEngine {
                 aidex_providers::Locality::Remote => aidex_policy::ModelLocality::Remote,
             }),
         )?;
-        let bounded = bound_request(request, &model, config).map_err(|e| e.to_string())?;
-        match self.attempt(provider.as_ref(), &bounded, run, index, cancel) {
+        let (bounded, trimmed) =
+            bound_request(request, &model, config).map_err(|e| e.to_string())?;
+        self.store.update(&run.session_id, |session| {
+            let run = session
+                .runs
+                .iter_mut()
+                .find(|r| r.id == run.id)
+                .ok_or("run not found")?;
+            run.context_trimmed_messages = run.context_trimmed_messages.max(trimmed);
+            Ok(())
+        })?;
+        let mut retries = 0;
+        let result = loop {
+            match self.attempt(provider.as_ref(), &bounded, run, index, cancel) {
+                Err(error)
+                    if error.is_retryable()
+                        && !cancel.is_stopped()
+                        && config.fallback_model.is_none()
+                        && retries < 2 =>
+                {
+                    let delay = match &error {
+                        ProviderError::RateLimited {
+                            retry_after: Some(delay),
+                        } if *delay > Duration::from_secs(2) => break Err(error),
+                        ProviderError::RateLimited {
+                            retry_after: Some(delay),
+                        } => (*delay).max(Duration::from_millis(100 * u64::from(retries + 1))),
+                        _ => Duration::from_millis(100 * u64::from(retries + 1)),
+                    };
+                    retries += 1;
+                    self.reserve_inference_retry(run)?;
+                    self.emit(
+                        &run.session_id,
+                        EventKind::AgentRetry {
+                            attempt: retries,
+                            reason: "retryable inference failure; no tool effect retried".into(),
+                        },
+                    );
+                    let deadline = Instant::now() + delay;
+                    while Instant::now() < deadline && !cancel.is_stopped() {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                result => break result,
+            }
+        };
+        match result {
             Ok(response) => Ok(response),
             Err(error) => {
                 if !error.is_retryable() || cancel.is_stopped() {
@@ -172,6 +247,7 @@ impl NativeEngine {
                         aidex_providers::Locality::Remote => aidex_policy::ModelLocality::Remote,
                     }),
                 )?;
+                self.reserve_inference_retry(run)?;
                 // Event references encode provider/model with portable punctuation;
                 // full configured model references remain in encrypted session configuration.
                 self.emit(
@@ -185,8 +261,18 @@ impl NativeEngine {
                 );
                 let mut fallback_request = request.clone();
                 fallback_request.model = target_fallback.model_id;
-                let fallback_request = bound_request(&fallback_request, &fallback_model, config)
-                    .map_err(|e| e.to_string())?;
+                let (fallback_request, trimmed) =
+                    bound_request(&fallback_request, &fallback_model, config)
+                        .map_err(|e| e.to_string())?;
+                self.store.update(&run.session_id, |session| {
+                    let run = session
+                        .runs
+                        .iter_mut()
+                        .find(|r| r.id == run.id)
+                        .ok_or("run not found")?;
+                    run.context_trimmed_messages = run.context_trimmed_messages.max(trimmed);
+                    Ok(())
+                })?;
                 self.attempt(
                     fallback_provider.as_ref(),
                     &fallback_request,
@@ -220,13 +306,20 @@ fn bound_request(
     request: &ChatRequest,
     model: &ModelDescriptor,
     configuration: &SessionConfig,
-) -> Result<ChatRequest, ProviderError> {
+) -> Result<(ChatRequest, u32), ProviderError> {
     let mut bounded = request.clone();
     let mut budget = configuration
         .max_tokens
         .min(model.max_output_tokens.unwrap_or(configuration.max_tokens));
+    let mut trimmed = 0;
     if model.source != CapabilitySource::Assumed && model.context_window > 0 {
-        let input = request.estimated_input_tokens();
+        let reserve = budget.min((model.context_window / 4).max(1));
+        trimmed = u32::try_from(crate::context::trim_replay(
+            &mut bounded,
+            model.context_window.saturating_sub(reserve),
+        ))
+        .unwrap_or(u32::MAX);
+        let input = bounded.estimated_input_tokens();
         let remaining = model.context_window.saturating_sub(input);
         if remaining == 0 {
             return Err(ProviderError::ContextOverflow {
@@ -242,5 +335,5 @@ fn bound_request(
         ));
     }
     bounded.max_tokens = Some(budget);
-    Ok(bounded)
+    Ok((bounded, trimmed))
 }

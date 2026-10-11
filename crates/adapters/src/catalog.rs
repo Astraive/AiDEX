@@ -72,6 +72,7 @@ pub struct DriverInfo {
     pub permission_modes: Vec<PermissionMode>,
     pub limitations: Vec<String>,
     pub auth_methods: Vec<String>,
+    pub supports_mcp_bridge: bool,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeHealth {
@@ -152,6 +153,9 @@ impl Driver {
         if matches!(self, Self::ClaudeCode | Self::Cursor) {
             limitations.push("Print protocol does not expose AiDEX approval mediation in this adapter; only explicit full access is supported.".into());
         }
+        if !crate::bridge::supported(self) {
+            limitations.push("AiDEX's scoped MCP tool bridge is unsupported by this adapter; vendor tools remain vendor owned.".into());
+        }
         DriverInfo {
             driver: self,
             name: name.into(),
@@ -161,8 +165,14 @@ impl Driver {
             modes: vec![Mode::Agent],
             permission_modes: vec![PermissionMode::FullAccess],
             limitations,
+            supports_mcp_bridge: crate::bridge::supported(self),
             auth_methods: if self == Self::Codex {
-                vec!["codex_oauth".into(), "vault".into()]
+                vec![
+                    "native_cli".into(),
+                    "profile_import".into(),
+                    "codex_oauth".into(),
+                    "vault".into(),
+                ]
             } else {
                 vec!["vault".into()]
             },

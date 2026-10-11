@@ -1,30 +1,44 @@
 import { SidebarItem, SidebarSection } from "@aidex/ui/desktop";
-import { PlusCircleIcon } from "@aidex/ui/icons";
+import { useEffect } from "react";
+import { BotIcon, PlusCircleIcon, TerminalIcon } from "@aidex/ui/icons";
+import { Text } from "@aidex/ui/primitives";
 import { useNavigation } from "../../app/providers/navigation";
+import { useRpc } from "../../hooks/useRpc";
 import { SectionSidebar } from "../../layouts/SectionSidebar";
-import { agentById, builtInAgents, externalRuntimes, type SampleAgent } from "./sample";
-import { useAgentActions } from "./useAgentActions";
 
-/** Shared by the agent catalog and agent settings; the agent being configured (route `id`) is active. */
 export function AgentCenterSidebar() {
-  const { route } = useNavigation();
-  const actions = useAgentActions();
-  const activeId = route.page === "agent-config" ? agentById(route.id).id : undefined;
-
-  const item = (agent: SampleAgent) => (
-    <SidebarItem
-      key={agent.id}
-      label={agent.name}
-      icon={<agent.Icon />}
-      active={agent.id === activeId}
-      onSelect={() => actions.configure(agent)}
-    />
-  );
-
+  const { route, navigate } = useNavigation();
+  const runtimes = useRpc("runtime.list");
+  useEffect(runtimes.refetch, [route.id, runtimes.refetch]);
   return (
-    <SectionSidebar title="Agents" action={{ label: "New agent", icon: <PlusCircleIcon />, onClick: actions.createAgent }}>
-      <SidebarSection title="Installed">{builtInAgents.map(item)}</SidebarSection>
-      <SidebarSection title="External runtimes">{externalRuntimes.map(item)}</SidebarSection>
+    <SectionSidebar
+      title="Agents"
+      action={{
+        label: "Add runtime",
+        icon: <PlusCircleIcon />,
+        onClick: () => navigate({ page: "agent-config" }),
+      }}
+    >
+      <SidebarSection title="Built in">
+        <SidebarItem
+          label="AiDEX Native"
+          icon={<BotIcon />}
+          active={route.page === "agent-config" && route.id === "native"}
+          onSelect={() => navigate({ page: "agent-config", id: "native" })}
+        />
+      </SidebarSection>
+      <SidebarSection title="External instances">
+        {runtimes.data?.runtimes.map((runtime) => (
+          <SidebarItem
+            key={runtime.id}
+            label={runtime.id}
+            icon={<TerminalIcon />}
+            active={route.id === runtime.id}
+            onSelect={() => navigate({ page: "agent-config", id: runtime.id })}
+          />
+        ))}
+        {runtimes.error && <Text tone="muted">{runtimes.error.message}</Text>}
+      </SidebarSection>
     </SectionSidebar>
   );
 }

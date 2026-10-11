@@ -288,6 +288,31 @@ impl VaultService {
         self.with_vault(|vault| vault.meta(name))
     }
 
+    /// Backend-only metadata; no credential value or handle is exposed.
+    pub fn secret_version(&self, name: &SecretName) -> Result<crate::SecretVersion, VaultError> {
+        self.with_vault(|vault| vault.secret_version(name))
+    }
+
+    /// Atomically check an approved revision, then resolve and revoke its scoped handle.
+    pub fn resolve_versioned(
+        &self,
+        name: &SecretName,
+        consumer: &ConsumerScope,
+        expected: &crate::SecretVersion,
+    ) -> Result<SecretBytes, VaultError> {
+        self.with_vault(|vault| {
+            if &vault.secret_version(name)? != expected {
+                return Err(VaultError::HandleDenied(
+                    crate::HandleDenial::RevisionChanged,
+                ));
+            }
+            let handle = vault.issue_handle(name, consumer, Duration::from_secs(30))?;
+            let result = vault.resolve(&handle, consumer);
+            vault.revoke_handle(&handle.handle_id);
+            result
+        })
+    }
+
     pub fn delete_secret(&self, name: &SecretName) -> Result<SecretMeta, VaultError> {
         self.with_vault(|vault| vault.delete(name))
     }

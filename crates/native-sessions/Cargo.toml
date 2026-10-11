@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 aidex-core = { path = "../core" }
+aidex-runtime-bridge = { path = "../runtime-bridge" }
 aidex-vault = { path = "../vault" }
 aidex-providers = { path = "../providers" }
 rusqlite = { version = "0.32", features = ["bundled"] }

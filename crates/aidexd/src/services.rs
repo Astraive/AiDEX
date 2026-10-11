@@ -5,8 +5,11 @@
 //! are added here as fields constructed in [`Services::open`]; their JSON-RPC
 //! adapters live in `methods/<domain>.rs`.
 
+pub(crate) mod credential_guard;
+mod extensions;
 mod inference;
 mod models;
+mod runtime;
 
 pub use models::{EventsModelObserver, ModelServices, VaultCredentials, model_event_kind};
 
@@ -66,6 +69,9 @@ pub struct Services {
     inference: Arc<aidex_inference::InferenceService>,
     updates: Result<Arc<Updater>, String>,
     update_recovery: Mutex<Option<Result<UpdateRecovery, String>>>,
+    extensions: Arc<aidex_extensions::ExtensionService>,
+    web: Arc<aidex_web::WebService>,
+    runtime: Arc<aidex_adapters::RuntimeManager>,
 }
 
 impl Services {
@@ -128,15 +134,43 @@ impl Services {
             )
             .map_err(|e| ServicesError::new("native", ServiceErrorCode::Unavailable, e))?,
         );
-        let native = aidex_harness::NativeEngine::new(
+        let offline = models.offline().clone();
+        let gate_vault = vault.clone();
+        let gate: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+            !offline.is_offline() && gate_vault.status().state == aidex_vault::VaultState::Unlocked
+        });
+        let extensions =
+            aidex_extensions::ExtensionService::open(paths.clone(), vault.clone(), gate.clone())
+                .map_err(|e| {
+                    ServicesError::new("extensions", ServiceErrorCode::Unavailable, e.to_string())
+                })?;
+        let web = aidex_web::WebService::open(&paths, vault.clone(), gate)
+            .map_err(|e| ServicesError::new("web", ServiceErrorCode::Unavailable, e.to_string()))?;
+        let mut tools = aidex_tools::ToolRegistry::with_builtin_tools();
+        for tool in extensions
+            .tool_adapters()
+            .into_iter()
+            .chain(web.tool_adapters())
+        {
+            tools
+                .register(tool)
+                .map_err(|e| ServicesError::new("tools", e.code(), e.to_string()))?;
+        }
+        let native = aidex_harness::NativeEngine::with_tools(
             private_sessions,
             models.registry().clone(),
             workspaces.clone(),
             Arc::new(events.clone()),
             runtime.join("native-processes"),
+            tools,
+            Arc::new(extensions::ExtensionPromptContext {
+                service: extensions.clone(),
+                offline: models.offline().clone(),
+            }),
         );
         let inference = inference::open_inference(&paths, &models)?;
         let updates = open_updates(&paths, &events, updater);
+        let runtime_manager = runtime::open_runtime(&paths, vault.clone(), &models)?;
         Ok(Self {
             drive_root: drive_root.to_path_buf(),
             paths,
@@ -154,6 +188,9 @@ impl Services {
             inference,
             updates,
             update_recovery: Mutex::new(None),
+            extensions,
+            web,
+            runtime: runtime_manager,
         })
     }
 
@@ -189,6 +226,23 @@ impl Services {
     /// broker are Rust methods on [`VaultService`]; they are not RPC methods.
     pub fn vault(&self) -> &Arc<VaultService> {
         &self.vault
+    }
+    pub fn extensions(&self) -> &Arc<aidex_extensions::ExtensionService> {
+        &self.extensions
+    }
+    pub fn web(&self) -> &Arc<aidex_web::WebService> {
+        &self.web
+    }
+    pub fn runtime(&self) -> &Arc<aidex_adapters::RuntimeManager> {
+        &self.runtime
+    }
+    /// Restore executor registrations after unlocking without starting a process.
+    pub fn ensure_runtime_registry(&self) -> Result<(), String> {
+        if self.native.runtime_descriptors().is_empty() {
+            self.native
+                .synchronize_runtimes(self.runtime.executors().map_err(|e| e.to_string())?)?;
+        }
+        Ok(())
     }
 
     /// Workspace registry and confinement (`aidex-workspace`).

@@ -253,6 +253,7 @@ impl Tool for ShellExec {
             },
         });
         let facts = PlanFacts {
+            secrets: vec![],
             paths: vec![plan_path(
                 cwd.as_ref(),
                 &absolute,

@@ -1,90 +1,225 @@
-import { useRef, useState, type FormEvent } from "react";
-import { KeyIcon, PlusIcon } from "@aidex/ui/icons";
-import { Button, Card, Grid, PasswordField, Select, Stack, TextField } from "@aidex/ui/primitives";
-import { useToast } from "../../app/providers/toast";
-import { sampleWorkspaces } from "../../lib/sample/workspaces";
+import { useEffect, useState, type FormEvent } from "react";
+import { Notice } from "@aidex/ui/components";
+import {
+  Button,
+  Card,
+  PasswordField,
+  Select,
+  Stack,
+  Text,
+  TextArea,
+  TextField,
+} from "@aidex/ui/primitives";
+import { call } from "@aidex/client/rpc";
+import { toAidexError } from "@aidex/client/errors";
+import type { SecretKind, SecretMeta } from "@aidex/client/dto/vault";
+import { useRpc } from "../../hooks/useRpc";
+import {
+  consumerList,
+  managedSecret,
+  secretPolicyError,
+  validConsumer,
+} from "./secretPolicy";
 
-const SECRET_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]*$/;
-const GLOBAL_SCOPE = "all";
-
-const scopeOptions = [
-  { value: GLOBAL_SCOPE, label: "All workspaces" },
-  ...sampleWorkspaces.map((workspace) => ({ value: workspace.id, label: workspace.name })),
-];
-
-type Errors = { name?: string; value?: string };
-
-function validate(name: string, value: string): Errors {
-  const errors: Errors = {};
-  if (!name.trim()) errors.name = "Enter a name, e.g. ANTHROPIC_API_KEY.";
-  else if (!SECRET_NAME_PATTERN.test(name.trim())) errors.name = "Use letters, digits, hyphens, and underscores only.";
-  if (!value) errors.value = "Enter the secret value.";
-  return errors;
-}
-
-/**
- * Inline form for a new vault secret. There is no vault yet, so submitting only validates and
- * clears the value from state; the value is never stored, logged, or sent anywhere.
- */
-export function AddSecretForm() {
-  const [name, setName] = useState("");
+export function AddSecretForm({
+  editing,
+  existingNames,
+  disabled,
+  onSaved,
+  onCommitted,
+  onCancel,
+}: {
+  editing?: SecretMeta;
+  existingNames: string[];
+  disabled?: boolean;
+  onSaved: () => void;
+  onCommitted: () => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(editing?.name ?? "");
   const [value, setValue] = useState("");
-  const [scope, setScope] = useState(GLOBAL_SCOPE);
-  const [errors, setErrors] = useState<Errors>({});
-  const nameRef = useRef<HTMLInputElement>(null);
-  const valueRef = useRef<HTMLInputElement>(null);
-  const notify = useToast();
-
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const [kind, setKind] = useState<SecretKind>(editing?.kind ?? "api_key");
+  const [scopes, setScopes] = useState(
+    editing?.policy.allowed_consumers.join("\n") ?? "",
+  );
+  const [multiline, setMultiline] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const providers = useRpc("model.providers");
+  const servers = useRpc("extensions.mcp.list");
+  const runtimes = useRpc("runtime.list");
+  useEffect(() => {
+    if (disabled) setValue("");
+  }, [disabled]);
+  const suggestions = [
+    ...(providers.data?.providers ?? []).map((provider) => ({
+      value: `provider:${provider.descriptor.id}`,
+      label: `Provider ${provider.descriptor.id}`,
+    })),
+    ...(servers.data ?? []).map((server) => ({
+      value: `mcp:${server.id}`,
+      label: `MCP ${server.name}`,
+    })),
+    ...(runtimes.data?.runtimes ?? []).map((runtime) => ({
+      value: `process:runtime-${runtime.id}`,
+      label: `Runtime ${runtime.id}`,
+    })),
+  ].filter((option) => validConsumer(option.value));
+  const save = async (event: FormEvent) => {
     event.preventDefault();
-    const nextErrors = validate(name, value);
-    setErrors(nextErrors);
-    if (nextErrors.name) return nameRef.current?.focus();
-    if (nextErrors.value) return valueRef.current?.focus();
-
-    const scopeLabel = scopeOptions.find((option) => option.value === scope)?.label ?? "All workspaces";
-    setValue("");
-    setName("");
-    notify(`Preview: ${name.trim()} would be encrypted into the vault for ${scopeLabel} once AiDEX Core is connected. The value was discarded.`);
+    setError(undefined);
+    const consumers = consumerList(scopes),
+      trimmed = name.trim();
+    const invalid = secretPolicyError(trimmed, consumers);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
+    if (managedSecret({ name: trimmed })) {
+      setError(
+        "This record is managed by AiDEX. Use its account or runtime lifecycle instead.",
+      );
+      return;
+    }
+    if (!editing && existingNames.includes(trimmed)) {
+      setError(
+        "That secret exists. Use Replace value on its row to rotate it deliberately.",
+      );
+      return;
+    }
+    if (!value) {
+      setError("Enter a new value. Stored values cannot be read back.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await call("vault.secret.set", { name: trimmed, value, kind, consumers });
+      setValue("");
+      onSaved();
+    } catch (caught) {
+      const failure = toAidexError(caught);
+      setError(failure.message);
+      if ((failure.data as { committed?: boolean } | undefined)?.committed)
+        onCommitted();
+    } finally {
+      setValue("");
+      setBusy(false);
+    }
   };
-
   return (
     <Card padding="md">
-      <form onSubmit={handleSubmit} noValidate aria-label="Add secret">
-        <Stack gap={5}>
-          <Grid columns={3} gap={4}>
-            <TextField
-              ref={nameRef}
-              label="Name"
-              placeholder="ANTHROPIC_API_KEY"
-              leadingIcon={<KeyIcon />}
+      <form onSubmit={(event) => void save(event)}>
+        <Stack gap={4}>
+          <Text>
+            {editing
+              ? `Replace value and exact scopes · ${editing.name}`
+              : "Add a scoped secret"}
+          </Text>
+          {error && <Notice tone="danger">{error}</Notice>}
+          <TextField
+            label="Secret reference name"
+            required
+            disabled={disabled || busy || !!editing}
+            value={name}
+            maxLength={128}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => setName(event.target.value)}
+            hint="Use this name in runtime authentication or MCP secret references. Stored values cannot be read back."
+          />
+          <Select
+            label="Secret kind"
+            disabled={disabled || busy}
+            value={kind}
+            options={[
+              { value: "api_key", label: "API key" },
+              { value: "token", label: "Token" },
+              { value: "password", label: "Password" },
+              { value: "ssh_key", label: "SSH key" },
+              { value: "private_key", label: "Private key" },
+              { value: "generic", label: "Generic text" },
+            ]}
+            onChange={(event) => setKind(event.target.value as SecretKind)}
+          />
+          {multiline ? (
+            <TextArea
+              label="New multiline value (visible while entered)"
+              rows={5}
+              value={value}
               autoComplete="off"
               spellCheck={false}
-              value={name}
-              error={errors.name}
-              onChange={(event) => {
-                setName(event.target.value);
-                setErrors((current) => ({ ...current, name: undefined }));
-              }}
+              disabled={disabled || busy}
+              onChange={(event) => setValue(event.target.value)}
             />
+          ) : (
             <PasswordField
-              ref={valueRef}
-              label="Value"
-              placeholder="Paste the secret"
-              revealLabel="Show secret value"
-              autoComplete="off"
+              label="New secret value"
               value={value}
-              error={errors.value}
-              onChange={(event) => {
-                setValue(event.target.value);
-                setErrors((current) => ({ ...current, value: undefined }));
-              }}
+              autoComplete="off"
+              disabled={disabled || busy}
+              onChange={(event) => setValue(event.target.value)}
             />
-            <Select label="Scope" options={scopeOptions} value={scope} onChange={(event) => setScope(event.target.value)} />
-          </Grid>
-          <Stack direction="row" justify="end">
-            <Button type="submit" variant="primary" size="md" icon={<PlusIcon />}>
-              Add secret
+          )}
+          <Button
+            variant="ghost"
+            disabled={disabled || busy}
+            onClick={() => {
+              setValue("");
+              setMultiline(!multiline);
+            }}
+          >
+            {multiline
+              ? "Use masked single-line input"
+              : "Enter a multiline value"}
+          </Button>
+          <Select
+            label="Add a configured consumer"
+            value=""
+            disabled={disabled || busy}
+            options={[
+              { value: "", label: "Choose a provider, MCP server, or runtime" },
+              ...suggestions,
+            ]}
+            onChange={(event) => {
+              if (event.target.value)
+                setScopes(
+                  [...consumerList(scopes), event.target.value]
+                    .filter((scope, index, all) => all.indexOf(scope) === index)
+                    .join("\n"),
+                );
+            }}
+          />
+          <TextArea
+            label="Exact allowed consumers"
+            rows={4}
+            monospace
+            value={scopes}
+            disabled={disabled || busy}
+            onChange={(event) => setScopes(event.target.value)}
+            hint="One per line: provider:<id>, mcp:<id>, process:runtime-<id>, or git:<host[:port]>. No wildcards. Empty grants deny every consumer."
+          />
+          <Text tone="muted">
+            Secret scopes identify the component receiving a handle, rather than
+            a workspace or model prompt. Replacing a value also updates its
+            consumer policy.
+          </Text>
+          <Stack direction="row" gap={2}>
+            <Button type="submit" disabled={disabled || busy}>
+              {busy
+                ? "Saving…"
+                : editing
+                  ? "Replace value and scopes"
+                  : "Store secret"}
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setValue("");
+                onCancel();
+              }}
+            >
+              Cancel
             </Button>
           </Stack>
         </Stack>

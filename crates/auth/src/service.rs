@@ -508,6 +508,39 @@ impl AuthService {
     pub fn secret_name(provider: &str) -> String {
         format!("oauth.{provider}.access")
     }
+    /// Backend-only stable identity from the authenticated encrypted profile.
+    /// Access-token refresh does not change this binding; missing verified identity fails closed.
+    pub fn account_binding(&self, provider: &str) -> Result<String, AuthError> {
+        use sha2::{Digest, Sha256};
+        storage::validate_provider(provider)?;
+        let lock = self.provider_lock(provider);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = self.profile(provider)?.ok_or(AuthError::NotFound)?;
+        if profile.needs_reauth
+            || profile
+                .tokens
+                .as_ref()
+                .is_none_or(|tokens| tokens.access_token.is_empty())
+        {
+            return Err(AuthError::Reauthorize);
+        }
+        let subject = profile
+            .subject
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or(AuthError::IdentityInvalid)?;
+        let issuer = profile
+            .issuer
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or(AuthError::IdentityInvalid)?;
+        if profile.client_id.is_empty() {
+            return Err(AuthError::IdentityInvalid);
+        }
+        let identity = serde_json::to_vec(&(provider, issuer, subject, &profile.client_id))
+            .map_err(|_| AuthError::Unavailable)?;
+        Ok(format!("{:x}", Sha256::digest(identity)))
+    }
     /// Designated names never fall back to a stale raw vault token.
     pub fn owns_secret(provider: &str, name: &str) -> bool {
         name == Self::secret_name(provider)

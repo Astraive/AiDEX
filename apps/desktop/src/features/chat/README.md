@@ -1,9 +1,9 @@
-# Chat feature
+# Conversations
 
-Chat mode (route `chat`, `id` = session id), composed only from `@aidex/ui`.
+`ChatPage` and `AgentPage` share daemon-backed `ConversationPage`. New sessions inherit encrypted drive defaults; the task settings dialog overrides instructions, provider fallback, permissions, and step/token limits for one conversation.
 
-- `ChatPage.tsx`: conversation header (session title, workspace in context, "Continue in Agent mode" and "More options"), the thread, and the docked composer. A prompt handed over from Home (`pendingPrompt`) opens a new chat and is cleared on arrival. Sent messages stay in local state and get an honest preview reply; no model is called.
-- `ChatThread.tsx`: sample history for the session plus local messages, rendered with `ChatMessage`, `InlineCode`, and `CodeBlock`.
-- `ChatComposer.tsx`: `Composer` with removable attachment chips, the Chat/Agent switch (Agent carries the draft over via `pendingPrompt`), the model picker bound to `usePreferences().modelId`, and the preview note.
-- `ChatSidebar.tsx`: New chat, Pinned and Recent sessions, and Workspaces (selecting one changes the chat's context workspace).
-- `sample.ts`: sample exchanges and attachable files until AiDEX Core streams real sessions.
+Native chat/plan/agent modes use `model.list` and the managed local inference state. External Agent sessions select an enabled runtime instance and an exact runtime-owned model from `runtime.models` or explicit input. They use the reserved `provider_id: runtime` binding, independently of cloud provider accounts and native model defaults. Descriptor modes/permissions gate submission; no unsupported scope is silently promoted.
+
+Conversation messages, once-only fingerprinted approvals, cancellation, and interrupted resume use typed Core RPCs. Scoped events refresh the saved snapshot, with bounded polling as a fallback. Full content and older history use paginated `history.list/read`. Project-file attachments are read from the registered workspace and rejected when binary, truncated, or invalid UTF-8.
+
+The composer skill button selects installed, trusted, user-invocable skills for the chosen project and permission profile. IDs persist through conversation configuration and native defaults; unavailable or changed grants block use instead of replacing a skill. Projectless chat sends an empty selection and receives no agent skill/tool injection. Automatic prompt handoff waits for saved defaults and the selected skill catalog.

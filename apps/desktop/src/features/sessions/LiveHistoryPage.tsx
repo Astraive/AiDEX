@@ -6,9 +6,11 @@ import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
 import { useRpc } from "../../hooks/useRpc";
 import { useNavigation } from "../../app/providers/navigation";
+import { CoreStatusNotice } from "../system/CoreStatusNotice";
 
 export function LiveHistoryPage() {
-  const sessions = useRpc("conversation.list");
+  const [offset, setOffset] = useState(0);
+  const sessions = useRpc("conversation.list", { offset, limit: 50 });
   const { navigate } = useNavigation();
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string>();
@@ -24,8 +26,9 @@ export function LiveHistoryPage() {
           title="Session history"
           description="Conversations and task history stored on the portable drive."
         />
+        <CoreStatusNotice requires="daemon" />
         <SearchField
-          label="Search saved sessions"
+          label="Search this page of saved sessions"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
@@ -96,6 +99,27 @@ export function LiveHistoryPage() {
             />
           ))}
         </List>
+        <Stack direction="row" gap={2}>
+          <Button
+            variant="outline"
+            disabled={!offset || sessions.loading}
+            onClick={() => setOffset(Math.max(0, offset - 50))}
+          >
+            Previous page
+          </Button>
+          <Text>
+            {offset + (sessions.data?.sessions.length ? 1 : 0)}–
+            {offset + (sessions.data?.sessions.length ?? 0)} of{" "}
+            {sessions.data?.total_sessions ?? 0}
+          </Text>
+          <Button
+            variant="outline"
+            disabled={sessions.loading || sessions.data?.next_offset == null}
+            onClick={() => setOffset(sessions.data!.next_offset!)}
+          >
+            Next page
+          </Button>
+        </Stack>
         {!sessions.loading && !items.length && (
           <Text tone="muted">No saved conversations match this search.</Text>
         )}

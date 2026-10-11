@@ -50,6 +50,9 @@ pub struct RuntimeRequest {
     pub max_tokens: u32,
     pub runtime_ref: Option<Value>,
     pub approvals: Vec<RuntimeApprovalDecision>,
+    /// Backend-only per-run MCP capability; never persisted or sent through IPC.
+    #[serde(skip)]
+    pub bridge: Option<aidex_runtime_bridge::BridgeConnection>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +65,10 @@ pub enum RuntimeToolStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    /// Durable native identity captured before the first turn can produce effects.
+    SessionStarted {
+        runtime_ref: Value,
+    },
     TextDelta {
         text: String,
     },
@@ -115,6 +122,9 @@ impl std::error::Error for RuntimeError {}
 /// operations continue that reference and must never blindly replay an old effect.
 pub trait RuntimeExecutor: Send + Sync {
     fn descriptor(&self) -> RuntimeDescriptor;
+    fn supports_mcp_bridge(&self) -> bool {
+        false
+    }
     fn validate(&self, request: &RuntimeRequest) -> Result<(), RuntimeError>;
     fn execute(
         &self,

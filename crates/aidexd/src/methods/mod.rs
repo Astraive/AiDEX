@@ -10,16 +10,20 @@ pub mod auth;
 pub mod context;
 pub mod daemon;
 pub mod events;
+pub mod extensions;
 pub mod inference;
 pub mod memory;
 pub mod models;
 pub mod native;
 pub mod native_history;
 pub mod native_view;
+pub mod runtime;
+pub mod runtime_profiles;
 pub mod sessions;
 pub mod settings;
 pub mod update;
 pub mod vault;
+pub mod web;
 pub mod workspace;
 pub mod workspace_live;
 
@@ -66,6 +70,10 @@ pub(crate) fn register_all(
 ) -> Result<(), RouterError> {
     context::register(router, services)?;
     auth::register(router, services)?;
+    extensions::register(router, services)?;
+    web::register(router, services)?;
+    runtime::register(router, services)?;
+    runtime_profiles::register(router, services)?;
     inference::register(router, services)?;
     native::register(router, services)?;
     settings::register(router, services)?;

@@ -24,11 +24,7 @@ export type PageId =
  * sessions #12, models #14/#15, agents #19/#23, extensions #24, remote #29). The shell labels them.
  * Home, Settings, and Security mix live Core data with labelled samples and say so themselves.
  */
-export const samplePages: ReadonlySet<PageId> = new Set<PageId>([
-  "agents",
-  "agent-config",
-  "extensions",
-]);
+export const samplePages: ReadonlySet<PageId> = new Set<PageId>();
 
 /** `tab` selects a section within a page; `id` names the record a page shows (workspace, agent, model). */
 export type Route = { page: PageId; tab?: string; id?: string };

@@ -27,6 +27,9 @@ pub struct AppPreferences {
     pub reduce_motion: bool,
     pub keyboard_hints: bool,
     pub model_id: String,
+    pub runtime_id: Option<String>,
+    pub runtime_model_id: Option<String>,
+    pub skill_ids: Vec<String>,
     pub workspace_id: String,
     pub permission_mode: Option<PermissionMode>,
     pub instructions: String,
@@ -45,6 +48,9 @@ impl Default for AppPreferences {
             reduce_motion: false,
             keyboard_hints: true,
             model_id: String::new(),
+            runtime_id: None,
+            runtime_model_id: None,
+            skill_ids: vec![],
             workspace_id: String::new(),
             permission_mode: None,
             instructions: String::new(),
@@ -78,6 +84,29 @@ impl AppPreferences {
             return Err("agent limits are outside supported bounds");
         }
         if self.model_id.len() > 512
+            || self.skill_ids.len() > 32
+            || self.skill_ids.iter().any(|id| {
+                id.is_empty()
+                    || id.len() > 64
+                    || !id.as_bytes()[0].is_ascii_lowercase()
+                    || !id.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                    })
+            })
+            || self
+                .skill_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.skill_ids.len()
+            || self
+                .runtime_id
+                .as_ref()
+                .is_some_and(|value| value.len() > 128)
+            || self
+                .runtime_model_id
+                .as_ref()
+                .is_some_and(|value| value.len() > 512)
             || self.workspace_id.len() > 128
             || self
                 .fallback_model

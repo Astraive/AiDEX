@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChatMessage, CodeBlock, Notice } from "@aidex/ui/components";
 import { Button, Stack, Text } from "@aidex/ui/primitives";
 import { call } from "@aidex/client/rpc";
@@ -36,7 +36,14 @@ export function MessageContent({
           : undefined
       }
     >
-      <Text>{chunk?.content ?? message.content}</Text>
+      {message.role === "tool" ? (
+        <CodeBlock
+          title="Saved tool output"
+          code={chunk?.content ?? message.content}
+        />
+      ) : (
+        <Text>{chunk?.content ?? message.content}</Text>
+      )}
       {message.content_truncated && (
         <Stack direction="row" gap={2}>
           <Text tone="muted">
@@ -117,9 +124,21 @@ function ToolArguments({
     </Stack>
   );
 }
-export function HistoryMessages({ scope }: { scope: HistoryScope }) {
+export function HistoryMessages({
+  scope,
+  live = false,
+}: {
+  scope: HistoryScope;
+  live?: boolean;
+}) {
   const [offset, setOffset] = useState(0);
   const history = useRpc("history.list", { ...scope, offset, limit: 20 });
+  useEffect(() => {
+    history.refetch();
+    if (!live) return;
+    const timer = setInterval(history.refetch, 1000);
+    return () => clearInterval(timer);
+  }, [live, history.refetch]);
   return (
     <Stack gap={4}>
       {history.error && <Notice tone="danger">{history.error.message}</Notice>}
@@ -141,7 +160,8 @@ export function HistoryMessages({ scope }: { scope: HistoryScope }) {
           Previous messages
         </Button>
         <Text>
-          {offset + 1}–{offset + (history.data?.messages.length ?? 0)} of{" "}
+          {offset + (history.data?.messages.length ? 1 : 0)}–
+          {offset + (history.data?.messages.length ?? 0)} of{" "}
           {history.data?.total_messages ?? 0}
         </Text>
         <Button

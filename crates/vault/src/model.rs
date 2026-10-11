@@ -176,6 +176,14 @@ pub struct SecretMeta {
     pub policy: SecretPolicy,
 }
 
+/// Value-free record identity for binding an approval to one credential revision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretVersion {
+    pub secret_ref: aidex_core::SecretRef,
+    pub revision: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

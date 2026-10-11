@@ -77,6 +77,8 @@ durable unless marked *ephemeral*.
 | `agent.started` | `agent_id: id`, `model: id?` |
 | `agent.message` | `role: user\|assistant\|system\|tool`, `content: text` |
 | `agent.delta` (*ephemeral*) | `text: text` |
+| `agent.run_delta` (*ephemeral*) | `agent_id: id`, `text: text` |
+| `agent.child_spawned` | `agent_id: id`, `parent_agent_id: id`, `role: text` |
 | `agent.subagent.created` | `child_session_id: id`, `role: text` |
 | `agent.error` | `code: text`, `message: text` |
 | `agent.retry` | `attempt: u32`, `reason: text` |
@@ -106,6 +108,7 @@ durable unless marked *ephemeral*.
 | `workspace.ephemeral_created` | `workspace_id: id`, `source_workspace_id: id` |
 | `workspace.ephemeral_applied` | `workspace_id: id`, `files_changed: u64` |
 | `vault.unlocked` / `locked` | `vault_id: id` |
+| `secret.stored` / `deleted` | `secret_ref: {vault_id: id, secret_id: id}`; no name or value |
 | `secret.granted` | `handle_id: id`, `secret_name: text`, `consumer: id` (never the value) |
 | `secret.revoked` | `handle_id: id`, `reason: text?` |
 | `sandbox.negotiated` | `level: sandbox level`, `enforced: bool` |

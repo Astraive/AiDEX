@@ -24,6 +24,11 @@ pub struct NativeEngine {
     pub(crate) pending: Mutex<HashMap<String, Prepared>>,
     pub(crate) runtimes: Mutex<HashMap<String, Arc<dyn RuntimeExecutor>>>,
     pub(crate) operations: Mutex<()>,
+    pub(crate) prompt_context: Arc<dyn crate::PromptContext>,
+    pub(crate) bridge_server: Mutex<Option<Arc<aidex_runtime_bridge::BridgeServer>>>,
+    pub(crate) bridge_leases: Mutex<HashMap<String, aidex_runtime_bridge::BridgeLease>>,
+    pub(crate) bridge_calls: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) bridge_approvals: crate::bridge_approval::BridgeApprovals,
 }
 impl NativeEngine {
     pub fn new(
@@ -33,15 +38,39 @@ impl NativeEngine {
         events: Arc<dyn EventSink>,
         scratch: PathBuf,
     ) -> Arc<Self> {
+        Self::with_tools(
+            store,
+            registry,
+            workspaces,
+            events,
+            scratch,
+            aidex_tools::ToolRegistry::with_builtin_tools(),
+            Arc::new(crate::EmptyPromptContext),
+        )
+    }
+    pub fn with_tools(
+        store: Arc<SessionStore>,
+        registry: Arc<ProviderRegistry>,
+        workspaces: Arc<WorkspaceRegistry>,
+        events: Arc<dyn EventSink>,
+        scratch: PathBuf,
+        tools: aidex_tools::ToolRegistry,
+        prompt_context: Arc<dyn crate::PromptContext>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             registry,
-            broker: Broker::new(workspaces, scratch),
+            broker: Broker::new(workspaces, scratch, tools, events.clone()),
             events,
             live: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             runtimes: Mutex::new(HashMap::new()),
             operations: Mutex::new(()),
+            prompt_context,
+            bridge_server: Mutex::new(None),
+            bridge_leases: Mutex::new(HashMap::new()),
+            bridge_calls: Mutex::new(HashMap::new()),
+            bridge_approvals: Default::default(),
         })
     }
     pub fn store(&self) -> &Arc<SessionStore> {
@@ -76,6 +105,18 @@ impl NativeEngine {
             .runtime_id
             .as_deref()
             .is_some_and(|id| id != "native");
+        let operation = if external && parent.is_none() && s.runtime_ref.is_some() {
+            if !self
+                .runtime_for(&s.configuration)?
+                .descriptor()
+                .supports_resume
+            {
+                return Err("selected runtime cannot resume saved conversation; choose an explicit new session or context handoff".into());
+            }
+            RuntimeOperation::Resume
+        } else {
+            RuntimeOperation::Start
+        };
         if external {
             self.runtime_for(&s.configuration)?;
         } else {
@@ -120,14 +161,34 @@ impl NativeEngine {
         }
         let r = self.store.begin(session, content, command, parent)?;
         if external && r.status == RunStatus::Pending {
-            let request = self.runtime_request(&r, RuntimeOperation::Start)?;
+            let request = match self.runtime_request(&r, operation) {
+                Ok(request) => request,
+                Err(error) => {
+                    self.transition(
+                        &r.id,
+                        RunStatus::Failed,
+                        Some(aidex_events::redact_text(&error).into_owned()),
+                    )?;
+                    return Err(error);
+                }
+            };
             if let Err(error) = self.runtime_for(&s.configuration)?.validate(&request) {
                 self.transition(&r.id, RunStatus::Failed, Some(error.to_string()))?;
                 return Err(error.to_string());
             }
         }
         if r.status == RunStatus::Pending {
-            self.launch(&r)?;
+            if let Some(parent) = &r.parent_run_id {
+                self.emit(
+                    session,
+                    EventKind::AgentChildSpawned {
+                        agent_id: EntityId::new(&r.id).map_err(|e| e.to_string())?,
+                        parent_agent_id: EntityId::new(parent).map_err(|e| e.to_string())?,
+                        role: "delegated task".into(),
+                    },
+                );
+            }
+            self.launch_operation(&r, operation)?;
         }
         Ok(r)
     }
@@ -151,6 +212,9 @@ impl NativeEngine {
         )>,
         operation: RuntimeOperation,
     ) -> Result<(), String> {
+        if !self.store.run(&run.id)?.status.active() {
+            return Err("cannot launch a terminal run; explicit continuation is required".into());
+        }
         let mut live = self
             .live
             .lock()
@@ -259,19 +323,31 @@ impl NativeEngine {
         error: Option<String>,
     ) -> Result<Run, String> {
         let r = self.store.run(id)?;
+        if status == RunStatus::Failed {
+            let children = self
+                .store
+                .get(&r.session_id)?
+                .runs
+                .into_iter()
+                .filter(|child| child.parent_run_id.as_deref() == Some(id) && child.status.active())
+                .collect::<Vec<_>>();
+            for child in children {
+                self.cancel(&child.id)?;
+            }
+        }
         let result = self.store.update(&r.session_id, |s| {
             let r = s
                 .runs
                 .iter_mut()
                 .find(|r| r.id == id)
                 .ok_or("run not found")?;
-            if r.status == RunStatus::Cancelled && status != RunStatus::Cancelled {
+            if !r.status.active() && status != r.status {
                 return Ok(r.clone());
             }
             r.status = status;
             r.error = error;
             r.updated_at = now();
-            if matches!(status,RunStatus::Failed|RunStatus::Cancelled){
+            if matches!(status,RunStatus::Failed|RunStatus::Cancelled|RunStatus::Interrupted){
                 for approval in &mut s.approvals{if approval.run_id==id&&approval.status=="pending"{approval.status="expired".into();}}
                 for call in r.pending_calls.drain(..){
                     let message=aidex_providers::ChatMessage::tool_result(&call.id,"Tool execution did not complete successfully. Inspect the workspace before retrying; effects may be unknown after interruption.");
@@ -294,6 +370,35 @@ impl NativeEngine {
         };
         if let Some(e) = event {
             self.emit(&r.session_id, e);
+        }
+        if !result.status.active() {
+            self.revoke_bridge(&r.session_id, id);
+        }
+        if result.status == RunStatus::Running {
+            self.emit(
+                &r.session_id,
+                EventKind::AgentStarted {
+                    agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
+                    model: None,
+                },
+            );
+        }
+        if result.status != r.status {
+            let outcome = match result.status {
+                RunStatus::Completed => Some(aidex_events::Outcome::Succeeded),
+                RunStatus::Failed => Some(aidex_events::Outcome::Failed),
+                RunStatus::Cancelled => Some(aidex_events::Outcome::Cancelled),
+                _ => None,
+            };
+            if let Some(outcome) = outcome {
+                self.emit(
+                    &r.session_id,
+                    EventKind::AgentFinished {
+                        agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
+                        outcome,
+                    },
+                );
+            }
         }
         Ok(result)
     }
@@ -350,6 +455,9 @@ impl NativeEngine {
         if approval.runtime_id.is_some() {
             return self.respond_runtime(&approval, approved);
         }
+        if approval.bridge_call_id.is_some() {
+            return self.bridge_approvals.respond(self, &approval, approved);
+        }
         let prepared = self
             .pending
             .lock()
@@ -362,17 +470,24 @@ impl NativeEngine {
             .cloned()
             .ok_or("approval has no pending call")?;
         self.store.update(&run.session_id, |s| {
+            let active = s
+                .runs
+                .iter_mut()
+                .find(|r| r.id == run.id)
+                .ok_or("run not found")?;
+            if active.status != RunStatus::WaitingApproval {
+                return Err("approval no longer has a waiting run".into());
+            }
             let a = s
                 .approvals
                 .iter_mut()
                 .find(|a| a.id == id)
                 .ok_or("approval not found")?;
+            if a.status != "pending" || a.fingerprint != fingerprint {
+                return Err("approval changed or expired".into());
+            }
             a.status = if approved { "approved" } else { "denied" }.into();
-            s.runs
-                .iter_mut()
-                .find(|r| r.id == run.id)
-                .ok_or("run not found")?
-                .status = RunStatus::Running;
+            active.status = RunStatus::Running;
             Ok(())
         })?;
         if approved {
@@ -616,6 +731,11 @@ impl NativeEngine {
         Ok(())
     }
     pub fn shutdown(&self) {
+        if let Ok(server) = self.bridge_server.lock()
+            && let Some(server) = server.as_ref()
+        {
+            server.shutdown();
+        }
         for r in self.live.lock().unwrap_or_else(|p| p.into_inner()).values() {
             r.provider.cancel();
             r.tool.cancel();
@@ -627,6 +747,22 @@ impl NativeEngine {
             .shutdown(aidex_sandbox::StopReason::DaemonShutdown);
     }
     pub fn cancel_all(&self) {
+        if let Ok(pending) = self.pending.lock() {
+            for prepared in pending.values() {
+                prepared.context.cancel.cancel();
+            }
+        }
+        if let Ok(mut slot) = self.bridge_server.lock()
+            && let Some(server) = slot.take()
+        {
+            server.shutdown();
+        }
+        if let Ok(mut leases) = self.bridge_leases.lock() {
+            leases.clear();
+        }
+        if let Ok(mut gates) = self.bridge_calls.lock() {
+            gates.clear();
+        }
         if let Ok(runs) = self.store.run_summaries() {
             for run in runs {
                 if run.status.active() {
@@ -643,5 +779,54 @@ impl NativeEngine {
             .sandbox
             .registry()
             .terminate_all(aidex_sandbox::StopReason::Cancelled);
+    }
+    /// A vault lock can prevent private terminal-state commits. Reconcile after
+    /// unlock without reviving stopped actors or executable approval plans.
+    pub fn reconcile_after_unlock(&self) -> Result<(), String> {
+        for summary in self.store.run_summaries()? {
+            if !summary.status.active() {
+                continue;
+            }
+            let run = self.store.run(&summary.id)?;
+            let stopped = match self
+                .live
+                .lock()
+                .map_err(|_| "native run registry poisoned")?
+                .get(&run.id)
+            {
+                Some(live) => live.provider.is_stopped() || live.tool.is_cancelled(),
+                None => {
+                    let session = self.store.get(&run.session_id)?;
+                    let pending = self.pending.lock().map_err(|_| "pending plans poisoned")?;
+                    !session
+                        .approvals
+                        .iter()
+                        .filter(|approval| {
+                            approval.run_id == run.id && approval.status == "pending"
+                        })
+                        .any(|approval| {
+                            pending
+                                .get(&approval.id)
+                                .is_some_and(|prepared| !prepared.context.cancel.is_cancelled())
+                        })
+                }
+            };
+            if stopped {
+                let approvals = self
+                    .store
+                    .get(&run.session_id)?
+                    .approvals
+                    .into_iter()
+                    .filter(|approval| approval.run_id == run.id)
+                    .map(|approval| approval.id)
+                    .collect::<std::collections::HashSet<_>>();
+                self.transition(&run.id,RunStatus::Interrupted,Some("Execution stopped while private records were locked; explicit continuation is required".into()))?;
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.retain(|id, _| !approvals.contains(id));
+                }
+                self.revoke_bridge(&run.session_id, &run.id);
+            }
+        }
+        Ok(())
     }
 }

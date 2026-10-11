@@ -1,40 +1,126 @@
-import { useState } from "react";
-import { List, ListRow, SectionHeader } from "@aidex/ui/components";
-import { ServerIcon } from "@aidex/ui/icons";
-import { IconBadge, Split } from "@aidex/ui/primitives";
-import { McpServerDetail, ServerStatusIndicator } from "./McpServerDetail";
-import { mcpServers } from "./sample";
+import { useEffect, useState } from "react";
+import { List, ListRow, Notice } from "@aidex/ui/components";
+import { Badge, Button, Stack, Text } from "@aidex/ui/primitives";
+import { call } from "@aidex/client/rpc";
+import { useRpc } from "../../hooks/useRpc";
+import { McpConfigForm } from "./McpConfigForm";
+import { McpServerDetail } from "./McpServerDetail";
+import { useExtensionAction } from "./useExtensionAction";
 
-type Props = {
-  /** Server to select on arrival, e.g. from the sidebar; defaults to the first. */
+export function McpPanel({
+  initialServerId,
+  adding,
+  onCloseAdd,
+  onChanged,
+}: {
   initialServerId?: string;
-};
-
-/** MCP servers tab: server list beside the selected server's details. */
-export function McpPanel({ initialServerId }: Props) {
+  adding: boolean;
+  onCloseAdd: () => void;
+  onChanged: () => void;
+}) {
+  const servers = useRpc("extensions.mcp.list");
+  const connecting = servers.data?.some((server) => server.connecting) ?? false;
+  useEffect(() => {
+    if (!connecting) return;
+    const timer = setInterval(servers.refetch, 1000);
+    return () => clearInterval(timer);
+  }, [connecting, servers.refetch]);
   const [selectedId, setSelectedId] = useState(initialServerId);
-  const selected = mcpServers.find((server) => server.id === selectedId) ?? mcpServers[0];
-  const connected = mcpServers.filter((server) => server.status === "Connected").length;
-
+  const [editing, setEditing] = useState(false);
+  const refresh = () => {
+    servers.refetch();
+    onChanged();
+  };
+  const action = useExtensionAction(refresh);
+  const selected = servers.data?.find((server) => server.id === selectedId);
   return (
-    <Split divided emphasis="end">
-      <section aria-labelledby="mcp-servers-heading">
-        <SectionHeader title={<span id="mcp-servers-heading">Servers</span>} meta={`${connected} of ${mcpServers.length} connected`} />
-        <List>
-          {mcpServers.map((server) => (
-            <ListRow
-              key={server.id}
-              media={<IconBadge size="md" icon={<ServerIcon />} />}
-              title={server.name}
-              subtitle={`${server.transport} · ${server.description}`}
-              meta={[<ServerStatusIndicator key="status" status={server.status} />]}
-              selected={server.id === selected.id}
-              onSelect={() => setSelectedId(server.id)}
-            />
-          ))}
-        </List>
-      </section>
-      <McpServerDetail server={selected} />
-    </Split>
+    <Stack gap={5}>
+      {(servers.error || action.error) && (
+        <Notice tone="danger">{action.error ?? servers.error?.message}</Notice>
+      )}
+      {servers.loading && (
+        <Text tone="muted">Loading configured MCP servers…</Text>
+      )}
+      {adding && (
+        <McpConfigForm
+          onCancel={onCloseAdd}
+          onSaved={(id) => {
+            onCloseAdd();
+            setSelectedId(id);
+            refresh();
+          }}
+        />
+      )}
+      <List>
+        {servers.data?.map((server) => (
+          <ListRow
+            key={server.id}
+            title={server.name}
+            subtitle={`${server.transport.kind} · ${server.id}`}
+            selected={server.id === selectedId}
+            meta={[
+              <Badge
+                key="connection"
+                tone={server.connected ? "success" : "neutral"}
+              >
+                {server.connecting
+                  ? "Connecting…"
+                  : server.connected
+                    ? "Connected"
+                    : "Disconnected"}
+              </Badge>,
+              server.trusted ? "Trusted" : "Untrusted",
+              server.enabled ? "Enabled" : "Disabled",
+            ]}
+            onSelect={() => {
+              setSelectedId(server.id);
+              setEditing(false);
+            }}
+            trailing={
+              !server.plugin_id ? (
+                <Button
+                  variant="ghost"
+                  disabled={action.busy}
+                  onClick={() => {
+                    if (window.confirm(`Remove MCP server ${server.name}?`))
+                      void action.act(async () => {
+                        await call("extensions.mcp.remove", { id: server.id });
+                        if (selectedId === server.id) setSelectedId(undefined);
+                      });
+                  }}
+                >
+                  Remove
+                </Button>
+              ) : undefined
+            }
+          />
+        ))}
+      </List>
+      {servers.data && !servers.data.length && (
+        <Text tone="muted">
+          No MCP servers configured. Add a trusted server and explicit
+          workspace/profile grants.
+        </Text>
+      )}
+      {selected &&
+        (editing ? (
+          <McpConfigForm
+            key={selected.id}
+            initial={selected}
+            onCancel={() => setEditing(false)}
+            onSaved={() => {
+              setEditing(false);
+              refresh();
+            }}
+          />
+        ) : (
+          <McpServerDetail
+            key={selected.id}
+            server={selected}
+            onEdit={() => setEditing(true)}
+            onChanged={refresh}
+          />
+        ))}
+    </Stack>
   );
 }

@@ -32,7 +32,10 @@ fn every_variant_has_a_unique_dotted_name_matching_its_wire_type() {
         .filter(|kind| !kind.is_durable())
         .map(EventKind::name)
         .collect();
-    assert_eq!(ephemeral, ["agent.delta", "process.output"]);
+    assert_eq!(
+        ephemeral,
+        ["agent.delta", "agent.run_delta", "process.output"]
+    );
     assert_eq!(
         EventKind::AgentSubagentCreated {
             child_session_id: id("ses_child"),

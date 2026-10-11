@@ -1,55 +1,82 @@
-import { useState, type FormEvent, type Ref } from "react";
-import { SectionHeader } from "@aidex/ui/components";
-import { Button, Stack, TextArea } from "@aidex/ui/primitives";
-import { useToast } from "../../app/providers/toast";
-import type { Skill } from "./sample";
+import { useEffect, useState } from "react";
+import { Notice } from "@aidex/ui/components";
+import { Button, Card, Stack, Text, TextArea } from "@aidex/ui/primitives";
+import { call } from "@aidex/client/rpc";
+import { useRpc } from "../../hooks/useRpc";
+import { useExtensionAction } from "./useExtensionAction";
 
-type Props = {
-  skill: Skill;
+export function SkillEditor({
+  id,
+  onClose,
+  onChanged,
+}: {
+  id: string;
   onClose: () => void;
-  /** Focus target when the editor opens from an Edit button. */
-  textAreaRef?: Ref<HTMLTextAreaElement>;
-};
-
-const EDITOR_ROWS = 16;
-
-/** SKILL.md editor for one skill; remount it (via `key`) to start a fresh draft. */
-export function SkillEditor({ skill, onClose, textAreaRef }: Props) {
-  const notify = useToast();
-  const [draft, setDraft] = useState(skill.definition);
-  const headingId = `skill-editor-${skill.id}`;
-
-  const save = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    notify(`Preview: saving ${skill.name} will be available when AiDEX Core is connected.`);
-  };
-
+  onChanged: () => void;
+}) {
+  const document = useRpc("extensions.skills.read", { id });
+  const [content, setContent] = useState("");
+  useEffect(() => {
+    if (document.data) setContent(document.data.content);
+  }, [document.data]);
+  const action = useExtensionAction(() => {
+    document.refetch();
+    onChanged();
+  });
   return (
-    <section aria-labelledby={headingId}>
-      <form onSubmit={save}>
-        <Stack gap={4}>
-          <SectionHeader title={<span id={headingId}>Edit {skill.name}</span>} meta="SKILL.md" />
-          <TextArea
-            ref={textAreaRef}
-            label={`${skill.name} SKILL.md`}
-            labelVisibility="hidden"
-            monospace
-            rows={EDITOR_ROWS}
-            spellCheck={false}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            hint="Front matter names the skill; the body is the instructions agents follow."
-          />
-          <Stack direction="row" gap={2} justify="end">
-            <Button variant="ghost" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button variant="primary" type="submit" disabled={draft === skill.definition}>
-              Save
-            </Button>
-          </Stack>
+    <Card padding="md">
+      <Stack gap={3}>
+        <Text>{document.data?.name ?? id} · SKILL.md</Text>
+        {(document.error || action.error) && (
+          <Notice tone="danger">
+            {action.error ?? document.error?.message}
+          </Notice>
+        )}
+        {action.message && <Notice tone="success">{action.message}</Notice>}
+        {document.data?.plugin_id && (
+          <Notice>
+            Managed by plugin {document.data.plugin_id}. Replace the plugin
+            bundle to update its skill files.
+          </Notice>
+        )}
+        <TextArea
+          label="Skill instructions"
+          monospace
+          rows={14}
+          value={content}
+          readOnly={!!document.data?.plugin_id}
+          onChange={(event) => setContent(event.target.value)}
+        />
+        {document.data && (
+          <Text tone="muted">
+            Workspace grants: {document.data.workspace_ids.join(", ") || "none"}{" "}
+            · Profiles: {document.data.profiles.join(", ") || "none"}
+          </Text>
+        )}
+        <Stack direction="row" gap={2}>
+          <Button
+            disabled={
+              action.busy || !document.data || !!document.data.plugin_id
+            }
+            onClick={() =>
+              void action.act(
+                () =>
+                  call("extensions.skills.save", {
+                    id,
+                    content,
+                    expected_digest: document.data!.digest,
+                  }),
+                "Skill saved.",
+              )
+            }
+          >
+            Save
+          </Button>
+          <Button variant="ghost" disabled={action.busy} onClick={onClose}>
+            Close
+          </Button>
         </Stack>
-      </form>
-    </section>
+      </Stack>
+    </Card>
   );
 }

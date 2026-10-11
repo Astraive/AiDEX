@@ -32,7 +32,12 @@ export function SettingsPage() {
       <PageHeader
         title="Settings"
         description="Appearance and preferences for this drive."
-        meta={<StatusIndicator tone="neutral" label="Diagnostics and Drive are live; updates and cleanup are sample data" />}
+        meta={
+          <StatusIndicator
+            tone="neutral"
+            label="Preferences, diagnostics, drive reports, and signed updates are live; residue cleanup remains sample data"
+          />
+        }
       />
       <Tabs
         id={TABS_ID}

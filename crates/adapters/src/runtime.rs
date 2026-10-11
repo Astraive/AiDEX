@@ -1,5 +1,6 @@
 use crate::{
     Driver, RuntimeAuth, RuntimeConfig,
+    binding::CredentialBinding,
     protocol::{Protocol, prompt},
     state::{State, error},
     transport::Transport,
@@ -10,7 +11,6 @@ use aidex_native_sessions::*;
 use aidex_sandbox::{
     CommandSpec, Mount, NetworkMode, ResourceLimits, Sandbox, SandboxLevel, SandboxRequest,
 };
-use aidex_vault::{ConsumerScope, SecretName};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -38,6 +38,13 @@ struct Live {
     tools: BTreeSet<String>,
     run_id: String,
     session_id: String,
+    snapshot_digest: Option<String>,
+    checkpoint_sent: bool,
+    account_revision: Option<String>,
+    auth_config_digest: String,
+    credential_binding: CredentialBinding,
+    snapshot_exclusions: Vec<Zeroizing<String>>,
+    native_branch_id: String,
 }
 pub struct ExternalRuntime {
     pub(crate) config: RuntimeConfig,
@@ -69,6 +76,7 @@ impl ExternalRuntime {
         r: &RuntimeRequest,
         cancel: &CancelToken,
         begin: bool,
+        mut on_event: Option<&mut dyn FnMut(&RuntimeEvent) -> RuntimeControl>,
     ) -> Result<Live, RuntimeError> {
         if !(self.network)() {
             return Err(error(
@@ -83,22 +91,78 @@ impl ExternalRuntime {
             .prefix("aidex-runtime-")
             .tempdir()
             .map_err(|_| error("state_unavailable", "Runtime temporary profile unavailable"))?;
+        let native_branch_id = if r.operation == RuntimeOperation::Resume {
+            r.runtime_ref
+                .as_ref()
+                .and_then(|v| v["native_branch_id"].as_str())
+                .filter(|s| !s.is_empty() && s.len() <= 128)
+                .ok_or_else(|| {
+                    error(
+                        "resume_unavailable",
+                        "Durable native branch identity is missing",
+                    )
+                })?
+                .to_owned()
+        } else {
+            r.run_id.clone()
+        };
         let snapshot = format!(
-            "runtime-{}.sealed",
-            digest(format!("{}:{}", self.config.id, r.session_id).as_bytes())
+            "runtime-{}-{}.sealed",
+            digest(self.config.id.as_bytes()),
+            digest(format!("{}:{}", r.session_id, native_branch_id).as_bytes())
         );
         let home = profile.path().join("home");
         std::fs::create_dir_all(&home)
             .map_err(|_| error("state_unavailable", "Runtime home unavailable"))?;
         // A selected managed profile is encrypted input, never a raw host login home.
-        if let Some(selected) = &self.config.profile {
-            self.state.restore(
-                &format!("profile-{}.sealed", digest(selected.as_bytes())),
-                &home,
-            )?;
-        }
+        let account_revision = self
+            .config
+            .profile
+            .as_ref()
+            .map(|profile| self.state.account_revision(profile))
+            .transpose()?
+            .flatten();
+        let auth_config_digest=digest(json!({"driver":self.config.driver,"profile":self.config.profile,"auth":self.config.auth}).to_string().as_bytes());
+        let credential_binding =
+            CredentialBinding::capture(&self.config.auth, &self.state, &self.auth)?;
         if r.operation == RuntimeOperation::Resume {
+            let reference = r.runtime_ref.as_ref().ok_or_else(||error("resume_unavailable", "A durable native session reference is required; initial prompts cannot be replayed"))?;
+            if reference["runtime_id"] != self.config.id
+                || reference["session_id"] != r.session_id
+                || reference["run_id"].as_str().is_none_or(str::is_empty)
+                || reference["snapshot_id"] != snapshot
+                || reference["account_revision"] != json!(account_revision)
+                || reference["auth_config_digest"] != auth_config_digest
+                || reference["credential_binding"]
+                    != serde_json::to_value(&credential_binding)
+                        .map_err(|_| error("state_corrupt", "Invalid runtime credential binding"))?
+                || reference["native_session_id"]
+                    .as_str()
+                    .is_none_or(str::is_empty)
+                || reference["snapshot_digest"].as_str()
+                    != Some(self.state.snapshot_digest(&snapshot)?.as_str())
+            {
+                return Err(error(
+                    "resume_unavailable",
+                    "Native reference or encrypted snapshot evidence does not match this session",
+                ));
+            }
             self.state.restore(&snapshot, &home)?;
+        }
+        if let Some(selected) = &self.config.profile {
+            // Account state is authoritative over credentials embedded in old session
+            // snapshots. A signed-out profile cannot regain credentials on resume.
+            let record = crate::profiles::profile_record(selected);
+            if self.state.read(&record)?.is_none() {
+                return Err(error(
+                    "auth_required",
+                    "Managed account is signed out; connect it before using this runtime",
+                ));
+            }
+            if self.config.driver == Driver::Codex {
+                let _ = std::fs::remove_file(home.join("auth.json"));
+            }
+            self.state.restore(&record, &home)?;
         }
         let cwd = PathBuf::from(&r.workspace.as_ref().unwrap().root);
         let mut request = SandboxRequest::new(SandboxLevel::Brokered, &cwd, profile.path())
@@ -111,7 +175,13 @@ impl ExternalRuntime {
             });
         let mut args = self.config.argv.clone();
         args.extend(self.config.driver.info().command);
+        if self.config.driver == Driver::Codex {
+            args.extend(["-c".into(), "cli_auth_credentials_store=\"file\"".into()]);
+        }
         let mut secrets: Vec<Zeroizing<String>> = vec![];
+        if self.config.driver == Driver::Codex && self.config.profile.is_some() {
+            secrets.extend(crate::profiles::credential_secrets(&home)?);
+        }
         match &self.config.auth {
             RuntimeAuth::None => {}
             RuntimeAuth::CodexOauth { provider_id } => {
@@ -135,6 +205,7 @@ impl ExternalRuntime {
                         .map_err(|_| error("auth_required", "Invalid credential encoding"))?,
                 );
                 request.env.push(("ACCESS_TOKEN".into(), token.to_string()));
+                credential_binding.verify(&self.config.auth, &self.state, &self.auth)?;
                 secrets.push(token);
                 args.extend(["-c".into(),"model_provider=\"aidex_chatgpt\"".into(),"-c".into(),"model_providers.aidex_chatgpt.name=\"AiDEX\"".into(),"-c".into(),"model_providers.aidex_chatgpt.base_url=\"https://api.openai.com/v1\"".into(),"-c".into(),"model_providers.aidex_chatgpt.wire_api=\"responses\"".into(),"-c".into(),"model_providers.aidex_chatgpt.env_key=\"ACCESS_TOKEN\"".into(),"-c".into(),"model_providers.aidex_chatgpt.requires_openai_auth=false".into(),"-c".into(),"shell_environment_policy.exclude=[\"ACCESS_TOKEN\",\"OPENAI_API_KEY\",\"CODEX_API_KEY\"]".into()]);
             }
@@ -142,24 +213,8 @@ impl ExternalRuntime {
                 secret_name,
                 env_name,
             } => {
-                let consumer = ConsumerScope::process(format!("runtime-{}", self.config.id))
-                    .map_err(|_| error("invalid_config", "Invalid runtime secret consumer"))?;
-                let name = SecretName::new(secret_name)
-                    .map_err(|_| error("invalid_config", "Invalid secret reference"))?;
-                let handle = self
-                    .state
-                    .vault
-                    .issue_handle(&name, &consumer, Duration::from_secs(5))
-                    .map_err(|_| {
-                        error(
-                            "auth_required",
-                            "Runtime credential is unavailable or consumer denied",
-                        )
-                    })?;
-                let secret = self.state.vault.resolve(&handle, &consumer);
-                self.state.vault.revoke_handle(&handle.handle_id);
                 let secret =
-                    secret.map_err(|_| error("auth_required", "Runtime credential unavailable"))?;
+                    credential_binding.vault_secret(&self.state, &self.config.id, secret_name)?;
                 let token = Zeroizing::new(
                     String::from_utf8(secret.expose().to_vec())
                         .map_err(|_| error("auth_required", "Credential must be UTF-8"))?,
@@ -221,6 +276,22 @@ impl ExternalRuntime {
                 r.operation == RuntimeOperation::Resume && r.runtime_ref.is_none(),
             ));
         }
+        // Print-mode positional prompt must remain last, after bridge options.
+        let print_prompt = if matches!(self.config.driver, Driver::ClaudeCode | Driver::Cursor) {
+            args.pop()
+        } else {
+            None
+        };
+        let snapshot_exclusions =
+            crate::bridge::inject(&self.config, r, profile.path(), &mut request, &mut args)?;
+        secrets.extend(
+            snapshot_exclusions
+                .iter()
+                .map(|s| Zeroizing::new(s.to_string())),
+        );
+        if let Some(prompt) = print_prompt {
+            args.push(prompt);
+        }
         let plan = self.sandbox.negotiate(&request).map_err(|_| {
             error(
                 "scope_unsupported",
@@ -236,6 +307,10 @@ impl ExternalRuntime {
                 .unwrap()
                 .join(&self.config.executable)
         };
+        credential_binding.verify(&self.config.auth, &self.state, &self.auth)?;
+        if cancel.is_stopped() || !(self.network)() {
+            return Err(error("cancelled", "Runtime launch cancelled"));
+        }
         let process = self
             .sandbox
             .spawn_interactive(&plan, CommandSpec::new(executable).args(args))
@@ -266,8 +341,18 @@ impl ExternalRuntime {
         });
         let mut protocol = Protocol::new(self.config.driver);
         protocol.initialize(&mut transport, cancel)?;
+        let mut snapshot_digest = None;
+        let mut checkpoint_sent = false;
         if begin {
-            protocol.begin(&mut transport, r, cancel)?;
+            protocol.begin(&mut transport, r, cancel, &mut |protocol| {
+                self.state.snapshot_native(&snapshot, &home,self.config.driver,&snapshot_exclusions)?;
+                let evidence = self.state.snapshot_digest(&snapshot)?;
+                let reference = json!({"runtime_id":self.config.id,"native_session_id":protocol.session,"native_turn_id":protocol.turn,"snapshot_id":snapshot,"snapshot_digest":evidence,"run_id":r.run_id,"session_id":r.session_id,"account_revision":account_revision,"auth_config_digest":auth_config_digest,"credential_binding":credential_binding,"native_branch_id":native_branch_id});
+                if on_event.as_mut().is_some_and(|callback|callback(&RuntimeEvent::SessionStarted {runtime_ref:reference}) == RuntimeControl::Pause) {return Err(error("interrupted", "Native session checkpoint was refused before turn execution"));}
+                snapshot_digest = Some(evidence);
+                checkpoint_sent = true;
+                Ok(())
+            })?;
         }
         Ok(Live {
             transport,
@@ -279,10 +364,17 @@ impl ExternalRuntime {
             tools: BTreeSet::new(),
             run_id: r.run_id.clone(),
             session_id: r.session_id.clone(),
+            snapshot_digest,
+            checkpoint_sent,
+            account_revision,
+            auth_config_digest,
+            credential_binding,
+            snapshot_exclusions,
+            native_branch_id,
         })
     }
     fn reference(&self, live: &Live) -> Value {
-        json!({"runtime_id":self.config.id,"native_session_id":live.protocol.session,"native_turn_id":live.protocol.turn,"snapshot_id":live.snapshot,"run_id":live.run_id,"session_id":live.session_id})
+        json!({"runtime_id":self.config.id,"native_session_id":live.protocol.session,"native_turn_id":live.protocol.turn,"snapshot_id":live.snapshot,"snapshot_digest":live.snapshot_digest,"run_id":live.run_id,"session_id":live.session_id,"account_revision":live.account_revision,"auth_config_digest":live.auth_config_digest,"credential_binding":live.credential_binding,"native_branch_id":live.native_branch_id})
     }
     fn approval(
         &self,
@@ -384,8 +476,35 @@ impl ExternalRuntime {
             }
             let v = live.protocol.next(&mut live.transport, cancel)?;
             if matches!(self.config.driver, Driver::ClaudeCode | Driver::Cursor) {
-                if let Some(id) = v["session_id"].as_str() {
-                    live.protocol.session = id.into();
+                if v["parent_tool_use_id"].is_null() && v["session_id"].is_string() {
+                    let id = crate::protocol::required(&v, "/session_id")?;
+                    if !live.protocol.session.is_empty() && live.protocol.session != id {
+                        return Err(error(
+                            "protocol_error",
+                            "Runtime changed the root native session identity",
+                        ));
+                    }
+                    live.protocol.session = id;
+                    if !live.checkpoint_sent {
+                        self.state.snapshot_native(
+                            &live.snapshot,
+                            &live.profile.path().join("home"),
+                            self.config.driver,
+                            &live.snapshot_exclusions,
+                        )?;
+                        live.snapshot_digest = Some(self.state.snapshot_digest(&live.snapshot)?);
+                        if on_event(&RuntimeEvent::SessionStarted {
+                            runtime_ref: self.reference(&live),
+                        }) == RuntimeControl::Pause
+                        {
+                            live.transport.stop();
+                            return Err(error(
+                                "interrupted",
+                                "Native session checkpoint was refused",
+                            ));
+                        }
+                        live.checkpoint_sent = true;
+                    }
                 }
                 if v["type"] == "assistant"
                     && v["parent_tool_use_id"].is_null()
@@ -400,6 +519,25 @@ impl ExternalRuntime {
                         }
                     }
                 }
+            }
+            if self.approval(&live, r, &v)?.is_some() {
+                self.state.snapshot_native(
+                    &live.snapshot,
+                    &live.profile.path().join("home"),
+                    self.config.driver,
+                    &live.snapshot_exclusions,
+                )?;
+                if self.config.driver == Driver::Codex
+                    && let Some(profile) = &self.config.profile
+                {
+                    crate::profiles::persist_native_credentials(
+                        &self.state,
+                        profile,
+                        &live.profile.path().join("home"),
+                        &live.account_revision,
+                    )?;
+                }
+                live.snapshot_digest = Some(self.state.snapshot_digest(&live.snapshot)?);
             }
             if let Some(pending) = self.approval(&live, r, &v)? {
                 let method = v["method"].as_str().unwrap();
@@ -479,10 +617,25 @@ impl ExternalRuntime {
                 {
                     live.text = aidex_events::redact_text(text).into_owned();
                 }
-                let reference = self.reference(&live);
                 live.transport.stop();
-                self.state
-                    .snapshot(&live.snapshot, &live.profile.path().join("home"))?;
+                self.state.snapshot_native(
+                    &live.snapshot,
+                    &live.profile.path().join("home"),
+                    self.config.driver,
+                    &live.snapshot_exclusions,
+                )?;
+                if self.config.driver == Driver::Codex
+                    && let Some(profile) = &self.config.profile
+                {
+                    crate::profiles::persist_native_credentials(
+                        &self.state,
+                        profile,
+                        &live.profile.path().join("home"),
+                        &live.account_revision,
+                    )?;
+                }
+                live.snapshot_digest = Some(self.state.snapshot_digest(&live.snapshot)?);
+                let reference = self.reference(&live);
                 return Ok(RuntimeResponse {
                     status: RuntimeStatus::Completed,
                     runtime_ref: Some(reference),
@@ -505,10 +658,13 @@ impl ExternalRuntime {
         result
     }
     fn launch_probe(&self, r: &RuntimeRequest, cancel: &CancelToken) -> Result<Live, RuntimeError> {
-        self.launch(r, cancel, false)
+        self.launch(r, cancel, false, None)
     }
 }
 impl RuntimeExecutor for ExternalRuntime {
+    fn supports_mcp_bridge(&self) -> bool {
+        crate::bridge::supported(self.config.driver)
+    }
     fn descriptor(&self) -> RuntimeDescriptor {
         let info = self.config.driver.info();
         RuntimeDescriptor {
@@ -524,8 +680,20 @@ impl RuntimeExecutor for ExternalRuntime {
         }
     }
     fn validate(&self, r: &RuntimeRequest) -> Result<(), RuntimeError> {
+        if self.state.login_pending(&self.config.id)? {
+            return Err(error(
+                "auth_pending",
+                "Complete or cancel the pending official login before starting a native turn",
+            ));
+        }
         if !self.config.enabled {
             return Err(error("runtime_disabled", "Runtime is disabled"));
+        }
+        if r.bridge.is_some() && !self.supports_mcp_bridge() {
+            return Err(error(
+                "bridge_unsupported",
+                "This adapter has no verified native MCP bridge configuration",
+            ));
         }
         if r.mode != Mode::Agent {
             return Err(error(
@@ -616,6 +784,8 @@ impl RuntimeExecutor for ExternalRuntime {
                 ));
             }
             let mut live = guard.remove(&r.run_id).unwrap();
+            live.credential_binding
+                .verify(&self.config.auth, &self.state, &self.auth)?;
             let pending = live.pending.take().unwrap();
             live.transport.send(json!({"jsonrpc":"2.0","id":pending.wire,"result":if decision.approved{pending.allow}else{pending.deny}}))?;
             live
@@ -631,7 +801,7 @@ impl RuntimeExecutor for ExternalRuntime {
                     "Native run already waits for approval",
                 ));
             }
-            self.launch(r, cancel, true)?
+            self.launch(r, cancel, true, Some(on_event))?
         };
         self.drive(live, r, on_event, cancel)
     }
@@ -650,6 +820,164 @@ fn sanitize_json(v: Value) -> Value {
 #[cfg(test)]
 mod live_tests {
     use super::*;
+    #[test]
+    #[ignore = "requires explicitly selected installed Codex; isolated MCP configuration probe, no model turn"]
+    fn installed_codex_accepts_ephemeral_mcp_configuration_and_authenticates_the_bridge() {
+        use aidex_runtime_bridge::{
+            BridgeDispatcher, BridgeError, BridgeScope, BridgeServer, BridgeTool,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Probe(AtomicUsize);
+        impl BridgeDispatcher for Probe {
+            fn active(&self, s: &BridgeScope) -> bool {
+                s.session_id == "probe" && s.run_id == "probe"
+            }
+            fn tools(&self, _: &BridgeScope) -> Result<Vec<BridgeTool>, BridgeError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![BridgeTool {
+                    name: "fixture_read".into(),
+                    description: "Configuration fixture".into(),
+                    input_schema: json!({"type":"object"}),
+                    annotations: json!({"readOnlyHint":true}),
+                }])
+            }
+            fn call(
+                &self,
+                _: &BridgeScope,
+                _: &str,
+                _: &str,
+                _: Value,
+                _: &CancelToken,
+            ) -> Result<Value, BridgeError> {
+                Err(BridgeError::new(
+                    "probe",
+                    "No tool execution is permitted by this configuration probe",
+                ))
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let vault = Arc::new(
+            aidex_vault::VaultService::open(
+                root.path().join("vault"),
+                aidex_vault::VaultServiceConfig {
+                    kdf: aidex_vault::KdfParams::new(8, 1, 1).unwrap(),
+                    idle_timeout: None,
+                },
+            )
+            .unwrap(),
+        );
+        vault
+            .init(
+                &aidex_vault::SecretString::from("configuration-fixture-password".to_owned()),
+                false,
+            )
+            .unwrap();
+        let state = Arc::new(State::new(root.path().join("private"), vault.clone()).unwrap());
+        let runtime = ExternalRuntime::new(
+            RuntimeConfig {
+                id: "probe".into(),
+                driver: Driver::Codex,
+                executable: std::env::var("AIDEX_TEST_CODEX")
+                    .expect("Explicit installed Codex path required"),
+                argv: vec![],
+                profile: None,
+                enabled: true,
+                auth: RuntimeAuth::None,
+            },
+            state,
+            Arc::new(AuthService::new(vault).unwrap()),
+            Sandbox::locate(),
+            Arc::new(|| true),
+        );
+        let server = BridgeServer::bind().unwrap();
+        let probe = Arc::new(Probe(AtomicUsize::new(0)));
+        let cancel = CancelToken::new().with_timeout(Duration::from_secs(30));
+        let lease = server
+            .lease(
+                BridgeScope {
+                    session_id: "probe".into(),
+                    run_id: "probe".into(),
+                },
+                probe.clone(),
+                cancel.clone(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        let request = RuntimeRequest {
+            session_id: "probe".into(),
+            run_id: "probe".into(),
+            parent_run_id: None,
+            operation: RuntimeOperation::Start,
+            mode: Mode::Agent,
+            workspace: Some(RuntimeWorkspace {
+                workspace_id: "probe".into(),
+                root: work.to_string_lossy().into_owned(),
+            }),
+            permission_mode: PermissionMode::FullAccess,
+            instructions: String::new(),
+            model: None,
+            messages: vec![],
+            max_steps: 1,
+            max_tokens: 1,
+            runtime_ref: None,
+            approvals: vec![],
+            bridge: Some(lease.connection()),
+        };
+        let mut live = runtime.launch_probe(&request, &cancel).unwrap();
+        live.protocol
+            .call(
+                &mut live.transport,
+                "thread/start",
+                json!({"cwd":work,"sandbox":"danger-full-access","approvalPolicy":"never","serviceName":"AiDEX"}),
+                &cancel,
+            )
+            .unwrap();
+        let ready_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = live
+                .protocol
+                .call(
+                    &mut live.transport,
+                    "mcpServerStatus/list",
+                    json!({}),
+                    &cancel,
+                )
+                .unwrap();
+            if status["data"].as_array().unwrap().iter().any(|server| {
+                server["name"] == "aidex_tools"
+                    && server["tools"]
+                        .as_object()
+                        .is_some_and(|tools| !tools.is_empty())
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < ready_deadline,
+                "installed Codex did not expose the authenticated MCP catalog"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(probe.0.load(Ordering::SeqCst) > 0);
+        live.transport.stop();
+        runtime
+            .state
+            .snapshot_native(
+                &live.snapshot,
+                &live.profile.path().join("home"),
+                Driver::Codex,
+                &live.snapshot_exclusions,
+            )
+            .unwrap();
+        let saved = runtime.state.read(&live.snapshot).unwrap().unwrap();
+        let authorization = lease.connection().authorization_header();
+        assert!(
+            !saved
+                .windows(authorization.len())
+                .any(|window| window == authorization.as_bytes())
+        );
+    }
     #[test]
     #[ignore = "requires explicit installed Codex path; isolated auth-free command/exec probe, no inference"]
     fn installed_codex_control_plane_and_vendor_scope_probe() {
@@ -708,6 +1036,7 @@ mod live_tests {
             max_tokens: 1,
             runtime_ref: None,
             approvals: vec![],
+            bridge: None,
         };
         let mut confined = r.clone();
         confined.permission_mode = PermissionMode::Supervised;

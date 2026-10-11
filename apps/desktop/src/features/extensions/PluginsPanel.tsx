@@ -1,120 +1,172 @@
-import { EntityCard, MediaItem } from "@aidex/ui/components";
-import { DownloadIcon, PuzzleIcon, ShieldIcon } from "@aidex/ui/icons";
-import { Badge, Button, Card, Grid, IconBadge, Stack, Switch, TabPanel, Tabs, Text } from "@aidex/ui/primitives";
-import { useToast } from "../../app/providers/toast";
-import { installedPlugins, marketplacePlugins, type Plugin } from "./sample";
-import type { Toggles } from "./useToggles";
+import { useState } from "react";
+import { Notice } from "@aidex/ui/components";
+import {
+  Badge,
+  Button,
+  Card,
+  Stack,
+  Switch,
+  Text,
+  TextArea,
+} from "@aidex/ui/primitives";
+import type { PluginManifest } from "@aidex/client/dto/extensions";
+import { call } from "@aidex/client/rpc";
+import { useRpc } from "../../hooks/useRpc";
+import { useExtensionAction } from "./useExtensionAction";
+import { MarketplacePanel } from "./MarketplacePanel";
 
-export type PluginView = "installed" | "marketplace";
-
-const VIEW_TABS_ID = "plugin-views";
-
-const viewItems = [
-  { value: "installed", label: "Installed", count: installedPlugins.length },
-  { value: "marketplace", label: "Marketplace", count: marketplacePlugins.length },
-] as const;
-
-type Props = {
-  view: PluginView;
-  onViewChange: (view: PluginView) => void;
-  toggles: Toggles;
-  /** Installed plugin to mark as current, e.g. when opened from the sidebar. */
-  focusId?: string;
-};
-
-function PermissionBadges({ plugin }: { plugin: Plugin }) {
+export function PluginsPanel({
+  adding,
+  onCloseInstall,
+  onChanged,
+}: {
+  adding: boolean;
+  onCloseInstall: () => void;
+  onChanged: () => void;
+}) {
+  const plugins = useRpc("extensions.plugins.list");
+  const action = useExtensionAction(() => {
+    plugins.refetch();
+    onChanged();
+  });
+  const [manifest, setManifest] = useState(
+    JSON.stringify(
+      {
+        id: "new-plugin",
+        name: "New plugin",
+        version: "1.0.0",
+        description: "",
+        trusted: false,
+        enabled: true,
+        workspace_ids: [],
+        profiles: [],
+        skills: [],
+        mcp_servers: [],
+      },
+      null,
+      2,
+    ),
+  );
+  const [files, setFiles] = useState("{}");
   return (
-    <>
-      {plugin.permissions.map((permission) => (
-        <Badge key={permission} tone={permission === "Shell" || permission === "Network" ? "accent" : "neutral"}>
-          {permission}
-        </Badge>
+    <Stack gap={5}>
+      <MarketplacePanel
+        installedIds={plugins.data?.map((plugin) => plugin.id) ?? []}
+        onChanged={() => {
+          plugins.refetch();
+          onChanged();
+        }}
+      />
+      {(action.error || plugins.error) && (
+        <Notice tone="danger">{action.error ?? plugins.error?.message}</Notice>
+      )}
+      {action.message && <Notice tone="success">{action.message}</Notice>}
+      {adding && (
+        <Card padding="md">
+          <Stack gap={3}>
+            <Text>
+              Install a portable bundle of skill files and MCP server
+              definitions. Review trust and workspace/profile grants in the
+              manifest.
+            </Text>
+            <TextArea
+              label="Plugin manifest JSON"
+              monospace
+              rows={14}
+              value={manifest}
+              onChange={(event) => setManifest(event.target.value)}
+            />
+            <TextArea
+              label="Declared skill files JSON map"
+              monospace
+              rows={8}
+              value={files}
+              onChange={(event) => setFiles(event.target.value)}
+              hint="Keys are relative declared paths ending in /SKILL.md; values are complete file contents."
+            />
+            <Stack direction="row" gap={2}>
+              <Button
+                disabled={action.busy}
+                onClick={() =>
+                  void action.act(async () => {
+                    await call("extensions.plugins.install", {
+                      manifest: JSON.parse(manifest) as PluginManifest,
+                      files: JSON.parse(files) as Record<string, string>,
+                    });
+                    onCloseInstall();
+                  }, "Plugin bundle installed.")
+                }
+              >
+                Install reviewed bundle
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={action.busy}
+                onClick={onCloseInstall}
+              >
+                Cancel
+              </Button>
+            </Stack>
+          </Stack>
+        </Card>
+      )}
+      {plugins.loading && <Text tone="muted">Loading installed plugins…</Text>}
+      {plugins.data?.map((plugin) => (
+        <Card key={plugin.id} padding="md">
+          <Stack gap={3}>
+            <Text>
+              {plugin.name} · v{plugin.version}
+            </Text>
+            <Text tone="muted">{plugin.description}</Text>
+            <Stack direction="row" gap={2}>
+              <Badge>{plugin.trusted ? "Trusted" : "Untrusted"}</Badge>
+              <Badge>
+                {plugin.skills.length} skills · {plugin.mcp_servers.length} MCP
+                servers
+              </Badge>
+            </Stack>
+            <Text tone="muted">
+              Workspace grants: {plugin.workspace_ids.join(", ") || "none"} ·
+              Profiles: {plugin.profiles.join(", ") || "none"}
+            </Text>
+            <Stack direction="row" gap={2} align="center">
+              <Switch
+                label={`Enable ${plugin.name}`}
+                checked={plugin.enabled}
+                disabled={action.busy}
+                onCheckedChange={(enabled) =>
+                  void action.act(() =>
+                    call("extensions.plugins.enable", {
+                      id: plugin.id,
+                      enabled,
+                    }),
+                  )
+                }
+              />
+              <Text>{plugin.enabled ? "Enabled" : "Disabled"}</Text>
+              <Button
+                variant="ghost"
+                disabled={action.busy}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Remove plugin ${plugin.name} and its contributed skills and MCP definitions?`,
+                    )
+                  )
+                    void action.act(() =>
+                      call("extensions.plugins.remove", { id: plugin.id }),
+                    );
+                }}
+              >
+                Remove
+              </Button>
+            </Stack>
+          </Stack>
+        </Card>
       ))}
-    </>
-  );
-}
-
-function InstalledPlugins({ toggles, focusId }: Pick<Props, "toggles" | "focusId">) {
-  return (
-    <Grid columns={2} gap={4}>
-      {installedPlugins.map((plugin) => {
-        const on = toggles.isOn(plugin.id);
-        return (
-          <EntityCard
-            key={plugin.id}
-            titleLevel={2}
-            media={<IconBadge size="md" icon={<PuzzleIcon />} />}
-            title={plugin.name}
-            subtitle={`v${plugin.version} · ${plugin.publisher}`}
-            badges={<PermissionBadges plugin={plugin} />}
-            description={plugin.description}
-            selected={plugin.id === focusId}
-            footer={
-              <Stack direction="row" gap={3} align="center">
-                <Switch label={`Enable ${plugin.name}`} checked={on} onCheckedChange={(next) => toggles.set(plugin.id, next)} />
-                <Text as="span" variant="label" tone="secondary" aria-hidden="true">
-                  {on ? "Enabled" : "Disabled"}
-                </Text>
-              </Stack>
-            }
-          />
-        );
-      })}
-    </Grid>
-  );
-}
-
-function Marketplace() {
-  const notify = useToast();
-  return (
-    <Stack gap={6}>
-      <Card padding="md">
-        <MediaItem
-          media={<IconBadge tone="accent" icon={<ShieldIcon />} />}
-          title="Third-party plugins run in the sandbox"
-          description="Each plugin gets only the permissions on its card. Shell and network access ask for your approval the first time they are used."
-        />
-      </Card>
-      <Grid columns={3} gap={4}>
-        {marketplacePlugins.map((plugin) => (
-          <EntityCard
-            key={plugin.id}
-            titleLevel={2}
-            media={<IconBadge size="md" icon={<PuzzleIcon />} />}
-            title={plugin.name}
-            subtitle={`${plugin.publisher} · v${plugin.version}`}
-            badges={<PermissionBadges plugin={plugin} />}
-            description={plugin.description}
-            footer={
-              <Stack direction="row" gap={3} align="center" justify="between" wrap>
-                <Text as="span" variant="label" tone="muted">
-                  {plugin.permissions.length === 1 ? "1 permission" : `${plugin.permissions.length} permissions`}
-                </Text>
-                <Button
-                  variant="outline"
-                  icon={<DownloadIcon />}
-                  aria-label={`Install ${plugin.name}`}
-                  onClick={() => notify(`Preview: installing ${plugin.name} will be available when AiDEX Core is connected.`)}
-                >
-                  Install
-                </Button>
-              </Stack>
-            }
-          />
-        ))}
-      </Grid>
-    </Stack>
-  );
-}
-
-/** Plugins tab: installed plugins with permissions and enable switches, and the marketplace. */
-export function PluginsPanel({ view, onViewChange, toggles, focusId }: Props) {
-  return (
-    <Stack gap={6}>
-      <Tabs id={VIEW_TABS_ID} label="Plugin view" variant="pill" items={viewItems} value={view} onValueChange={onViewChange} />
-      <TabPanel tabsId={VIEW_TABS_ID} value={view}>
-        {view === "installed" ? <InstalledPlugins toggles={toggles} focusId={focusId} /> : <Marketplace />}
-      </TabPanel>
+      {plugins.data && !plugins.data.length && (
+        <Text tone="muted">No plugin bundles installed.</Text>
+      )}
     </Stack>
   );
 }
