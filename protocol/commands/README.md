@@ -139,7 +139,7 @@ Domain errors carrying an `aidex_core::ServiceErrorCode` map to -32001..-32006
 | `daemon.stop` | none | `{state: "stopping"}`; then every connection is closed and the endpoint removed |
 | `events.replay` | `{after?, filter?, limit?}` (`after` default 0; `limit` 1-256, default 256) | `{events: [EventEnvelope...], next_cursor, has_more}`: matching events strictly after `after`, ascending; pages are also cut to fit the message limit |
 | `events.latest` | none | `{latest_cursor, oldest_cursor}` (`oldest_cursor` is `null` when nothing is retained) |
-| `events.subscribe` (stream) | `{after?, filter?}` | `{subscription, data: {after, latest_cursor}}`, then `events.event` notifications |
+| `events.subscribe` (stream) | `{after?, filter?}` | `{subscription, data: {after, latest_cursor}}`, then ordered `events.event` and `events.watermark` notifications |
 | `vault.status` | none | `{state: "missing"\|"locked"\|"unlocked"\|"unavailable", vault_id?, secrets?, has_recovery_key?, unlocked_by?, unlocked_at?, idle_lock_secs?, reason?, message?}` |
 | `vault.init` | `{passphrase, recovery?: bool}` | `{state: "unlocked", vault_id, recovery_key?}`; the recovery key is returned only here, once |
 | `vault.unlock` | `{passphrase}` or `{recovery_key}` | `vault.status` result |
@@ -168,11 +168,17 @@ Vault errors carry `data.reason`, the stable `aidex_vault::VaultErrorKind` name 
 Event envelopes, filters, and the catalog are specified in
 `protocol/events/README.md`. `events.subscribe` delivers persisted history after
 `after` first, then live events, in cursor order without duplicates or gaps; each
-`events.event` notification's `data` is one envelope. If the stream cannot continue
-without a gap (retention removed undelivered history) the daemon sends one
-`events.error` notification `{reason: "cursor_expired"|"internal", message,
-oldest_available?}` and ends the stream. A client that stops reading is dropped as
-`slow_consumer`; it reconnects and resubscribes after the last cursor it processed.
+`events.event` notification's `data` is one envelope. An `events.watermark`
+notification's `data` is `{cursor: N}`: all durable events through `N` were sent
+earlier or filtered out. Acknowledge it only after processing all preceding
+events, and resume with the same filter. Watermarks never overtake matching
+events; they may coalesce multiple nonmatches and are not periodic heartbeats.
+The initial `latest_cursor` is metadata, not an acknowledgement. Ephemeral
+events do not advance acknowledgements. If the stream cannot continue without
+a gap (retention removed undelivered history) the daemon sends one `events.error`
+notification `{reason: "cursor_expired"|"internal", message, oldest_available?}`
+and ends the stream. A client that stops reading is dropped as `slow_consumer`;
+it reconnects after its last processed durable event or watermark.
 An expired cursor is `not_found` with `data: {reason: "cursor_expired", requested,
 oldest_available}`; a cursor the log never assigned is `invalid_params` with
 `data.reason = "cursor_ahead"`; an unknown filter kind is `invalid_params`.

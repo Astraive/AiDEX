@@ -97,6 +97,11 @@ handlers without sockets.
   The daemon records `daemon.started` once its endpoint is published and
   `daemon.stopping` before it closes connections (best effort; live subscribers
   may only see it on replay). Each `events.subscribe` stream uses one thread.
+  The stream sends envelopes as `events.event` and consumed durable progress as
+  `events.watermark {cursor}`. Watermarks follow all matching events they cover,
+  including filtered history and live queue catch-up; clients acknowledge them
+  after processing preceding events. They are not events or periodic heartbeats,
+  and ephemeral events and the initial `latest_cursor` do not acknowledge progress.
 - `Services::vault()` returns the drive's `Arc<aidex_vault::VaultService>` (vault in
   `DrivePaths::vault()`, default 30 min idle auto-lock). A damaged vault does not stop
   the daemon; `vault.status` reports it as `unavailable`. Secret handles are issued and
