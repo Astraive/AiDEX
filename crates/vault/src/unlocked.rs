@@ -114,14 +114,6 @@ impl UnlockedVault {
             .map(|entry| entry.meta(&self.header.vault_id))
     }
 
-    pub fn secret_version(&self, name: &SecretName) -> Result<crate::SecretVersion, VaultError> {
-        let entry = self.entry(name)?;
-        Ok(crate::SecretVersion {
-            secret_ref: entry.meta(&self.header.vault_id).secret_ref,
-            revision: entry.revision,
-        })
-    }
-
     /// Store or replace a secret. Replacing keeps its id (and live handles, if the new
     /// policy still allows their consumer) and writes the value to a fresh record file.
     pub fn put(
@@ -181,7 +173,9 @@ impl UnlockedVault {
         if let Err(error) = self.commit_index(records) {
             // Remove the new record only if the old header is provably still committed;
             // a header that was renamed into place but not synced may reference it.
-            if self.ensure_unchanged_on_disk().is_ok() {
+            if !matches!(&error, VaultError::CommitUncertain { .. })
+                && self.ensure_unchanged_on_disk().is_ok()
+            {
                 let _ = self.dir.remove_record(&entry.blob);
             }
             return Err(error);
@@ -411,9 +405,12 @@ impl UnlockedVault {
         };
         let mut header = self.header.clone();
         header.index = index.seal(&self.keys.index)?;
-        self.commit_header(header)?;
-        self.index = index;
-        Ok(())
+        let result = self.commit_header(header);
+        if result.is_ok() || matches!(&result, Err(VaultError::CommitUncertain { .. })) {
+            // Rename succeeded even if directory durability could not be confirmed.
+            self.index = index;
+        }
+        result
     }
 
     /// Re-MAC `header`, check for concurrent changes, and atomically replace `vault.json`.
@@ -421,16 +418,23 @@ impl UnlockedVault {
         self.ensure_unchanged_on_disk()?;
         header.mac = crate::crypto::mac(&self.keys.mac, &header.mac_input())?;
         let bytes = header.to_bytes()?;
-        self.dir.write_header(&bytes)?;
-        self.header = header;
-        self.digest = sha256(&bytes);
-        Ok(())
+        let result = self.dir.write_header(&bytes);
+        let uncertain = matches!(&result, Err(VaultError::CommitUncertain { .. }));
+        if result.is_ok() || uncertain {
+            // Keep direct crate callers consistent with the now-visible header.
+            self.header = header;
+            self.digest = sha256(&bytes);
+        }
+        if uncertain {
+            self.revoke_all_handles();
+        }
+        result
     }
 
     /// Best-effort removal of temporary files and record files no longer referenced.
     pub(crate) fn collect_garbage(&self) {
         self.dir.remove_temp_files();
-        let Ok(on_disk) = self.dir.record_blobs() else {
+        let Ok(on_disk) = self.dir.record_blobs(None) else {
             return;
         };
         let referenced: HashSet<&BlobId> =

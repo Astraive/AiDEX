@@ -18,7 +18,7 @@ export function LiveSessionSidebar({
   page?: PageId;
 }) {
   const { route, navigate } = useNavigation();
-  const { setPendingPrompt } = usePreferences();
+  const { setPendingPrompt, setPendingAttachments } = usePreferences();
   const sessions = useRpc("conversation.list");
   useEffect(() => {
     const timer = setInterval(sessions.refetch, 2000);
@@ -32,6 +32,7 @@ export function LiveSessionSidebar({
           icon={<PlusIcon />}
           onSelect={() => {
             setPendingPrompt(null);
+            setPendingAttachments(null);
             navigate({ page: agent ? "agent" : "chat" });
           }}
         />

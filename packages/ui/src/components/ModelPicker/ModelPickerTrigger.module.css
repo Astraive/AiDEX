@@ -1,0 +1,88 @@
+.trigger {
+  position: relative;
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--aidex-color-text-secondary);
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.sm {
+  min-height: 32px;
+  padding: 0 var(--aidex-space-2);
+  border-radius: var(--aidex-radius-sm);
+  font-size: var(--aidex-text-sm);
+}
+
+.md {
+  min-height: 40px;
+  padding: 0 var(--aidex-space-3);
+  border-radius: var(--aidex-radius-md);
+  font-size: var(--aidex-text-sm);
+}
+
+.trigger:hover:not(:disabled),
+.trigger[aria-expanded="true"] {
+  background: var(--aidex-color-surface-hover);
+  color: var(--aidex-color-text);
+}
+
+.trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.label {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.md .label {
+  max-width: 240px;
+}
+
+.badge {
+  flex: none;
+}
+
+.chevron {
+  flex: none;
+  color: var(--aidex-color-text-muted);
+  transition: transform var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.trigger[aria-expanded="true"] .chevron {
+  transform: rotate(180deg);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

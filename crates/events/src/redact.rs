@@ -335,16 +335,37 @@ fn authorization_headers(bytes: &[u8], spans: &mut Vec<(usize, usize)>) {
             continue;
         }
         let mut cursor = at + NAME.len();
-        cursor = run(bytes, cursor, |byte| matches!(byte, b'"' | b'\'' | b' '));
+        cursor = run(bytes, cursor, |byte| {
+            matches!(byte, b'"' | b'\'' | b' ' | b'\t')
+        });
         if !matches!(bytes.get(cursor), Some(b':' | b'=')) {
             at += 1;
             continue;
         }
         cursor = run(bytes, cursor + 1, |byte| {
-            matches!(byte, b'"' | b'\'' | b' ')
+            matches!(byte, b'"' | b'\'' | b' ' | b'\t')
         });
-        let scheme_end = run(bytes, cursor, |byte| byte.is_ascii_alphabetic());
-        let gap = run(bytes, scheme_end, |byte| byte == b' ');
+        let scheme_end = run(bytes, cursor, |byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        });
+        let gap = run(bytes, scheme_end, |byte| matches!(byte, b' ' | b'\t'));
         if scheme_end > cursor && gap > scheme_end {
             let end = run(bytes, gap, |byte| {
                 !byte.is_ascii_whitespace() && !matches!(byte, b'"' | b'\'' | b',' | b';')

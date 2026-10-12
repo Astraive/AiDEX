@@ -11,8 +11,6 @@ import type {
   VaultLockResult,
   VaultStatus,
   VaultUnlockParams,
-  SecretMeta,
-  SecretSetParams,
 } from "./dto/vault";
 import type {
   SelectedWorkspace,
@@ -20,12 +18,23 @@ import type {
   WorkspaceList,
 } from "./dto/workspace";
 import type {
+  DefaultModel,
   ModelList,
-  ModelRef,
+  ModelListParams,
   ProviderAccount,
   ProviderAddParams,
+  ProviderHealth,
+  ProviderPatchParams,
   ProviderPreset,
 } from "./dto/models";
+import type {
+  RuntimeConfig,
+  RuntimeDriver,
+  RuntimeDriverInfo,
+  RuntimeHealth,
+  RuntimeInstallResult,
+  RuntimeModel,
+} from "./dto/runtime";
 import type {
   Approval,
   Run,
@@ -36,8 +45,66 @@ import type {
   HistoryPage,
   HistoryScope,
   Checkpoint,
+  ConversationForkParams,
+  SendParams,
 } from "./dto/sessions";
-import type { AppPreferences } from "./dto/preferences";
+import type {
+  SkillDeleted,
+  SkillDetail,
+  SkillDraft,
+  SkillList,
+  SkillListParams,
+  SkillSetEnabledParams,
+  SkillShowParams,
+  SkillSummary,
+} from "./dto/skills";
+import type {
+  McpImportResult,
+  McpLogsResult,
+  McpServer,
+  McpServerList,
+  McpServerSpec,
+  McpToolsResult,
+} from "./dto/mcp";
+import type {
+  WebProviderInfo,
+  WebSettingsPatch,
+  WebSettingsView,
+  WebTestParams,
+  WebTestResult,
+} from "./dto/web";
+import type {
+  PluginDetail,
+  PluginInstallOutcome,
+  PluginInstallParams,
+  PluginList,
+  PluginSetEnabledParams,
+  PluginSummary,
+  PluginTrustParams,
+  PluginUninstalled,
+} from "./dto/plugins";
+import type {
+  ArtifactContent,
+  ArtifactList,
+  ArtifactListParams,
+  ArtifactMeta,
+  ArtifactPlanUpdateParams,
+  ArtifactReadParams,
+} from "./dto/artifacts";
+import type {
+  Attachment,
+  AttachmentContent,
+  AttachmentExcludeParams,
+  AttachmentFromWorkspaceParams,
+  AttachmentList,
+  AttachmentListParams,
+  AttachmentReadParams,
+  AttachmentUploadBeginParams,
+  AttachmentUploadChunkParams,
+  AttachmentUploadTicket,
+} from "./dto/attachments";
+import type { ExecutionStatus } from "./dto/execution";
+import type { AppPreferences, ModelPreferences } from "./dto/preferences";
 import type {
   InferenceCatalog,
   InferenceOptions,
@@ -45,38 +112,6 @@ import type {
   InferenceStatus,
   ManagedModel,
 } from "./dto/inference";
-import type {
-  RuntimeConfig,
-  RuntimeDriver,
-  RuntimeDriverInfo,
-  RuntimeHealth,
-  RuntimeInstall,
-  RuntimeModel,
-  RuntimeAccountStatus,
-  RuntimeLoginStatus,
-  AuthStart,
-  AuthStatus,
-  ExecutionStatus,
-} from "./dto/runtimes";
-import type {
-  SkillSummary,
-  SkillDocument,
-  McpServerConfig,
-  McpServerSummary,
-  PluginManifest,
-  PluginSummary,
-  ExtensionScope,
-  CatalogSnapshot,
-  MarketplaceCatalog,
-} from "./dto/extensions";
-import type { SearchProvider, WebStatus } from "./dto/web";
-import type {
-  UpdateStatus,
-  UpdateSourceParams,
-  CheckReport,
-  ApplyReport,
-  RollbackReport,
-} from "./dto/updates";
 
 /**
  * Daemon methods the apps use, with their params and results. Add an entry when a screen needs a
@@ -84,148 +119,6 @@ import type {
  * `events.subscribe` go through `subscribe`.
  */
 export type RpcMethods = {
-  "update.status": { params: undefined; result: UpdateStatus };
-  "update.check": { params: UpdateSourceParams; result: CheckReport };
-  "update.apply": { params: UpdateSourceParams; result: ApplyReport };
-  "update.rollback": {
-    params: { allow_unsigned?: boolean } | undefined;
-    result: RollbackReport;
-  };
-  "network.status": {
-    params: undefined;
-    result: { offline: boolean; network: "online" | "offline" };
-  };
-  "network.offline": {
-    params: { enabled: boolean };
-    result: { offline: boolean; network: "online" | "offline" };
-  };
-  "runtime.account.status": {
-    params: { id: string };
-    result: RuntimeAccountStatus;
-  };
-  "runtime.profile.import": {
-    params: { id: string; source: string };
-    result: RuntimeAccountStatus;
-  };
-  "runtime.login.start": { params: { id: string }; result: RuntimeLoginStatus };
-  "runtime.login.status": {
-    params: { id: string; flow_id: string };
-    result: RuntimeLoginStatus;
-  };
-  "runtime.login.cancel": {
-    params: { id: string; flow_id: string };
-    result: RuntimeLoginStatus;
-  };
-  "runtime.login.logout": {
-    params: { id: string };
-    result: RuntimeAccountStatus;
-  };
-  "extensions.marketplace.list": {
-    params: undefined;
-    result: MarketplaceCatalog;
-  };
-  "extensions.marketplace.install": {
-    params: {
-      id: string;
-      version: string;
-      package_digest: string;
-      trusted: boolean;
-      workspace_ids: string[];
-      profiles: string[];
-    };
-    result: PluginSummary;
-  };
-  "web.status": { params: undefined; result: WebStatus };
-  "web.configure": {
-    params: { provider: SearchProvider; enabled: boolean; api_key?: string };
-    result: WebStatus;
-  };
-  "web.disconnect": { params: undefined; result: WebStatus };
-  "extensions.skills.list": { params: undefined; result: SkillSummary[] };
-  "extensions.skills.read": { params: { id: string }; result: SkillDocument };
-  "extensions.skills.save": {
-    params: { id: string; content: string; expected_digest?: string };
-    result: SkillSummary;
-  };
-  "extensions.skills.import": {
-    params: {
-      content: string;
-      trusted: boolean;
-      workspace_ids: string[];
-      profiles: string[];
-    };
-    result: SkillSummary;
-  };
-  "extensions.skills.enable": {
-    params: { id: string; enabled: boolean };
-    result: SkillSummary;
-  };
-  "extensions.skills.remove": {
-    params: { id: string };
-    result: { removed: boolean };
-  };
-  "extensions.plugins.list": { params: undefined; result: PluginSummary[] };
-  "extensions.plugins.install": {
-    params: { manifest: PluginManifest; files: Record<string, string> };
-    result: PluginSummary;
-  };
-  "extensions.plugins.enable": {
-    params: { id: string; enabled: boolean };
-    result: PluginSummary;
-  };
-  "extensions.plugins.remove": {
-    params: { id: string };
-    result: { removed: boolean };
-  };
-  "extensions.mcp.list": { params: undefined; result: McpServerSummary[] };
-  "extensions.mcp.upsert": {
-    params: { config: McpServerConfig };
-    result: McpServerSummary;
-  };
-  "extensions.mcp.remove": {
-    params: { id: string };
-    result: { removed: boolean };
-  };
-  "extensions.mcp.connect": {
-    params: ExtensionScope & { id: string };
-    result: McpServerSummary;
-  };
-  "extensions.mcp.discover": {
-    params: ExtensionScope & { id: string };
-    result: McpServerSummary;
-  };
-  "extensions.mcp.disconnect": {
-    params: { id: string };
-    result: McpServerSummary;
-  };
-  "extensions.mcp.cancel": { params: { id: string }; result: McpServerSummary };
-  "extensions.catalog": { params: ExtensionScope; result: CatalogSnapshot };
-  "runtime.catalog": { params: undefined; result: RuntimeDriverInfo[] };
-  "runtime.list": { params: undefined; result: { runtimes: RuntimeConfig[] } };
-  "runtime.config.get": { params: { id: string }; result: RuntimeConfig };
-  "runtime.config.save": { params: RuntimeConfig; result: RuntimeConfig };
-  "runtime.add": { params: RuntimeConfig; result: RuntimeConfig };
-  "runtime.update": { params: RuntimeConfig; result: RuntimeConfig };
-  "runtime.remove": { params: { id: string }; result: { removed: boolean } };
-  "runtime.health": { params: { id: string }; result: RuntimeHealth };
-  "runtime.models": {
-    params: { id: string };
-    result: { models: RuntimeModel[] };
-  };
-  "runtime.install": {
-    params: { driver: RuntimeDriver; source?: string };
-    result: RuntimeInstall;
-  };
-  "runtime.auth.start": { params: { id: string }; result: AuthStart };
-  "runtime.auth.status": {
-    params: { id: string; flow_id?: string };
-    result: AuthStatus;
-  };
-  "runtime.auth.cancel": {
-    params: { id: string; flow_id: string };
-    result: AuthStatus;
-  };
-  "execution.status": { params: undefined; result: ExecutionStatus };
   "inference.catalog": { params: undefined; result: InferenceCatalog };
   "inference.status": { params: undefined; result: InferenceStatus };
   "inference.import": {
@@ -265,6 +158,11 @@ export type RpcMethods = {
   "auth.cancel": { params: { flow_id: string }; result: unknown };
   "auth.disconnect": { params: { provider_id: string }; result: unknown };
   "settings.get": { params: undefined; result: AppPreferences };
+  "model.preferences.get": { params: undefined; result: ModelPreferences };
+  "model.preferences.set": {
+    params: Partial<ModelPreferences>;
+    result: ModelPreferences;
+  };
   "settings.set": {
     params: { patch: Partial<AppPreferences> };
     result: AppPreferences;
@@ -281,16 +179,11 @@ export type RpcMethods = {
     result: { workspace: Workspace; deleted_data: boolean };
   };
   "conversation.list": {
-    params: { offset?: number; limit?: number } | undefined;
-    result: {
-      sessions: SessionSummary[];
-      total_sessions: number;
-      offset: number;
-      next_offset: number | null;
-      truncated: boolean;
-    };
+    params: undefined;
+    result: { sessions: SessionSummary[] };
   };
   "conversation.create": { params: SessionConfig; result: SessionDetail };
+  "conversation.fork": { params: ConversationForkParams; result: SessionDetail };
   "conversation.get": {
     params: { id: string; message_offset?: number; message_limit?: number };
     result: SessionDetail;
@@ -302,7 +195,7 @@ export type RpcMethods = {
   "history.read": {
     params: HistoryScope & {
       index: number;
-      field?: string;
+      field?: "content" | "tool_arguments" | "provider_metadata";
       call_index?: number;
       offset?: number;
       limit?: number;
@@ -315,13 +208,7 @@ export type RpcMethods = {
   };
   "checkpoint.list": {
     params: { session_id: string; offset?: number; limit?: number };
-    result: {
-      checkpoints: Checkpoint[];
-      total_checkpoints: number;
-      offset: number;
-      next_offset: number | null;
-      truncated: boolean;
-    };
+    result: { checkpoints: Checkpoint[]; total_checkpoints: number };
   };
   "checkpoint.compare": {
     params: { session_id: string; id: string };
@@ -343,31 +230,14 @@ export type RpcMethods = {
     params: { id: string; pinned: boolean };
     result: SessionSummary;
   };
-  "message.send": {
-    params: { session_id: string; content: string; command_id: string };
-    result: Run;
-  };
-  "agent.start": {
-    params: { session_id: string; content: string; command_id: string };
-    result: Run;
-  };
+  "message.send": { params: SendParams; result: Run };
+  "agent.start": { params: SendParams; result: Run };
   "run.get": { params: { id: string }; result: Run };
   "run.cancel": { params: { id: string }; result: Run };
   "run.resume": { params: { id: string }; result: Run };
   "approval.list": {
-    params: {
-      run_id?: string;
-      status?: "pending" | "approved" | "denied" | "expired";
-      offset?: number;
-      limit?: number;
-    };
-    result: {
-      approvals: Approval[];
-      total_approvals: number;
-      offset: number;
-      next_offset: number | null;
-      truncated: boolean;
-    };
+    params: { run_id?: string };
+    result: { approvals: Approval[] };
   };
   "approval.respond": {
     params: {
@@ -382,38 +252,69 @@ export type RpcMethods = {
     params: { session_id: string; configuration: SessionConfig };
     result: SessionConfig;
   };
-  "model.list": { params: undefined; result: ModelList };
+  /** Engine capabilities on this computer, with bounded session and run summaries. */
+  "execution.status": { params: undefined; result: ExecutionStatus };
+  "model.list": { params: ModelListParams | undefined; result: ModelList };
   "model.providers": {
     params: undefined;
     result: { providers: ProviderAccount[] };
   };
   "model.use": {
     params: { provider_id: string; model_id: string };
-    result: { default_model: ModelRef | null };
+    result: DefaultModel;
   };
+  "model.default": { params: undefined; result: DefaultModel };
   "provider.presets": {
     params: undefined;
     result: { presets: ProviderPreset[] };
   };
   "provider.add": { params: ProviderAddParams; result: ProviderAccount };
   "provider.update": { params: ProviderAddParams; result: ProviderAccount };
-  "provider.remove": { params: { id: string }; result: { removed: boolean } };
-  "provider.health": {
+  "provider.patch": { params: ProviderPatchParams; result: ProviderAccount };
+  "provider.remove": { params: { id: string }; result: { removed: string } };
+  "provider.health": { params: { id: string }; result: ProviderHealth };
+  /** Opens a preset's own API-key or docs page in the system browser; never takes a URL. */
+  "provider.open_link": {
+    params: { preset_id: string; link: "api_key" | "docs" };
+    result: { opened: true };
+  };
+  "runtime.catalog": { params: undefined; result: RuntimeDriverInfo[] };
+  "runtime.list": { params: undefined; result: { runtimes: RuntimeConfig[] } };
+  "runtime.add": { params: RuntimeConfig; result: RuntimeConfig };
+  "runtime.update": { params: RuntimeConfig; result: RuntimeConfig };
+  "runtime.remove": { params: { id: string }; result: { removed: boolean } };
+  "runtime.config.get": { params: { id: string }; result: RuntimeConfig };
+  "runtime.health": { params: { id: string }; result: RuntimeHealth };
+  "runtime.models": { params: { id: string }; result: { models: RuntimeModel[] } };
+  "runtime.install": {
+    params: { driver: RuntimeDriver; source?: string };
+    result: RuntimeInstallResult;
+  };
+  "runtime.auth.start": {
     params: { id: string };
-    result: { provider_id: string; status: string; message?: string };
+    result: {
+      flow_id: string;
+      provider_id: string;
+      authorization_url: string;
+      expires_at: number;
+    };
+  };
+  "runtime.auth.status": {
+    params: { id: string; flow_id?: string };
+    result: {
+      state: string;
+      provider_id: string;
+      account_label?: string | null;
+      error?: string | null;
+    };
+  };
+  "runtime.auth.cancel": {
+    params: { id: string; flow_id: string };
+    result: unknown;
   };
   "vault.secret.set": {
-    params: SecretSetParams;
-    result: SecretMeta;
-  };
-  "vault.secret.list": { params: undefined; result: { secrets: SecretMeta[] } };
-  "vault.secret.delete": {
-    params: { name: string };
-    result: { deleted: SecretMeta };
-  };
-  "vault.passphrase.change": {
-    params: { old_passphrase?: string; new_passphrase: string };
-    result: { changed: boolean };
+    params: { name: string; value: string; consumers: string[]; kind?: string };
+    result: unknown;
   };
   "daemon.status": { params: undefined; result: DaemonStatus };
   "daemon.ping": { params: undefined; result: { pong: true } };
@@ -425,6 +326,68 @@ export type RpcMethods = {
   "vault.lock": { params: undefined; result: VaultLockResult };
   "workspace.list": { params: undefined; result: WorkspaceList };
   "workspace.selected": { params: undefined; result: SelectedWorkspace };
+  "skill.list": { params: SkillListParams | undefined; result: SkillList };
+  "skill.show": { params: SkillShowParams; result: SkillDetail };
+  "skill.set_enabled": { params: SkillSetEnabledParams; result: SkillSummary };
+  "skill.save": { params: SkillDraft; result: SkillSummary };
+  "skill.delete": { params: { name: string }; result: SkillDeleted };
+  "mcp.list": { params: { workspace_id?: string } | undefined; result: McpServerList };
+  "mcp.add": { params: McpServerSpec; result: McpServer };
+  /** Stops a running server so its next start uses the new configuration. */
+  "mcp.update": { params: McpServerSpec; result: McpServer };
+  "mcp.remove": { params: { id: string }; result: { removed: boolean } };
+  "mcp.set_enabled": { params: { id: string; enabled: boolean }; result: McpServer };
+  "mcp.start": { params: { id: string }; result: McpServer };
+  "mcp.stop": { params: { id: string }; result: McpServer };
+  "mcp.restart": { params: { id: string }; result: McpServer };
+  "mcp.tools": { params: { id: string }; result: McpToolsResult };
+  "mcp.logs": { params: { id: string; limit?: number }; result: McpLogsResult };
+  /** Saves each valid `.mcp.json` entry of the workspace as a DISABLED server (`dry_run` previews). */
+  "mcp.import": {
+    params: { workspace_id?: string; dry_run?: boolean } | undefined;
+    result: McpImportResult;
+  };
+  "plugin.list": { params: undefined; result: PluginList };
+  "plugin.show": { params: { name: string }; result: PluginDetail };
+  "plugin.install": { params: PluginInstallParams; result: PluginInstallOutcome };
+  "plugin.trust": { params: PluginTrustParams; result: PluginSummary };
+  "plugin.set_enabled": { params: PluginSetEnabledParams; result: PluginSummary };
+  "plugin.uninstall": { params: { name: string }; result: PluginUninstalled };
+  "web.settings.get": { params: undefined; result: WebSettingsView };
+  "web.settings.set": { params: WebSettingsPatch; result: WebSettingsView };
+  "web.providers": { params: undefined; result: { providers: WebProviderInfo[] } };
+  "web.test": { params: WebTestParams; result: WebTestResult };
+  /** Opens an https URL from a result in the system browser after strict validation. */
+  "web.open": { params: { url: string }; result: { opened: true } };
+  "artifact.list": { params: ArtifactListParams; result: ArtifactList };
+  "artifact.get": { params: { id: string }; result: ArtifactMeta };
+  "artifact.read": { params: ArtifactReadParams; result: ArtifactContent };
+  "artifact.delete": { params: { id: string }; result: { deleted: boolean } };
+  "artifact.plan.update": { params: ArtifactPlanUpdateParams; result: ArtifactMeta };
+  "attachment.upload.begin": {
+    params: AttachmentUploadBeginParams;
+    result: AttachmentUploadTicket;
+  };
+  "attachment.upload.chunk": {
+    params: AttachmentUploadChunkParams;
+    result: { received: number };
+  };
+  "attachment.upload.commit": { params: { upload_id: string }; result: Attachment };
+  /** Works while the vault is locked. */
+  "attachment.upload.abort": {
+    params: { upload_id: string };
+    result: { aborted: boolean };
+  };
+  "attachment.from_workspace": {
+    params: AttachmentFromWorkspaceParams;
+    result: Attachment;
+  };
+  "attachment.list": { params: AttachmentListParams; result: AttachmentList };
+  "attachment.get": { params: { id: string }; result: Attachment };
+  "attachment.read": { params: AttachmentReadParams; result: AttachmentContent };
+  /** Staged attachments only (`attachment_sent` otherwise). */
+  "attachment.delete": { params: { id: string }; result: { deleted: boolean } };
+  "attachment.exclude": { params: AttachmentExcludeParams; result: Attachment };
 };
 
 export type RpcMethod = keyof RpcMethods;

@@ -241,9 +241,9 @@ pub(crate) fn launch(
     ctx: &ToolContext,
     request: &LaunchRequest,
 ) -> Result<LaunchOutcome, ToolError> {
-    ctx.cancel.check()?;
+    crate::context::check_cancel(&ctx.cancel)?;
     let outcome = ctx.launcher()?.launch(request, &ctx.cancel)?;
-    if ctx.cancel.is_cancelled() {
+    if ctx.cancel.is_stopped() {
         return Err(ToolError::Cancelled);
     }
     Ok(outcome)

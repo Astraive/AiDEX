@@ -1,7 +1,7 @@
 //! Native ownership of execution permits and the tool registry.
-use crate::launcher::NativeLauncher;
+use crate::{extensions::Extensions, launcher::NativeLauncher};
 use aidex_core::{EntityId, WorkspacePath};
-use aidex_events::EventSink;
+use aidex_events::NullEventSink;
 use aidex_native_sessions::{PermissionMode, SessionDetail};
 use aidex_policy::{
     EvaluationContext, HostTrust, NetworkMode, PolicySet, PrivacyMode, Profile, ProjectRules,
@@ -19,53 +19,9 @@ pub(crate) struct Broker {
     pub sandbox: Sandbox,
     pub workspaces: Arc<WorkspaceRegistry>,
     scratch: PathBuf,
-    events: Arc<dyn EventSink>,
-}
-pub(crate) enum PrepareError {
-    Fatal(String),
-    Repairable { code: String, message: String },
-}
-impl std::fmt::Display for PrepareError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Fatal(message) | Self::Repairable { message, .. } => f.write_str(message),
-        }
-    }
-}
-impl From<String> for PrepareError {
-    fn from(value: String) -> Self {
-        Self::Fatal(value)
-    }
-}
-impl From<&str> for PrepareError {
-    fn from(value: &str) -> Self {
-        Self::Fatal(value.into())
-    }
-}
-impl From<PrepareError> for String {
-    fn from(value: PrepareError) -> Self {
-        value.to_string()
-    }
-}
-fn planning_error(error: aidex_tools::ToolError) -> PrepareError {
-    use aidex_tools::{InputError, ToolError};
-    let repairable = matches!(
-        &error,
-        ToolError::UnknownTool(_)
-            | ToolError::NotFound { .. }
-            | ToolError::WrongKind { .. }
-            | ToolError::TooLarge { .. }
-            | ToolError::Conflict { .. }
-            | ToolError::PatchFailed { .. }
-    ) || matches!(&error, ToolError::InvalidInput { reason, .. } if *reason != InputError::InvalidPath);
-    if repairable {
-        PrepareError::Repairable {
-            code: error.reason().into(),
-            message: error.to_string(),
-        }
-    } else {
-        PrepareError::Fatal(error.to_string())
-    }
+    /// The offline switch, emergency stop, and drive policy settings that
+    /// planned network access is evaluated under.
+    extensions: Arc<dyn Extensions>,
 }
 pub(crate) struct Prepared {
     pub context: ToolContext,
@@ -73,9 +29,12 @@ pub(crate) struct Prepared {
     pub needs_approval: bool,
     pub before: Vec<(String, Option<String>)>,
     policy_fingerprint: String,
+    /// The drive settings a plan that reaches the network was evaluated
+    /// under; `None` for other plans.
+    network: Option<EvaluationContext>,
 }
 impl Broker {
-    fn policy_state(
+    pub(crate) fn policy_state(
         &self,
         root: Option<&Path>,
         workspace: Option<&EntityId>,
@@ -165,22 +124,21 @@ impl Broker {
     pub fn new(
         workspaces: Arc<WorkspaceRegistry>,
         scratch: PathBuf,
-        tools: ToolRegistry,
-        events: Arc<dyn EventSink>,
+        extensions: Arc<dyn Extensions>,
     ) -> Self {
         Self {
-            tools,
+            tools: ToolRegistry::with_builtin_tools(),
             sandbox: Sandbox::locate(),
             workspaces,
             scratch,
-            events: Arc::new(crate::telemetry::ToolEventSink(events)),
+            extensions,
         }
     }
     pub fn prepare(
         &self,
         s: &SessionDetail,
         call: &aidex_providers::ToolCall,
-    ) -> Result<Prepared, PrepareError> {
+    ) -> Result<Prepared, String> {
         let workspace = s
             .configuration
             .workspace_id
@@ -195,30 +153,14 @@ impl Broker {
             handle.id().clone(),
             EntityId::generate("call").map_err(|e| e.to_string())?,
             Arc::new(handle.root().clone()),
-            self.events.clone(),
+            Arc::new(NullEventSink),
         );
-        let tool =
-            self.tools
-                .resolve_model_name(&call.name)
-                .ok_or_else(|| PrepareError::Repairable {
-                    code: "unknown_tool".into(),
-                    message: "unknown native tool; use the offered catalog".into(),
-                })?;
-        if self.tools.descriptor(tool).is_some_and(|d| {
-            d.capabilities
-                .iter()
-                .any(|c| c == "permissions:full_access")
-        }) && s.configuration.permission_mode != PermissionMode::FullAccess
-        {
-            return Err(PrepareError::Fatal(
-                "tool requires explicit full_access permission".into(),
-            ));
-        }
+        let tool = self
+            .tools
+            .resolve_model_name(&call.name)
+            .ok_or("unknown native tool")?;
         let input: serde_json::Value =
-            serde_json::from_str(&call.arguments).map_err(|_| PrepareError::Repairable {
-                code: "invalid_input".into(),
-                message: "invalid tool arguments JSON".into(),
-            })?;
+            serde_json::from_str(&call.arguments).map_err(|_| "invalid tool arguments JSON")?;
         if tool.as_str() == "fs.delete" {
             if input
                 .get("recursive")
@@ -250,7 +192,7 @@ impl Broker {
         let plan = self
             .tools
             .plan(&context, tool, input)
-            .map_err(planning_error)?;
+            .map_err(|e| e.to_string())?;
         let (policies, policy_fingerprint) =
             self.policy_state(Some(&handle.root().display_root()), Some(handle.id()))?;
         let profile = if s.configuration.permission_mode == PermissionMode::FullAccess {
@@ -258,18 +200,29 @@ impl Broker {
         } else {
             Profile::Balanced
         };
-        let evaluation = EvaluationContext::new(
-            profile,
-            PrivacyMode::Hybrid,
-            HostTrust::Trusted,
-            NetworkMode::Unrestricted,
-        );
+        // A plan that reaches the network (a push, a networked command) is
+        // refused while offline or stopped, and its intents meet the drive's
+        // privacy, host-trust, and network-mode floors; other plans keep the
+        // permission-mode context.
+        let network = if plan.facts().network.is_some() {
+            Some(self.network_context(profile)?)
+        } else {
+            None
+        };
+        let evaluation = network.clone().unwrap_or_else(|| {
+            EvaluationContext::new(
+                profile,
+                PrivacyMode::Hybrid,
+                HostTrust::Trusted,
+                NetworkMode::Unrestricted,
+            )
+        });
         let mut needs_approval = tool.as_str() == "fs.delete";
         let mut level = SandboxLevel::Brokered;
         for intent in plan.intents() {
             let d = evaluate(&policies, &evaluation, &intent);
             if d.verdict.is_deny() {
-                return Err(format!("policy denied: {}", d.reason).into());
+                return Err(format!("policy denied: {}", d.reason));
             }
             if d.rate_limit.is_some() {
                 return Err("rate-limited tools unavailable in native v1".into());
@@ -308,8 +261,6 @@ impl Broker {
             self.scratch.clone(),
             plan.fingerprint(),
             level,
-            context.events.clone(),
-            context.scope(),
         ));
         let context = context.with_launcher(launcher);
         let mut before = vec![];
@@ -340,7 +291,25 @@ impl Broker {
             needs_approval,
             before,
             policy_fingerprint,
+            network,
         })
+    }
+    /// The context network-bearing plans are evaluated under: refused while
+    /// the offline switch or an emergency stop is on, otherwise the drive's
+    /// privacy, host-trust, and network-mode settings.
+    fn network_context(&self, profile: Profile) -> Result<EvaluationContext, String> {
+        let network = self.extensions.network();
+        if let Some(reason) = network.blocked {
+            return Err(format!(
+                "policy denied: network access is unavailable ({reason})"
+            ));
+        }
+        Ok(EvaluationContext::new(
+            profile,
+            network.context.privacy,
+            network.context.host_trust,
+            network.context.network_mode,
+        ))
     }
     pub fn execute(&self, p: &Prepared, issuer: PermitIssuer) -> Result<ToolOutput, String> {
         let (_, current) = self.policy_state(
@@ -348,6 +317,13 @@ impl Broker {
             Some(&p.context.workspace_id),
         )?;
         if current != p.policy_fingerprint {
+            return Err("policy changed since tool planning; request a new plan".into());
+        }
+        // The offline switch, an emergency stop, or the drive's settings may
+        // have changed while the plan waited for approval.
+        if let Some(planned) = &p.network
+            && self.network_context(planned.profile)? != *planned
+        {
             return Err("policy changed since tool planning; request a new plan".into());
         }
         self.tools

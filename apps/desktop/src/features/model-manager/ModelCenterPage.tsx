@@ -6,17 +6,17 @@ import { tabOf, type PageTab } from "../../lib/routes";
 import { LocalModelsPanel } from "./LocalModelsPanel";
 import { ProvidersPanel } from "./ProvidersPanel";
 const items = [
+  { value: "providers", label: "Providers" },
   { value: "local", label: "Local models" },
-  { value: "providers", label: "Provider accounts" },
 ] as const satisfies readonly { value: PageTab<"models">; label: string }[];
 export function ModelCenterPage() {
   const { route, replace } = useNavigation();
   const tab = tabOf(route, "models");
   return (
-    <PageFrame width="default">
+    <PageFrame width="wide">
       <PageHeader
         title="Models"
-        description="Manage cloud accounts and verified inference runtimes on this drive."
+        description="Connect model providers and agent runtimes, and run verified local models from this drive."
       />
       <Tabs
         id="models-tabs"

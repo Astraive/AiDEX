@@ -41,8 +41,6 @@ pub struct SessionConfig {
     #[serde(default)]
     pub runtime_id: Option<String>,
     #[serde(default)]
-    pub skill_ids: Vec<String>,
-    #[serde(default)]
     pub instructions: String,
     #[serde(default)]
     pub fallback_model: Option<String>,
@@ -70,21 +68,6 @@ fn default_tokens() -> u32 {
 impl SessionConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.max_steps == 0
-            || self.skill_ids.len() > 32
-            || self.skill_ids.iter().any(|id| {
-                id.is_empty()
-                    || id.len() > 64
-                    || !id.as_bytes()[0].is_ascii_lowercase()
-                    || !id.bytes().all(|b| {
-                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
-                    })
-            })
-            || self
-                .skill_ids
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != self.skill_ids.len()
             || self.max_steps > 128
             || self.max_tokens == 0
             || self.max_tokens > 32768
@@ -108,10 +91,6 @@ pub struct Run {
     pub parent_run_id: Option<String>,
     pub status: RunStatus,
     pub steps: u32,
-    #[serde(default)]
-    pub inference_retries: u32,
-    #[serde(default)]
-    pub context_trimmed_messages: u32,
     pub error: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -127,6 +106,66 @@ pub struct Run {
     pub model_used: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_ref: Option<serde_json::Value>,
+    /// Skill ids the user invoked for this run (`<scope>:<name>`). `Run` has no
+    /// `deny_unknown_fields`, so daemons that predate the field ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// The request turned on web tools for this run (Chat mode); per run, never
+    /// part of the session configuration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub web_search: bool,
+    /// Index of the run's user message in the session history (root runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<usize>,
+    /// Attachment ids sent with the run's user message, in order. A cache
+    /// only: the attachments table is authoritative (an older daemon drops
+    /// this field when it re-saves the session).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
+    /// Session mode when the run began (`None` for runs from before the field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<Mode>,
+    /// Session permission mode when the run began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
+    /// Session workspace when the run began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+/// Per-request options of a new run. Nothing here is persisted in the
+/// session configuration.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RunOptions {
+    /// Invoked skill ids, already validated by the caller.
+    pub skills: Vec<String>,
+    /// Offer web tools in Chat mode for this run.
+    pub web_search: bool,
+    /// Staged attachment ids to send with the user message, in order (root
+    /// runs only). They join the command fingerprint only when present.
+    pub attachments: Vec<String>,
+}
+impl RunOptions {
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty() && !self.web_search && self.attachments.is_empty()
+    }
+}
+/// Where a forked conversation came from: its first `message_count` messages
+/// are a copy of `session_id`'s history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ForkOrigin {
+    pub session_id: String,
+    pub message_count: usize,
+}
+/// A [`fork`](crate::SessionStore::fork) of a conversation into a new one.
+#[derive(Clone, Debug)]
+pub struct ForkRequest {
+    /// Configuration of the new conversation (validated like `create`).
+    pub configuration: SessionConfig,
+    /// Replaces the configuration's title when present.
+    pub title: Option<String>,
+    /// Makes a retried fork return the conversation the first call created
+    /// (1-128 bytes).
+    pub command_id: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Approval {
@@ -136,9 +175,6 @@ pub struct Approval {
     pub arguments: serde_json::Value,
     pub fingerprint: String,
     pub status: String,
-    /// Internal correlation for a waiting MCP call, never a runtime credential.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bridge_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +226,9 @@ pub struct SessionDetail {
     pub commands: BTreeMap<String, CommandRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_ref: Option<serde_json::Value>,
+    /// Set on a conversation created by [`fork`](crate::SessionStore::fork).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkOrigin>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionSummary {

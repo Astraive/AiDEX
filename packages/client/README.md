@@ -13,7 +13,7 @@ Typed TypeScript access to AiDEX Core for the Tauri apps: wrappers for the deskt
 | `@aidex/client/host` | `hostProfile()` (both apps) |
 | `@aidex/client/rpc` | `call(method, params)` typed by `RpcMethods`, `callUntyped`, `subscribe(method, params, { onData, onEnd })` |
 | `@aidex/client/format` | `formatBytes`, `formatDuration`, `bytesToGb`, `UNKNOWN` |
-| `@aidex/client/dto/<name>` | `host`, `drive`, `sandbox`, `daemon`, `status`, `installer` |
+| `@aidex/client/dto/<name>` | `host`, `drive`, `sandbox`, `daemon`, `status`, `installer`, `execution` (`execution.status`: engine capabilities, session and run summaries) |
 
 `subscribe` attaches its `aidex://notification` and `aidex://subscription-ended` listeners before calling `rpc_subscribe`, so notifications sent before the call returns are delivered in order. It resolves to `{ id, initial, unsubscribe }`.
 

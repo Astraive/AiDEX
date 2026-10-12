@@ -1,94 +1,63 @@
-import { useState } from "react";
 import { PageHeader } from "@aidex/ui/components";
 import { PageFrame } from "@aidex/ui/desktop";
-import { PlusIcon } from "@aidex/ui/icons";
-import { Button, Stack, TabPanel, Tabs } from "@aidex/ui/primitives";
+import { TabPanel, Tabs, Text } from "@aidex/ui/primitives";
 import { useNavigation } from "../../app/providers/navigation";
-import { useRpc } from "../../hooks/useRpc";
+import { useAidexStatus } from "../../hooks/useAidexStatus";
 import { tabOf, type PageTab } from "../../lib/routes";
 import { CoreStatusNotice } from "../system/CoreStatusNotice";
-import { SkillsPanel } from "./SkillsPanel";
-import { McpPanel } from "./McpPanel";
-import { PluginsPanel } from "./PluginsPanel";
-import { WebSearchPanel } from "./WebSearchPanel";
+import { useExtensionLists } from "./data";
+import { McpPanel } from "./mcp/McpPanel";
+import { PluginsPanel } from "./plugins/PluginsPanel";
+import { SkillsPanel } from "./skills/SkillsPanel";
+import { WebPanel } from "./web/WebPanel";
 
+type ExtensionsTab = PageTab<"extensions">;
+
+const TABS_ID = "extensions-tabs";
+
+/** Extensions screen: tabs for skills, MCP servers, plugins, and web search; the route `id` selects an item. */
 export function ExtensionsPage() {
   const { route, replace } = useNavigation();
   const tab = tabOf(route, "extensions");
-  const skills = useRpc("extensions.skills.list");
-  const servers = useRpc("extensions.mcp.list");
-  const plugins = useRpc("extensions.plugins.list");
-  const [adding, setAdding] = useState(false);
-  const refresh = () => {
-    skills.refetch();
-    servers.refetch();
-    plugins.refetch();
-    window.dispatchEvent(new Event("aidex:extensions-changed"));
-  };
-  const action = {
-    skills: "Import skill",
-    mcp: "Add MCP server",
-    plugins: "Install plugin bundle",
-  }[tab];
+  const lists = useExtensionLists();
+  const { daemonRunning } = useAidexStatus();
+  const select = (id: string | undefined) => replace({ page: "extensions", tab, id });
+
+  const tabItems: { value: ExtensionsTab; label: string; count?: number }[] = [
+    { value: "skills", label: "Skills", count: lists.skills?.length },
+    { value: "mcp", label: "MCP servers", count: lists.servers?.length },
+    { value: "plugins", label: "Plugins", count: lists.plugins?.length },
+    { value: "web", label: "Web search" },
+  ];
+
   return (
-    <PageFrame width="default">
-      <Stack gap={5}>
-        <PageHeader
-          title="Extensions"
-          description="Portable skills, scoped MCP servers, and plugin contributions."
-          actions={
-            <Button icon={<PlusIcon />} onClick={() => setAdding(true)}>
-              {action}
-            </Button>
-          }
-        />
-        <CoreStatusNotice requires="daemon" />
-        <Tabs
-          id="extensions-tabs"
-          label="Extension sections"
-          variant="underline"
-          value={tab}
-          items={[
-            { value: "skills", label: "Skills", count: skills.data?.length },
-            { value: "mcp", label: "MCP servers", count: servers.data?.length },
-            { value: "plugins", label: "Plugins", count: plugins.data?.length },
-          ]}
-          onValueChange={(next: PageTab<"extensions">) => {
-            setAdding(false);
-            replace({ page: "extensions", tab: next });
-          }}
-        />
-        <TabPanel tabsId="extensions-tabs" value={tab}>
-          {tab === "skills" && (
-            <Stack gap={5}>
-              <SkillsPanel
-                key={route.id}
-                initialEditingId={route.id}
-                adding={adding}
-                onCloseImport={() => setAdding(false)}
-                onChanged={refresh}
-              />
-              <WebSearchPanel />
-            </Stack>
-          )}
-          {tab === "mcp" && (
-            <McpPanel
-              key={route.id}
-              initialServerId={route.id}
-              adding={adding}
-              onCloseAdd={() => setAdding(false)}
-              onChanged={refresh}
-            />
-          )}
-          {tab === "plugins" && (
-            <PluginsPanel
-              adding={adding}
-              onCloseInstall={() => setAdding(false)}
-              onChanged={refresh}
-            />
-          )}
-        </TabPanel>
-      </Stack>
+    <PageFrame width="wide">
+      <PageHeader
+        title="Plugins"
+        description="Skills, MCP servers, plugins, and web search that extend what your agents can do."
+      />
+      <CoreStatusNotice requires="daemon" />
+      <Tabs
+        id={TABS_ID}
+        label="Extension sections"
+        variant="underline"
+        items={tabItems}
+        value={tab}
+        onValueChange={(next) => replace({ page: "extensions", tab: next })}
+      />
+      <TabPanel tabsId={TABS_ID} value={tab}>
+        {!daemonRunning ? (
+          <Text tone="muted">Skills, MCP servers, plugins, and web search settings appear once AiDEX Core is running.</Text>
+        ) : tab === "skills" ? (
+          <SkillsPanel selectedId={route.id} onSelect={select} />
+        ) : tab === "mcp" ? (
+          <McpPanel selectedId={route.id} onSelect={select} />
+        ) : tab === "plugins" ? (
+          <PluginsPanel selectedId={route.id} onSelect={select} />
+        ) : (
+          <WebPanel />
+        )}
+      </TabPanel>
     </PageFrame>
   );
 }

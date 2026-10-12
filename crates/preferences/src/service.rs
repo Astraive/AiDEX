@@ -1,13 +1,13 @@
-use crate::AppPreferences;
-use aidex_vault::{
-    ConsumerScope, SecretBytes, SecretKind, SecretName, SecretPolicy, VaultError, VaultService,
-};
+use crate::{AppPreferences, record};
+use aidex_vault::{VaultError, VaultService};
 use serde_json::Value;
 use std::{
     fmt,
     sync::{Arc, Mutex},
-    time::Duration,
 };
+
+/// Vault secret holding [`AppPreferences`].
+pub const PREFERENCES_SECRET: &str = "aidex-preferences";
 
 #[derive(Debug)]
 pub enum PreferencesError {
@@ -67,30 +67,13 @@ impl PreferencesService {
             .map_err(|_| PreferencesError::Invalid("invalid or unknown preference field"))?;
         updated.validate().map_err(PreferencesError::Invalid)?;
         let bytes = serde_json::to_vec(&updated).map_err(|_| PreferencesError::Unavailable)?;
-        let name = SecretName::new("aidex-preferences")?;
-        let consumer: ConsumerScope = "process:aidex-preferences".parse()?;
-        self.vault.put_secret(
-            &name,
-            SecretKind::Generic,
-            SecretBytes::new(bytes),
-            SecretPolicy::new([consumer])?,
-        )?;
+        record::write(&self.vault, PREFERENCES_SECRET, bytes)?;
         Ok(updated)
     }
     fn read(&self) -> Result<AppPreferences, PreferencesError> {
-        let name = SecretName::new("aidex-preferences")?;
-        match self.vault.secret_meta(&name) {
-            Err(VaultError::SecretNotFound(_)) => return Ok(AppPreferences::default()),
-            Err(error) => return Err(error.into()),
-            Ok(_) => {}
-        }
-        let consumer: ConsumerScope = "process:aidex-preferences".parse()?;
-        let handle = self
-            .vault
-            .issue_handle(&name, &consumer, Duration::from_secs(10))?;
-        let bytes = self.vault.resolve(&handle, &consumer);
-        self.vault.revoke_handle(&handle.handle_id);
-        let bytes = bytes?;
+        let Some(bytes) = record::read(&self.vault, PREFERENCES_SECRET)? else {
+            return Ok(AppPreferences::default());
+        };
         let settings: AppPreferences = serde_json::from_slice(bytes.expose())
             .map_err(|_| PreferencesError::Invalid("saved preferences are invalid"))?;
         settings.validate().map_err(PreferencesError::Invalid)?;

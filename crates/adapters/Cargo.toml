@@ -13,9 +13,6 @@ aidex-providers = { path = "../providers" }
 aidex-sandbox = { path = "../sandbox" }
 aidex-native-sessions = { path = "../native-sessions" }
 aidex-vault = { path = "../vault" }
-aidex-runtime-bridge = { path = "../runtime-bridge" }
-base64 = "0.22"
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

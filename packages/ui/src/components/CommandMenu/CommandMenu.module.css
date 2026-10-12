@@ -1,0 +1,182 @@
+/* The list scrolls, not the popover surface. */
+.popover {
+  border-radius: var(--aidex-radius-md);
+}
+
+.menu {
+  display: flex;
+  flex-direction: column;
+  /* The surface's 1px borders are inside its max-height. */
+  max-height: calc(var(--aidex-popover-available-height, 360px) - 2px);
+  min-height: 0;
+}
+
+.list {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--aidex-space-1);
+  min-height: 0;
+  max-height: 288px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--aidex-space-1);
+}
+
+.listEmpty {
+  flex: none;
+  padding: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sectionLabel {
+  padding: var(--aidex-space-2) var(--aidex-space-2) var(--aidex-space-1);
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  font-weight: 500;
+  line-height: 1.3;
+  user-select: none;
+}
+
+.option {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+  min-height: 36px;
+  padding: var(--aidex-space-1) var(--aidex-space-2);
+  border-radius: var(--aidex-radius-sm);
+  color: var(--aidex-color-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* The active row is the keyboard focus target (aria-activedescendant), so it gets a visible ring. */
+.active {
+  background: var(--aidex-color-surface-hover);
+  box-shadow: inset 0 0 0 1px var(--aidex-color-accent-subtle-border);
+}
+
+/* Only the contents dim, so a disabled row that holds the highlight still shows it at full strength. */
+.disabled {
+  cursor: not-allowed;
+}
+
+.disabled > * {
+  opacity: 0.55;
+}
+
+.icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--aidex-color-text-secondary);
+}
+
+.icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+}
+
+.title {
+  flex: 0 1 auto;
+  max-width: 55%;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--aidex-text-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title:only-child {
+  max-width: none;
+}
+
+.prefix {
+  color: var(--aidex-color-text-muted);
+  font-weight: 400;
+}
+
+/* Matches stay legible: an underline and weight change, not color alone. */
+.match {
+  background: transparent;
+  color: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: var(--aidex-color-accent);
+  text-underline-offset: 2px;
+}
+
+.description {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex: none;
+  margin-left: auto;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  margin: 0;
+  padding: var(--aidex-space-3) var(--aidex-space-4);
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.5;
+}
+
+.spinner {
+  flex: none;
+  animation: spin 900ms linear infinite;
+}
+
+.footer {
+  flex: none;
+  padding: var(--aidex-space-2) var(--aidex-space-3);
+  border-top: 1px solid var(--aidex-color-border-subtle);
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.4;
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

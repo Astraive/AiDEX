@@ -1,168 +1,171 @@
-import {
-  DataTable,
-  KeyValueList,
-  Notice,
-  SectionHeader,
-  type DataTableColumn,
-} from "@aidex/ui/components";
-import { Button, Stack, StatusIndicator, Text } from "@aidex/ui/primitives";
-import type { Capability } from "@aidex/client/dto/sandbox";
-import {
-  useHostProfile,
-  useSandboxCapabilities,
-} from "../../hooks/useCoreReports";
-import {
-  enforcementDetail,
-  enforcementLabel,
-  enforcementTone,
-  levelLabel,
-  requirementLabels,
-} from "../system/labels";
+import { DataTable, KeyValueList, List, ListRow, Notice, SectionHeader, type DataTableColumn } from "@aidex/ui/components";
+import { AlertTriangleIcon, LaptopIcon, MonitorIcon, RefreshIcon, ServerIcon } from "@aidex/ui/icons";
+import { Badge, Button, ChoiceCardGroup, Stack, StatusIndicator, Text, type ChoiceCardOption } from "@aidex/ui/primitives";
+import { rankOf, type BackendCapabilities, type Capability } from "@aidex/client/dto/sandbox";
+import { useToast } from "../../app/providers/toast";
+import { useSandboxCapabilities } from "../../hooks/useCoreReports";
+import { enforcementDetail, enforcementLabel, enforcementTone, levelLabel, requirementLabels } from "../system/labels";
 import { PolicyRules } from "./PolicyRules";
+import { sandboxBackends, type IsolationLevel } from "./sample";
 
-const columns: DataTableColumn<Capability>[] = [
+type Props = { isolation: IsolationLevel; onIsolationChange: (level: IsolationLevel) => void };
+
+const levelOptions: readonly { value: IsolationLevel; title: string; description: string }[] = [
   {
-    key: "requirement",
-    header: "Protection",
-    rowHeader: true,
-    render: (row) => requirementLabels[row.requirement],
+    value: "direct",
+    title: "Direct",
+    description: "Runs as your user account with no confinement, only with explicit consent. For trusted, one-off work.",
   },
   {
-    key: "state",
-    header: "Reported enforcement",
-    render: (row) => (
-      <StatusIndicator
-        tone={enforcementTone(row.enforcement)}
-        label={enforcementLabel(row.enforcement)}
-      />
-    ),
+    value: "brokered",
+    title: "Brokered",
+    description: "Sensitive actions go through the broker; processes get a cleared environment, a killable process tree, and limits.",
   },
   {
-    key: "mechanism",
-    header: "Mechanism",
-    render: (row) => enforcementDetail(row.enforcement),
+    value: "restricted",
+    title: "Restricted",
+    description: "Adds native OS confinement of file reads and writes to the workspace mounts.",
   },
   {
-    key: "limitations",
-    header: "Known limits",
-    render: (row) => row.limitations?.join(" ") || "None reported",
+    value: "ephemeral",
+    title: "Ephemeral",
+    description: "A disposable isolated environment. No backend implements it yet, so requests are refused.",
   },
 ];
-export function SandboxPanel() {
+
+const backendIcons = { windows_job_object: MonitorIcon, linux_landlock: ServerIcon, macos_seatbelt: LaptopIcon, unsupported: ServerIcon } as const;
+
+const columns: readonly DataTableColumn<Capability>[] = [
+  { key: "requirement", header: "Protection", rowHeader: true, render: (row) => requirementLabels[row.requirement] },
+  {
+    key: "state",
+    header: "Status",
+    width: "150px",
+    render: (row) => <StatusIndicator tone={enforcementTone(row.enforcement)} label={enforcementLabel(row.enforcement)} />,
+  },
+  { key: "detail", header: "How", render: (row) => enforcementDetail(row.enforcement) },
+  { key: "limitations", header: "Known gaps", render: (row) => row.limitations?.join(" ") ?? "None stated" },
+];
+
+function levelChoices(capabilities: BackendCapabilities | undefined): readonly ChoiceCardOption<IsolationLevel>[] {
+  const maxRank = capabilities?.max_level ? rankOf(capabilities.max_level) : -1;
+  return levelOptions.map((option) => {
+    const enforceable = capabilities ? rankOf(option.value) <= maxRank : true;
+    return {
+      ...option,
+      title: levelLabel(option.value),
+      disabled: !enforceable,
+      meta:
+        option.value === "direct" ? (
+          <Badge tone="neutral" icon={<AlertTriangleIcon size={14} />}>
+            Not recommended
+          </Badge>
+        ) : !enforceable ? (
+          <Badge tone="neutral">Not enforceable here</Badge>
+        ) : option.value === capabilities?.max_level ? (
+          <Badge tone="accent">Strongest here</Badge>
+        ) : undefined,
+    };
+  });
+}
+
+/** Sandbox and policies: the live capability report of this host, the level choice, and the sample policy rules. */
+export function SandboxPanel({ isolation, onIsolationChange }: Props) {
+  const notify = useToast();
   const sandbox = useSandboxCapabilities();
-  const host = useHostProfile();
   const report = sandbox.data;
-  const fsRead =
-    report?.capabilities.find(
-      (capability) => capability.requirement === "filesystem_read_confinement",
-    )?.enforcement.state === "enforced";
-  const fsWrite =
-    report?.capabilities.find(
-      (capability) => capability.requirement === "filesystem_write_confinement",
-    )?.enforcement.state === "enforced";
-  const network =
-    report?.capabilities.find(
-      (capability) => capability.requirement === "network_deny",
-    )?.enforcement.state === "enforced";
+
+  const changeIsolation = (level: IsolationLevel) => {
+    onIsolationChange(level);
+    notify(
+      level === "direct"
+        ? "Preview: Direct runs commands as your user without confinement. The choice is not saved until the policy service is connected."
+        : `Preview: ${levelLabel(level)} selected for this session only; the policy service will apply it once connected.`,
+      level === "direct" ? "danger" : "info",
+    );
+  };
+
   return (
-    <Stack gap={5}>
-      <SectionHeader
-        title="This host's actual capabilities"
-        actions={
-          <Button
-            variant="ghost"
-            onClick={() => {
-              sandbox.refetch();
-              host.refetch();
-            }}
-          >
-            Probe again
-          </Button>
-        }
-      />
-      {(sandbox.error || host.error) && (
-        <Notice tone="danger">
-          {sandbox.error?.message ?? host.error?.message}
-        </Notice>
-      )}
-      {host.data && (
-        <KeyValueList
-          items={[
-            {
-              label: "Platform",
-              value: `${host.data.os} · ${host.data.architecture}`,
-            },
-            {
-              label: "CPU threads",
-              value: host.data.logical_cpu_count ?? "Unknown",
-            },
-            { label: "Host network probe", value: host.data.network.state },
-          ]}
-        />
-      )}
-      {report ? (
-        <>
-          <KeyValueList
-            items={[
-              { label: "Backend", value: report.backend },
-              {
-                label: "Maximum enforceable baseline",
-                value: report.max_level ? levelLabel(report.max_level) : "None",
-              },
-              {
-                label: "Managed-process helper",
-                value: `${report.helper.state} · ${report.helper.path}`,
-              },
-            ]}
+    <Stack gap={10}>
+      <section>
+        <Stack gap={4}>
+          <SectionHeader
+            title="This computer"
+            meta={report ? `${report.backend.replace(/_/g, " ")} · capability report v${report.version}` : undefined}
+            actions={
+              <Button variant="ghost" size="md" icon={<RefreshIcon />} onClick={sandbox.refetch}>
+                Probe again
+              </Button>
+            }
           />
-          {report.helper.state === "missing" && (
-            <Notice tone="warning">
-              Managed process launch is unavailable: {report.helper.reason}
-            </Notice>
-          )}
-          {(!fsRead || !fsWrite) && (
-            <Notice tone="warning">
-              Native process filesystem confinement is not verified. Broker
-              filesystem tools still use their selected workspace root; a
-              launched full-access process can act outside it.
-            </Notice>
-          )}
-          {!network && (
-            <Notice tone="warning">
-              Native network denial is not verified by this report. The
-              application's offline gate is a separate control.
-            </Notice>
-          )}
-          <DataTable
-            caption="Actual sandbox enforcement"
-            columns={columns}
-            rows={report.capabilities}
-            rowKey={(row) => row.requirement}
+          {sandbox.error ? <Notice tone="warning">Cannot read sandbox capabilities: {sandbox.error.message}</Notice> : null}
+          {report ? (
+            <>
+              {report.helper.state === "missing" ? (
+                <Notice tone="warning">
+                  The sandbox helper is missing ({report.helper.reason}), so no managed process can start. It ships next to aidexd.
+                </Notice>
+              ) : null}
+              <KeyValueList
+                items={[
+                  { label: "Strongest level", value: report.max_level ? levelLabel(report.max_level) : "None (nothing can launch)" },
+                  { label: "Helper", value: report.helper.state === "available" ? report.helper.path : `Missing: ${report.helper.path}` },
+                  ...(report.facts?.length ? [{ label: "Probe facts", value: report.facts.join(", ") }] : []),
+                ]}
+              />
+              <DataTable
+                caption="Sandbox protections on this computer"
+                hideCaption
+                columns={columns}
+                rows={report.capabilities}
+                rowKey={(row) => row.requirement}
+              />
+            </>
+          ) : sandbox.loading ? (
+            <Text tone="secondary">Probing the sandbox backend…</Text>
+          ) : null}
+        </Stack>
+      </section>
+
+      <section>
+        <Stack gap={4}>
+          <SectionHeader title="Isolation level" meta="Session preview" />
+          <ChoiceCardGroup
+            label="Isolation level"
+            labelVisibility="hidden"
+            columns={2}
+            options={levelChoices(report)}
+            value={isolation}
+            onValueChange={changeIsolation}
           />
-          {!!report.facts?.length && (
-            <Text tone="muted">Probe facts: {report.facts.join(", ")}</Text>
-          )}
-        </>
-      ) : (
-        <Text tone="muted">
-          {sandbox.loading
-            ? "Probing this host…"
-            : "Capability report unavailable."}
-        </Text>
-      )}
-      <Notice>
-        Capability reports describe what the host can enforce, rather than the
-        active policy of every process. External runtimes currently require
-        explicit full access and own their tools. Requested unsupported
-        protection is refused by Core.
-      </Notice>
-      <Button
-        variant="outline"
-        disabled
-        title="There is no standalone sandbox-level mutation RPC"
-      >
-        Change global sandbox level · unavailable
-      </Button>
+          <Text tone="secondary">
+            Isolation fails closed. If this computer cannot enforce a requested level, the broker refuses the action instead of
+            running it with weaker isolation.
+          </Text>
+        </Stack>
+      </section>
+
+      <section>
+        <Stack gap={4}>
+          <SectionHeader title="Platform backends" />
+          <List>
+            {sandboxBackends.map((backend) => {
+              const Icon = backendIcons[backend.id];
+              const isHost = backend.id === report?.backend;
+              return (
+                <ListRow
+                  key={backend.id}
+                  media={<Icon />}
+                  title={`${backend.platform}: ${backend.mechanism}`}
+                  subtitle={backend.detail}
+                  trailing={<StatusIndicator tone={isHost ? "success" : "neutral"} label={isHost ? "This computer" : "Other platform"} />}
+                />
+              );
+            })}
+          </List>
+        </Stack>
+      </section>
+
       <PolicyRules />
     </Stack>
   );

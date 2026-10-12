@@ -1,80 +1,115 @@
-import { List, ListRow, Notice } from "@aidex/ui/components";
-import { Button, Stack, Text } from "@aidex/ui/primitives";
+import { useState } from "react";
+import { InlineCode, List, ListRow, Notice } from "@aidex/ui/components";
+import { BrandIcon, hasBrandIcon } from "@aidex/ui/icons";
+import { Badge, Button, Stack, Text } from "@aidex/ui/primitives";
 import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
-import { useState } from "react";
-import { useRpc } from "../../hooks/useRpc";
 import { usePreferences } from "../../app/providers/preferences";
 import { useNavigation } from "../../app/providers/navigation";
-import { useInferenceStatus } from "../../hooks/useInferenceStatus";
+import { useProviderCatalog } from "./catalog/ProviderCatalog";
+import { capabilityBadges, contextLabel, SOURCE_LABELS } from "./catalog/modelFacts";
+import { nativeModelKey } from "./catalog/modelKeys";
+import { LOCAL_PROVIDER_ID } from "./catalog/providerAccounts";
 
+/** Listed models (optionally only local ones) with "Use model" to make one the default for new chats. */
 export function ModelInventory({ localOnly = false }: { localOnly?: boolean }) {
-  const models = useRpc("model.list");
-  const status = useInferenceStatus(models.refetch);
+  const catalog = useProviderCatalog();
   const { setModelId } = usePreferences();
   const { navigate } = useNavigation();
   const [error, setError] = useState<string>();
-  const listed = (models.data?.models ?? []).filter(
+  const status = catalog.inference;
+  const listed = (catalog.modelList?.models ?? []).filter(
     (model) => !localOnly || model.locality === "local",
+  );
+  const failures = (catalog.modelList?.failures ?? []).filter(
+    (failure) => !localOnly || failure.provider_id === LOCAL_PROVIDER_ID,
   );
   return (
     <Stack gap={4}>
-      {(error || models.error || status.error) && (
-        <Notice tone="danger">
-          {error ?? models.error?.message ?? status.error?.message}
+      {(error || catalog.error) && (
+        <Notice tone="danger" role="alert">
+          {error ?? catalog.error}
         </Notice>
       )}
-      {(models.data?.failures ?? []).map((failure) => (
+      {failures.map((failure) => (
         <Notice key={failure.provider_id} tone="warning">
-          {failure.provider_id}: {failure.message}
+          {catalog.providers.find((provider) => provider.id === failure.provider_id)?.name ?? failure.provider_id}:{" "}
+          {failure.message}
         </Notice>
       ))}
-      <List>
-        {listed.map((model) => (
-          <ListRow
-            key={`${model.model.provider_id}/${model.model.model_id}`}
-            title={model.display_name}
-            subtitle={`${model.model.provider_id}/${model.model.model_id}`}
-            meta={[
-              model.locality,
-              `${model.context_window || "Unknown"} context tokens`,
-              `Tools: ${model.capabilities.tool_calls}`,
-            ]}
-            onSelect={() =>
-              navigate({
-                page: "model",
-                id: `${model.model.provider_id}/${model.model.model_id}`,
-              })
-            }
-            trailing={
-              <Button
-                variant="outline"
-                onClick={() =>
-                  void call("model.use", model.model)
-                    .then(() => {
-                      setModelId(
-                        `${model.model.provider_id}/${model.model.model_id}`,
-                      );
-                      models.refetch();
-                    })
-                    .catch((caught) => setError(toAidexError(caught).message))
-                }
-              >
-                Use model
-              </Button>
-            }
-          />
-        ))}
+      <List metaWidth="150px">
+        {listed.map((model) => {
+          const key = nativeModelKey(model.model);
+          const provider = catalog.providerFor(key);
+          const source = SOURCE_LABELS[model.source];
+          return (
+            <ListRow
+              key={key}
+              media={
+                provider ? (
+                  <BrandIcon
+                    brand={provider.brand}
+                    title={hasBrandIcon(provider.brand) ? undefined : provider.name}
+                    size={24}
+                    aria-hidden
+                  />
+                ) : undefined
+              }
+              title={model.display_name}
+              subtitle={<InlineCode>{key}</InlineCode>}
+              meta={[
+                model.locality === "local" ? "On this computer" : "Remote",
+                contextLabel(model.context_window) ?? "Context unknown",
+                <>
+                  {capabilityBadges(model).map((label) => (
+                    <Badge key={label} tone="neutral" size="sm">
+                      {label}
+                    </Badge>
+                  ))}
+                </>,
+                source ? (
+                  <Badge tone={model.source === "assumed" ? "warning" : "neutral"} size="sm" title={source.title}>
+                    {source.label}
+                  </Badge>
+                ) : (
+                  model.source
+                ),
+              ]}
+              onSelect={() => navigate({ page: "model", id: key })}
+              trailing={
+                key === catalog.defaultKey ? (
+                  <Badge tone="accent" size="sm">
+                    Default
+                  </Badge>
+                ) : (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void call("model.use", model.model)
+                        .then(() => {
+                          setModelId(key);
+                          catalog.reload();
+                        })
+                        .catch((caught) => setError(toAidexError(caught).message))
+                    }
+                  >
+                    Use model
+                  </Button>
+                )
+              }
+            />
+          );
+        })}
       </List>
-      {!models.loading && !listed.length && (
+      {!catalog.loading && !listed.length && (
         <Text tone="muted">
           {localOnly
-            ? status.data?.state === "starting"
-              ? `Loading ${status.data.model_name ?? "your local model"}…`
-              : status.data?.state === "failed"
+            ? status?.state === "starting"
+              ? `Loading ${status.model_name ?? "your local model"}…`
+              : status?.state === "failed"
                 ? "Local chat will be available after the installed model starts."
                 : "Start an installed model above to make it available for chat."
-            : "No models available. Connect a provider or configure model IDs."}
+            : "No models available. Connect a provider or start a local model."}
         </Text>
       )}
     </Stack>

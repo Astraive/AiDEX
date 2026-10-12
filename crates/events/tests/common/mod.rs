@@ -101,15 +101,6 @@ pub fn samples(text: &str) -> Vec<EventKind> {
             content: t(),
         },
         EventKind::AgentDelta { text: t() },
-        EventKind::AgentRunDelta {
-            agent_id: id("run_child"),
-            text: t(),
-        },
-        EventKind::AgentChildSpawned {
-            agent_id: id("run_child"),
-            parent_agent_id: id("run_parent"),
-            role: t(),
-        },
         EventKind::AgentSubagentCreated {
             child_session_id: id("ses_child"),
             role: t(),
@@ -256,18 +247,6 @@ pub fn samples(text: &str) -> Vec<EventKind> {
         EventKind::VaultLocked {
             vault_id: id("vault_main"),
         },
-        EventKind::SecretStored {
-            secret_ref: aidex_core::SecretRef {
-                vault_id: id("vault_main"),
-                secret_id: id("secret_main"),
-            },
-        },
-        EventKind::SecretDeleted {
-            secret_ref: aidex_core::SecretRef {
-                vault_id: id("vault_main"),
-                secret_id: id("secret_main"),
-            },
-        },
         EventKind::SecretGranted {
             handle_id: id("hdl_1"),
             secret_name: t(),
@@ -317,6 +296,14 @@ pub fn samples(text: &str) -> Vec<EventKind> {
         EventKind::DaemonStopping {
             reason: DaemonStopReason::Requested,
         },
+        EventKind::EmergencyStopped {
+            reason: t(),
+            cancelled_approvals: 2,
+            revoked_approvals: 1,
+            terminated_processes: 3,
+            revoked_handles: 4,
+        },
+        EventKind::EmergencyResumed {},
         EventKind::ExtensionEnabled {
             extension_id: id("skill_review"),
             kind: ExtensionKind::Skill,

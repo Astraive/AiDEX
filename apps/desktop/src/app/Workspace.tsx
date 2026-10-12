@@ -1,8 +1,10 @@
 import { useCallback, useState } from "react";
 import { HomePage } from "../features/home/HomePage";
-import { useCommandShortcut } from "../hooks/useCommandShortcut";
+import { ProviderCatalogProvider } from "../features/model-manager/catalog/ProviderCatalog";
+import { useKeyChord } from "../hooks/useKeyChord";
 import { MainLayout } from "../layouts/MainLayout";
 import { screenKeyOf } from "../lib/routes";
+import { DEFAULT_NEW_SESSION_SHORTCUT, DEFAULT_PROVIDERS_SHORTCUT } from "../lib/shortcuts";
 import { NavigationProvider, useNavigation } from "./providers/navigation";
 import { PreferencesProvider, usePreferences } from "./providers/preferences";
 import { ToastProvider } from "./providers/toast";
@@ -14,7 +16,9 @@ export function Workspace() {
     <NavigationProvider initialRoute={{ page: "chat" }}>
       <PreferencesProvider>
         <ToastProvider>
-          <WorkspaceScreens />
+          <ProviderCatalogProvider>
+            <WorkspaceScreens />
+          </ProviderCatalogProvider>
         </ToastProvider>
       </PreferencesProvider>
     </NavigationProvider>
@@ -23,18 +27,26 @@ export function Workspace() {
 
 function WorkspaceScreens() {
   const { route, navigate } = useNavigation();
-  const { setPendingPrompt, setPendingWorkspaceId } = usePreferences();
+  const { setPendingPrompt, setPendingWorkspaceId, setPendingAttachments, settings } = usePreferences();
   // A new chat resets its draft and optional project context.
   const [sessionKey, setSessionKey] = useState(0);
 
   const startNewSession = useCallback(() => {
     setPendingPrompt(null);
     setPendingWorkspaceId(null);
+    setPendingAttachments(null);
     navigate({ page: "chat" });
     setSessionKey((key) => key + 1);
-  }, [navigate, setPendingPrompt, setPendingWorkspaceId]);
+  }, [navigate, setPendingPrompt, setPendingWorkspaceId, setPendingAttachments]);
 
-  useCommandShortcut("k", startNewSession);
+  const openProviders = useCallback(
+    () => navigate({ page: "models", tab: "providers" }),
+    [navigate],
+  );
+
+  // Bound from the same preferences Settings → Shortcuts lists.
+  useKeyChord(settings.shortcuts?.new_session || DEFAULT_NEW_SESSION_SHORTCUT, startNewSession);
+  useKeyChord(settings.shortcuts?.providers || DEFAULT_PROVIDERS_SHORTCUT, openProviders);
 
   if (route.page === "home") {
     return (

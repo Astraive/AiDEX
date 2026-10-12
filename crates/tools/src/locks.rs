@@ -71,7 +71,7 @@ impl WriteLocks {
     ) -> Result<LockGuard<'_>, ToolError> {
         let mut held = self.lock();
         loop {
-            cancel.check()?;
+            crate::context::check_cancel(cancel)?;
             let busy = keys
                 .iter()
                 .any(|key| held.iter().any(|other| key.overlaps(other)));

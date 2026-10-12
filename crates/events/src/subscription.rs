@@ -7,9 +7,10 @@
 //! subscriber is marked lagged and its queue is dropped, so publishers never block and
 //! memory per subscriber stays bounded. A lagged subscriber picks a new live-from
 //! cursor, pages the missed durable events back from disk starting after the last
-//! one it delivered, and rejoins the live queue. Ephemeral events dropped while
-//! lagging are lost; they were never persisted. Live delivery covers appends made
-//! through this process's `EventLog` handles.
+//! one it consumed, and rejoins the live queue. Ordered watermarks expose durable
+//! events consumed by filtering without overtaking matching events. Ephemeral
+//! events dropped while lagging are lost; they were never persisted. Live delivery
+//! covers appends made through this process's `EventLog` handles.
 
 use std::{
     collections::VecDeque,
@@ -32,7 +33,19 @@ struct Queue {
     items: VecDeque<(EventEnvelope, usize)>,
     bytes: usize,
     lagged: bool,
+    /// Latest durable cursor offered, including filtered-out events. Kept outside
+    /// the event queue so arbitrarily many nonmatches consume constant space.
+    watermark: Cursor,
     lag_count: u64,
+}
+
+impl Queue {
+    fn require_catch_up(&mut self) {
+        self.lagged = true;
+        self.items.clear();
+        self.bytes = 0;
+        self.watermark = Cursor::ZERO;
+    }
 }
 
 /// The publisher-facing half of a subscription.
@@ -65,23 +78,35 @@ impl LiveSlot {
 
     /// Enqueue without blocking; on overflow mark lagged and drop the queue.
     fn offer(&self, envelope: &EventEnvelope, bytes: usize) {
-        if !self.filter.matches(envelope) {
+        let matches = self.filter.matches(envelope);
+        if !matches && !envelope.is_durable() {
             return;
         }
         let mut queue = self.lock();
         if queue.lagged {
             return;
         }
-        if queue.items.len() >= self.capacity || queue.bytes + bytes > MAX_QUEUED_BYTES {
-            queue.lagged = true;
-            queue.lag_count += 1;
-            queue.items.clear();
-            queue.bytes = 0;
-        } else {
-            queue.items.push_back((envelope.clone(), bytes));
-            queue.bytes += bytes;
+        if envelope.is_durable() {
+            queue.watermark = envelope.cursor;
+        }
+        if matches {
+            if queue.items.len() >= self.capacity || queue.bytes + bytes > MAX_QUEUED_BYTES {
+                queue.lag_count += 1;
+                queue.require_catch_up();
+            } else {
+                queue.items.push_back((envelope.clone(), bytes));
+                queue.bytes += bytes;
+            }
         }
         drop(queue);
+        self.ready.notify_all();
+    }
+
+    /// Invalidate live delivery after a durable write that bypassed fan-out,
+    /// without counting a queue overflow.
+    /// Called under the log lock, just like ordinary queue overflow.
+    pub(crate) fn require_catch_up(&self) {
+        self.lock().require_catch_up();
         self.ready.notify_all();
     }
 
@@ -92,6 +117,7 @@ impl LiveSlot {
         queue.lagged = false;
         queue.items.clear();
         queue.bytes = 0;
+        queue.watermark = Cursor::ZERO;
     }
 }
 
@@ -102,8 +128,40 @@ pub(crate) fn fan_out(slots: &[Arc<LiveSlot>], envelope: &EventEnvelope, bytes: 
     }
 }
 
-/// The live queue overflowed; resume from disk.
+/// Live delivery was invalidated; resume from disk.
 struct Lagged;
+
+/// An ordered subscription delivery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionItem {
+    /// A matching event, or `None` for a consumed durable watermark.
+    /// Process matching events before acknowledging their durable cursor.
+    pub event: Option<EventEnvelope>,
+    /// With `Some(event)`, this equals `event.cursor`; acknowledge it only after
+    /// processing a durable event, never an ephemeral one. With `None`, all durable
+    /// events through this cursor were delivered earlier or filtered out; it is
+    /// safe to acknowledge after processing all preceding stream items.
+    /// A watermark is progress, not an event or a periodic heartbeat.
+    pub cursor: Cursor,
+}
+
+impl SubscriptionItem {
+    /// Deliver a matching event with its cursor, without another allocation.
+    pub fn event(envelope: EventEnvelope) -> Self {
+        Self {
+            cursor: envelope.cursor,
+            event: Some(envelope),
+        }
+    }
+
+    /// Expose consumed durable progress after all preceding matching events.
+    pub fn watermark(cursor: Cursor) -> Self {
+        Self {
+            event: None,
+            cursor,
+        }
+    }
+}
 
 /// An ordered event stream from [`EventLog::subscribe`]. Dropping it unregisters it.
 pub struct Subscription {
@@ -112,6 +170,9 @@ pub struct Subscription {
     filter: EventFilter,
     /// Every durable event up to here was delivered or filtered out.
     scanned: Cursor,
+    /// Last cursor exposed by a durable event or watermark; never ahead of pending
+    /// matching history, even when a page scan has already reached further.
+    consumed: Cursor,
     /// Durable events up to here come from disk; later ones from the live queue.
     live_from: Cursor,
     pending: VecDeque<EventEnvelope>,
@@ -131,6 +192,7 @@ impl Subscription {
             slot,
             filter,
             scanned: after,
+            consumed: after,
             live_from,
             pending: VecDeque::new(),
             live: false,
@@ -141,15 +203,25 @@ impl Subscription {
         &self.filter
     }
 
-    /// The next event, waiting up to `timeout`; `Ok(None)` when none arrived.
+    /// The next event or consumed-cursor watermark, waiting up to `timeout`;
+    /// `Ok(None)` when neither arrived. Watermarks never overtake matching durable
+    /// events and do not advance on ephemeral events.
     ///
     /// Fails with [`EventError::CursorExpired`] if retention removed events this
-    /// subscription had not yet delivered (the stream cannot continue without a gap).
-    pub fn next_timeout(&mut self, timeout: Duration) -> Result<Option<EventEnvelope>, EventError> {
+    /// subscription had not yet consumed (the stream cannot continue without a gap).
+    pub fn next_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<SubscriptionItem>, EventError> {
         let deadline = Instant::now().checked_add(timeout);
         loop {
             if let Some(envelope) = self.pending.pop_front() {
-                return Ok(Some(envelope));
+                self.consumed = envelope.cursor;
+                return Ok(Some(SubscriptionItem::event(envelope)));
+            }
+            if self.consumed < self.scanned {
+                self.consumed = self.scanned;
+                return Ok(Some(SubscriptionItem::watermark(self.consumed)));
             }
             if !self.live {
                 if self.scanned >= self.live_from {
@@ -175,16 +247,27 @@ impl Subscription {
     }
 
     /// [`Self::next_timeout`] without waiting.
-    pub fn try_next(&mut self) -> Result<Option<EventEnvelope>, EventError> {
+    pub fn try_next(&mut self) -> Result<Option<SubscriptionItem>, EventError> {
         self.next_timeout(Duration::ZERO)
     }
 
-    /// The next live event, `Ok(None)` at the deadline.
-    fn next_live(&mut self, deadline: Option<Instant>) -> Result<Option<EventEnvelope>, Lagged> {
+    /// The next live delivery, `Ok(None)` at the deadline.
+    fn next_live(&mut self, deadline: Option<Instant>) -> Result<Option<SubscriptionItem>, Lagged> {
         let mut queue = self.slot.lock();
         loop {
             if queue.lagged {
                 return Err(Lagged);
+            }
+            // A live ephemeral event carries the latest durable cursor. Emit the
+            // independently consumed durable prefix first, without acknowledging
+            // the ephemeral event itself or dropping ephemeral events at equality.
+            if let Some((envelope, _)) = queue.items.front()
+                && !envelope.is_durable()
+                && envelope.cursor > self.scanned
+            {
+                self.scanned = envelope.cursor;
+                self.consumed = self.scanned;
+                return Ok(Some(SubscriptionItem::watermark(self.consumed)));
             }
             if let Some((envelope, bytes)) = queue.items.pop_front() {
                 queue.bytes -= bytes;
@@ -193,10 +276,16 @@ impl Subscription {
                         continue;
                     }
                     self.scanned = envelope.cursor;
+                    self.consumed = self.scanned;
                 } else if envelope.cursor < self.scanned {
                     continue;
                 }
-                return Ok(Some(envelope));
+                return Ok(Some(SubscriptionItem::event(envelope)));
+            }
+            if queue.watermark > self.scanned {
+                self.scanned = queue.watermark;
+                self.consumed = self.scanned;
+                return Ok(Some(SubscriptionItem::watermark(self.consumed)));
             }
             let remaining = deadline.map_or(Duration::from_secs(3600), |deadline| {
                 deadline.saturating_duration_since(Instant::now())
@@ -213,6 +302,7 @@ impl Subscription {
     }
 
     /// Times this subscriber overflowed its live queue and fell back to disk.
+    /// Disk catch-up requested by legacy import does not count as an overflow.
     pub fn lag_count(&self) -> u64 {
         self.slot.lock().lag_count
     }

@@ -1,0 +1,40 @@
+.dot {
+  display: inline-block;
+  flex: none;
+  border-radius: var(--aidex-radius-full);
+}
+
+.sm {
+  width: 6px;
+  height: 6px;
+}
+
+.md {
+  width: 9px;
+  height: 9px;
+}
+
+.success {
+  background: var(--aidex-color-success);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--aidex-color-success) 60%, transparent);
+}
+
+.sm.success {
+  box-shadow: 0 0 4px color-mix(in srgb, var(--aidex-color-success) 50%, transparent);
+}
+
+.warning {
+  background: var(--aidex-color-warning);
+}
+
+.danger {
+  background: var(--aidex-color-danger);
+}
+
+.neutral {
+  background: var(--aidex-color-text-muted);
+}
+
+.accent {
+  background: var(--aidex-color-accent);
+}

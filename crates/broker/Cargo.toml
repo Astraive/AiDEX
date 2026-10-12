@@ -1,0 +1,43 @@
+[package]
+name = "aidex-broker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AiDEX execution broker: policy-mediated tool execution, bound approvals, sandboxed launches, and secret handles."
+
+[features]
+# Builds `aidex-broker-test-sandbox-exec`, a copy of the sandbox helper that this
+# crate's integration tests launch. Enabled only through the dev-dependency below,
+# so release builds never contain it.
+test-helper = []
+
+[[bin]]
+name = "aidex-broker-test-sandbox-exec"
+path = "src/bin/test-sandbox-exec.rs"
+required-features = ["test-helper"]
+test = false
+doc = false
+
+[dependencies]
+aidex-core = { path = "../core" }
+aidex-drive = { path = "../drive" }
+aidex-events = { path = "../events" }
+aidex-policy = { path = "../policy" }
+aidex-providers = { path = "../providers" }
+aidex-sandbox = { path = "../sandbox" }
+aidex-tools = { path = "../tools" }
+aidex-vault = { path = "../vault" }
+aidex-workspace = { path = "../workspace" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+aidex-broker = { path = ".", features = ["test-helper"] }
+tempfile = "3"
+
+[lints]
+workspace = true

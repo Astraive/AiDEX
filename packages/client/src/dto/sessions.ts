@@ -1,7 +1,12 @@
 /** Bounded public projections from aidexd::methods::native_view. */
+import type { AttachmentRef } from "./attachments";
+
 export type ConversationMode = "chat" | "plan" | "agent";
 export type PermissionMode =
-  "supervised" | "auto_accept_edits" | "auto" | "full_access";
+  | "supervised"
+  | "auto_accept_edits"
+  | "auto"
+  | "full_access";
 export type RunStatus =
   | "pending"
   | "running"
@@ -28,7 +33,57 @@ export type Message = {
   tool_calls_total: number;
   tool_calls_truncated: boolean;
   tool_call_id: string | null;
+  /** Skill ids (`<scope>:<name>`) invoked with this user message; absent otherwise. */
+  skills?: string[];
+  /**
+   * Attachments sent with this user message, in order; absent otherwise. A message sent with
+   * attachments and no text stores `ATTACHMENT_ONLY_CONTENT` ("[Attached files]") as its
+   * content: hide exactly that text when `attachments` is non-empty.
+   */
+  attachments?: AttachmentRef[];
 };
+/**
+ * Params of `message.send` and `agent.start`. `content` is stored exactly as typed
+ * (keep `$name` tokens); `skills` are injected for that run only, and `web_search`
+ * turns on web tools for that run in Chat mode (Agent and Plan follow the web
+ * settings). Neither option is stored in the session configuration. Unknown or
+ * disabled skills fail with `data.reason = "skill_unavailable"`; `web_search` while
+ * web search is off fails with `data.reason = "web_unavailable"`. `attachments` are
+ * staged attachment ids sent with this message (`content` may then be blank); refusals
+ * are `invalid_params` with `data.reason` `attachment_unavailable` (unknown, foreign,
+ * repeated, already sent, more than 20, or with `parent_run_id`),
+ * `attachments_unsupported` (the model cannot read images or PDFs, or the conversation
+ * runs on an external runtime), `context_too_large_for_runtime`, or `too_large`. Nothing is
+ * stored when a send is refused; a retry with the same `command_id` and arguments returns
+ * the original run.
+ */
+export type SendParams = {
+  session_id: string;
+  content: string;
+  command_id: string;
+  parent_run_id?: string;
+  /** At most 8 skill ids. */
+  skills?: string[];
+  web_search?: boolean;
+  /** At most 20 staged attachment ids, in order. */
+  attachments?: string[];
+};
+/**
+ * Model-facing names of the native tools the desktop renders specially (the
+ * dotted ids `web.search`, `web.fetch`, `skill.load`, `artifact.create`,
+ * `artifact.update`, `plan.propose` with dots as underscores). MCP tools are
+ * `mcp__<server>__<tool>`. Match tool results to calls by `tool_call_id`.
+ */
+export const NATIVE_TOOL_NAMES = {
+  webSearch: "web_search",
+  webFetch: "web_fetch",
+  skillLoad: "skill_load",
+  artifactCreate: "artifact_create",
+  artifactUpdate: "artifact_update",
+  planPropose: "plan_propose",
+} as const;
+/** Prefix of MCP tool names: `mcp__<server>__<tool>`. */
+export const MCP_TOOL_PREFIX = "mcp__";
 export type SessionConfig = {
   title: string;
   workspace_id: string | null;
@@ -40,7 +95,6 @@ export type SessionConfig = {
   max_steps?: number;
   max_tokens?: number;
   instructions?: string;
-  skill_ids?: string[];
   fallback_model?: string | null;
 };
 export type Run = {
@@ -59,6 +113,15 @@ export type Run = {
   has_runtime_ref: boolean;
   transcript_omitted: boolean;
   pending_call_count: number;
+  /** Index of the run's user message in the conversation history (root runs). */
+  message_index?: number;
+  /**
+   * Conversation mode, permission mode and project when the run began. Absent for runs
+   * recorded before these fields existed; show no mode divider next to such runs.
+   */
+  mode?: ConversationMode;
+  permission_mode?: PermissionMode;
+  workspace_id?: string;
 };
 export type Approval = {
   id: string;
@@ -102,6 +165,24 @@ export type SessionDetail = SessionConfig & {
   checkpoints: Checkpoint[];
   total_checkpoints: number;
   checkpoints_truncated: boolean;
+  /** Set on a conversation created by `conversation.fork`: its first `message_count` messages
+   * are a copy of `session_id`'s history. */
+  forked_from?: ForkOrigin;
+};
+export type ForkOrigin = { session_id: string; message_count: number };
+/**
+ * Params of `conversation.fork`: a new conversation with `configuration` (validated like
+ * `conversation.create`; `title` replaces its title) whose history and sent attachments are
+ * copies of `source_id`'s. Runs, approvals, checkpoints, artifacts and staged attachments are
+ * not copied. Refused (`conflict`) while the source has an active run; `command_id` makes a
+ * retry return the conversation the first call created.
+ */
+export type ConversationForkParams = {
+  source_id: string;
+  configuration: SessionConfig;
+  title?: string;
+  /** 1-128 bytes. */
+  command_id?: string;
 };
 export type SessionSummary = {
   id: string;

@@ -49,6 +49,10 @@ impl WorkspaceRegistry {
     /// never follows or copies links, and records a baseline of every copied file.
     /// Exceeding [`EphemeralLimits`] aborts and removes the partial copy.
     pub fn create_ephemeral(&self, source: &EntityId) -> Result<EphemeralCreated, WorkspaceError> {
+        let _guard = self
+            .ephemeral_ops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let source_record = self.record(source)?;
         if let WorkspaceKind::Ephemeral { .. } = source_record.kind {
             return Err(WorkspaceError::WrongKind {
@@ -237,4 +241,63 @@ fn ephemeral_name(source: &str, id: &EntityId) -> String {
     let room = MAX_NAME_CHARS - suffix.chars().count();
     let stem: String = source.chars().take(room).collect();
     format!("{}{suffix}", stem.trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn creation_waits_for_source_deletion_before_reading_or_copying() {
+        let drive = tempfile::tempdir().unwrap();
+        aidex_drive::init_with(
+            drive.path(),
+            aidex_drive::InitOptions {
+                require_removable: false,
+            },
+        )
+        .unwrap();
+        let paths = aidex_drive::DrivePaths::open(drive.path()).unwrap();
+        let registry = WorkspaceRegistry::open(&paths).unwrap();
+        let source = registry.create_drive("source").unwrap();
+        let tree = registry.confined_root(&source.id).unwrap();
+        std::fs::write(tree.root().join("keep.txt"), "source data").unwrap();
+        let guard = registry
+            .ephemeral_ops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        thread::scope(|scope| {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            let registry_ref = &registry;
+            let source_id = &source.id;
+            scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                result_tx
+                    .send(registry_ref.create_ephemeral(source_id))
+                    .unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            assert_eq!(registry.list().unwrap().len(), 1);
+            assert!(!paths.workspaces().join(EPHEMERAL_DIR).exists());
+            // Finish the same destructive operation that delete_data performs
+            // while holding the operation lock, then let creation proceed.
+            registry
+                .delete_owned(registry.record(&source.id).unwrap())
+                .unwrap();
+            drop(guard);
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                Err(WorkspaceError::NotFound(_))
+            ));
+        });
+        assert!(registry.list().unwrap().is_empty());
+        assert!(!tree.root().exists());
+    }
 }

@@ -20,6 +20,12 @@ pub type StoreError = String;
 pub struct SessionStore {
     pub(crate) db: Mutex<Connection>,
     vault: Arc<VaultService>,
+    /// Artifact blobs (`<db stem>-artifacts/`).
+    pub(crate) blobs: crate::sealed::BlobDir,
+    /// Attachment blobs and upload files (`<db stem>-attachments/`).
+    pub(crate) attachment_blobs: crate::sealed::BlobDir,
+    pub(crate) uploads: crate::attachments::Uploads,
+    pub(crate) staged_expiry: crate::attachments::StagedExpiry,
 }
 pub fn now() -> u64 {
     SystemTime::now()
@@ -43,9 +49,34 @@ impl SessionStore {
         }
         let db = Connection::open(path).map_err(|e| e.to_string())?;
         db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,payload BLOB NOT NULL); CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, session_id TEXT NOT NULL,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS memory(id TEXT PRIMARY KEY,workspace TEXT NOT NULL,payload BLOB NOT NULL); UPDATE runs SET status='interrupted' WHERE status IN ('pending','running','waiting_approval'); UPDATE sessions SET status='interrupted' WHERE status IN ('pending','running','waiting_approval');").map_err(|e|e.to_string())?;
+        db.execute_batch(crate::artifacts::SCHEMA)
+            .map_err(|e| e.to_string())?;
+        // A daemon that predates artifacts deletes sessions without their
+        // artifact rows; drop them so the sweep below reclaims their blobs.
+        db.execute(crate::artifacts::PURGE_ORPHANS, [])
+            .map_err(|e| e.to_string())?;
+        let blobs = crate::sealed::BlobDir::beside(path, crate::sealed::Domain::Artifact);
+        blobs.sweep(|address| {
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE blob=?)",
+                [address],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        });
+        // Attachments keep their own table, directory and sweep (which also
+        // drops staged attachments older than a day, as later upload and list
+        // calls do on a running daemon); none of it needs the key.
+        let attachment_blobs =
+            crate::sealed::BlobDir::beside(path, crate::sealed::Domain::Attachment);
+        crate::attachments::open_maintenance(&db, &attachment_blobs)?;
         Ok(Self {
             db: Mutex::new(db),
             vault,
+            blobs,
+            attachment_blobs,
+            uploads: crate::attachments::Uploads::new(),
+            staged_expiry: crate::attachments::StagedExpiry::new(),
         })
     }
     pub(crate) fn key(&self) -> Result<SecretBytes, StoreError> {
@@ -103,7 +134,7 @@ impl SessionStore {
         out.extend(encrypted);
         Ok(out)
     }
-    fn load(&self, db: &Connection, id: &str) -> Result<SessionDetail, StoreError> {
+    pub(crate) fn load(&self, db: &Connection, id: &str) -> Result<SessionDetail, StoreError> {
         let bytes: Vec<u8> = db
             .query_row("SELECT payload FROM sessions WHERE id=?", [id], |r| {
                 r.get(0)
@@ -154,7 +185,7 @@ impl SessionStore {
         }
         Ok(session)
     }
-    fn save(&self, db: &Connection, s: &SessionDetail) -> Result<(), StoreError> {
+    pub(crate) fn save(&self, db: &Connection, s: &SessionDetail) -> Result<(), StoreError> {
         let bytes = self.seal(s)?;
         let status = s
             .runs
@@ -181,6 +212,7 @@ impl SessionStore {
             checkpoints: vec![],
             commands: Default::default(),
             runtime_ref: None,
+            forked_from: None,
         };
         let mut db = self.db.lock().map_err(|_| "session store poisoned")?;
         let tx = db.transaction().map_err(|e| e.to_string())?;
@@ -233,15 +265,57 @@ impl SessionStore {
         command: &str,
         parent: Option<String>,
     ) -> Result<Run, StoreError> {
-        if content.trim().is_empty()
+        self.begin_with(id, content, command, parent, &RunOptions::default())
+    }
+    /// [`begin`](Self::begin) with per-request options (invoked skills, web
+    /// tools, attachments). Options are part of the command fingerprint.
+    ///
+    /// A repeated command id with the same arguments returns the original run
+    /// before anything else is checked. For a new command, attachment ids must
+    /// be distinct staged attachments of the session (`attachment_unavailable`
+    /// otherwise; also for a child run); in the same transaction as the new
+    /// message they become `sent` with the run, command and message index.
+    /// Content may be blank when attachments are present: the message then
+    /// stores [`ATTACHMENT_ONLY_CONTENT`] so no blank user message is ever
+    /// persisted.
+    pub fn begin_with(
+        &self,
+        id: &str,
+        content: &str,
+        command: &str,
+        parent: Option<String>,
+        options: &RunOptions,
+    ) -> Result<Run, StoreError> {
+        if (content.trim().is_empty() && options.attachments.is_empty())
             || content.len() > 256 * 1024
             || command.is_empty()
             || command.len() > 128
         {
             return Err("invalid message or command id".into());
         }
-        self.update(id, |s| {
-            let fp = digest(format!("{content}\0{parent:?}").as_bytes());
+        self.update_in(id, |db, s| {
+            // Options join the fingerprint only when present, so command ids
+            // recorded before they existed keep their fingerprints; attachment
+            // ids join only when present, so skill and web fingerprints stay.
+            let fp = if options.is_empty() {
+                digest(format!("{content}\0{parent:?}").as_bytes())
+            } else if options.attachments.is_empty() {
+                digest(
+                    format!(
+                        "{content}\0{parent:?}\0{:?}\0{}",
+                        options.skills, options.web_search
+                    )
+                    .as_bytes(),
+                )
+            } else {
+                digest(
+                    format!(
+                        "{content}\0{parent:?}\0{:?}\0{}\0{:?}",
+                        options.skills, options.web_search, options.attachments
+                    )
+                    .as_bytes(),
+                )
+            };
             if let Some(existing) = s.commands.get(command) {
                 if existing.fingerprint != fp {
                     return Err("command id reused with different arguments".into());
@@ -260,6 +334,15 @@ impl SessionStore {
             {
                 return Err("session already has an active root run".into());
             }
+            if parent.is_some() && !options.attachments.is_empty() {
+                return Err(AttachmentReason::AttachmentUnavailable
+                    .error("attachments can only be sent with a conversation message"));
+            }
+            let content = if content.trim().is_empty() {
+                ATTACHMENT_ONLY_CONTENT
+            } else {
+                content
+            };
             let message = aidex_providers::ChatMessage::user(content);
             let mut transcript = if parent.is_some() {
                 vec![]
@@ -273,8 +356,6 @@ impl SessionStore {
                 parent_run_id: parent.clone(),
                 status: RunStatus::Pending,
                 steps: 0,
-                inference_retries: 0,
-                context_trimmed_messages: 0,
                 error: None,
                 created_at: now(),
                 updated_at: now(),
@@ -288,7 +369,17 @@ impl SessionStore {
                 } else {
                     None
                 },
+                skills: options.skills.clone(),
+                web_search: options.web_search,
+                message_index: parent.is_none().then_some(s.messages.len()),
+                attachments: options.attachments.clone(),
+                mode: Some(s.configuration.mode),
+                permission_mode: Some(s.configuration.permission_mode),
+                workspace_id: s.configuration.workspace_id.clone(),
             };
+            if !run.attachments.is_empty() {
+                self.link_attachments(db, s, &run.attachments, command, &run.id, s.messages.len())?;
+            }
             if parent.is_none() {
                 s.messages.push(message);
             }
@@ -308,10 +399,19 @@ impl SessionStore {
         id: &str,
         mutate: impl FnOnce(&mut SessionDetail) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
+        self.update_in(id, |_, s| mutate(s))
+    }
+    /// [`update`](Self::update) whose mutation also writes other tables in
+    /// the same transaction.
+    pub(crate) fn update_in<T>(
+        &self,
+        id: &str,
+        mutate: impl FnOnce(&Connection, &mut SessionDetail) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         let mut db = self.db.lock().map_err(|_| "session store poisoned")?;
         let tx = db.transaction().map_err(|e| e.to_string())?;
         let mut s = self.load(&tx, id)?;
-        let result = mutate(&mut s)?;
+        let result = mutate(&tx, &mut s)?;
         self.save(&tx, &s)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
@@ -364,10 +464,20 @@ impl SessionStore {
         let tx = db.transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM runs WHERE session_id=?", [id])
             .map_err(|e| e.to_string())?;
+        let blobs = Self::delete_session_artifacts(&tx, id)?;
+        let attachment_blobs = Self::delete_session_attachments(&tx, id)?;
         let n = tx
             .execute("DELETE FROM sessions WHERE id=?", [id])
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        drop(db);
+        for blob in blobs {
+            self.blobs.remove(&blob);
+        }
+        for blob in attachment_blobs {
+            self.attachment_blobs.remove(&blob);
+        }
+        self.uploads.abort_session(id);
         Ok(n > 0)
     }
 }

@@ -3,8 +3,11 @@
 //! `private_config/providers.toml` names providers, their endpoints, the vault
 //! secret each one authenticates with, optional model declarations, and the
 //! default model. `private_config/network.toml` holds the offline switch.
-//! Neither file ever contains a credential value.
+//! `private_config/provider-accounts.toml` holds account presentation
+//! metadata that older builds do not read. No file ever contains a
+//! credential value.
 
+mod accounts;
 mod file;
 
 use std::path::PathBuf;
@@ -12,6 +15,10 @@ use std::path::PathBuf;
 use aidex_drive::DrivePaths;
 use serde::{Deserialize, Serialize};
 
+pub use accounts::{
+    AccountMetadata, MAX_ACCOUNT_NAME_CHARS, PROVIDER_ACCOUNTS_FILE, ProviderAccountMeta,
+    ProviderAccountsConfig, is_account_name, is_preset_id,
+};
 pub use file::ConfigError;
 pub(crate) use file::{read_toml, write_toml};
 

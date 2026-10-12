@@ -1,0 +1,81 @@
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--aidex-space-2);
+  width: 100%;
+  min-width: 0;
+  min-height: 76px;
+  height: 100%;
+  margin: 0;
+  padding: var(--aidex-space-3);
+  border: 1px solid var(--aidex-color-border-subtle);
+  border-radius: var(--aidex-radius-md);
+  background: var(--aidex-color-surface);
+  color: var(--aidex-color-text);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    border-color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.tile:hover:not(:disabled) {
+  border-color: var(--aidex-color-border-strong);
+  background: var(--aidex-color-surface-raised);
+}
+
+.tile:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Accent border plus a heavier inset edge, so the choice does not rely on color alone. */
+.selected,
+.selected:hover:not(:disabled) {
+  border-color: var(--aidex-color-accent);
+  background: var(--aidex-color-accent-soft);
+  box-shadow: inset 0 0 0 1px var(--aidex-color-accent);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+}
+
+.logo {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--aidex-text-sm);
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.description {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--aidex-space-1);
+  margin-top: auto;
+}

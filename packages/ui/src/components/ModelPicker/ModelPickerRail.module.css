@@ -1,0 +1,120 @@
+.rail {
+  flex: none;
+  width: 44px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: color-mix(in srgb, var(--aidex-color-surface) 60%, transparent);
+  scrollbar-width: none;
+}
+
+.rail::-webkit-scrollbar {
+  display: none;
+}
+
+.content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--aidex-space-1);
+  min-height: 100%;
+  padding: var(--aidex-space-1);
+}
+
+/* Shape cue for the selected provider next to `aria-pressed` and the tint; it slides between entries. */
+.indicator {
+  position: absolute;
+  right: 0;
+  z-index: 1;
+  width: 3px;
+  height: 20px;
+  border-radius: var(--aidex-radius-full) 0 0 var(--aidex-radius-full);
+  background: var(--aidex-color-accent);
+  pointer-events: none;
+  transition: top var(--aidex-duration-base) var(--aidex-ease);
+}
+
+.item {
+  position: relative;
+  width: 100%;
+}
+
+.button {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: var(--aidex-radius-sm);
+  background: transparent;
+  color: var(--aidex-color-text-secondary);
+  cursor: pointer;
+  transition:
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    color var(--aidex-duration-fast) var(--aidex-ease),
+    opacity var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.button:hover {
+  background: var(--aidex-color-surface-hover);
+  color: var(--aidex-color-text);
+}
+
+.button:focus-visible {
+  outline-offset: -2px;
+}
+
+.selected,
+.selected:hover {
+  background: var(--aidex-color-surface-strong);
+  color: var(--aidex-color-text);
+}
+
+.disabled,
+.disabled:hover {
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.glyph {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+}
+
+/* Status overlay; the ring keeps it legible over the glyph. */
+.rail .glyph .status {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  box-shadow: 0 0 0 2px var(--aidex-color-surface-raised);
+}
+
+.rail .button:hover .status {
+  box-shadow: 0 0 0 2px var(--aidex-color-surface-hover);
+}
+
+.rail .selected .status,
+.rail .selected:hover .status {
+  box-shadow: 0 0 0 2px var(--aidex-color-surface-strong);
+}
+
+.rail .disabled:hover .status {
+  box-shadow: 0 0 0 2px var(--aidex-color-surface-raised);
+}
+
+.favorites {
+  color: var(--aidex-color-warning);
+}
+
+.divider {
+  flex: none;
+  height: 1px;
+  margin: 2px var(--aidex-space-1);
+  background: var(--aidex-color-border-subtle);
+}

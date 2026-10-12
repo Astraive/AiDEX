@@ -48,6 +48,9 @@ pub enum Reply {
     /// Status, extra headers, and body.
     Raw(u16, Vec<(String, String)>, String),
     Binary(Vec<u8>),
+    /// The inner reply, sent only once the flag is set (or after ten seconds),
+    /// so a test can act while the client waits for the answer.
+    Held(Arc<AtomicBool>, Box<Reply>),
 }
 
 impl Reply {
@@ -199,8 +202,18 @@ fn serve(
         raw,
     });
     let mut stream = stream;
-    let reply =
+    let mut reply =
         reply.unwrap_or_else(|| Reply::Json(500, r#"{"error":{"code":"no_reply"}}"#.into()));
+    while let Reply::Held(release, inner) = reply {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !release.load(Ordering::SeqCst) && Instant::now() < until {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        reply = *inner;
+    }
     let _ = match reply {
         Reply::Binary(body) => {
             let head = format!(
@@ -249,6 +262,7 @@ fn serve(
             }
             Ok(())
         }
+        Reply::Held(..) => unreachable!("held replies are unwrapped above"),
     };
     let _ = stream.flush();
 }

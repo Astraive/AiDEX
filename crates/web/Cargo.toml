@@ -4,23 +4,21 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "AiDEX web search and fetch: configured search providers, SSRF-guarded page fetch, and readable-text extraction."
 
 [dependencies]
 aidex-core = { path = "../core" }
 aidex-drive = { path = "../drive" }
-aidex-events = { path = "../events" }
-aidex-policy = { path = "../policy" }
-aidex-tools = { path = "../tools" }
-aidex-vault = { path = "../vault" }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-schemars = "0.8"
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+url = "2"
 zeroize = "1.8"
 
 [dev-dependencies]
 tempfile = "3"
-aidex-workspace = { path = "../workspace" }
 
 [lints]
 workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "aidex-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aidex-core = { path = "../core" }
+aidex-drive = { path = "../drive" }
+aidex-events = { path = "../events" }
+aidex-sandbox = { path = "../sandbox" }
+aidex-vault = { path = "../vault" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+zeroize = "1.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

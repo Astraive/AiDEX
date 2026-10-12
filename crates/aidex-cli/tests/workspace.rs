@@ -216,3 +216,68 @@ fn ephemeral_apply_requires_confirmation_and_applies_only_selected_paths() {
     daemon.stop();
     daemon.wait().unwrap();
 }
+
+#[test]
+fn selective_apply_refuses_paths_omitted_from_a_truncated_review() {
+    let drive = temp_drive();
+    let project = tempfile::tempdir().unwrap();
+    let daemon = Daemon::new(drive.path()).unwrap().start().unwrap();
+    ok_json(&aidex(
+        &[
+            "--json",
+            "workspace",
+            "add",
+            project.path().to_str().unwrap(),
+            "--name",
+            "source",
+        ],
+        drive.path(),
+    ));
+    let created = ok_json(&aidex(
+        &["--json", "workspace", "ephemeral", "create", "source"],
+        drive.path(),
+    ));
+    let id = created["workspace"]["id"].as_str().unwrap();
+    let tree = Path::new(created["workspace"]["path"].as_str().unwrap());
+    for index in 0..=aidexd::methods::workspace::MAX_REVIEW_ENTRIES {
+        fs::write(tree.join(format!("file_{index:04}.txt")), "new\n").unwrap();
+    }
+    let review = ok_json(&aidex(
+        &["--json", "workspace", "ephemeral", "review", id],
+        drive.path(),
+    ));
+    assert_eq!(review["truncated"], true);
+    let omitted = format!(
+        "file_{:04}.txt",
+        aidexd::methods::workspace::MAX_REVIEW_ENTRIES
+    );
+    assert!(
+        review["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| change["path"] != omitted)
+    );
+    let result = aidex(
+        &[
+            "--json",
+            "workspace",
+            "ephemeral",
+            "apply",
+            id,
+            "--path",
+            &omitted,
+            "--yes",
+        ],
+        drive.path(),
+    );
+    assert_eq!(
+        result.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!project.path().join(&omitted).exists());
+    daemon.stop();
+    daemon.wait().unwrap();
+}

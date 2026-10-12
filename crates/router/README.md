@@ -21,9 +21,9 @@ Hard constraints, never relaxed:
 2. Embedding tasks need `embeddings`; every other task needs `chat`.
 3. The context window must cover `required_context`; `needs_tools` needs native or structured tool support; `needs_json_schema` needs JSON-schema output.
 4. A local model whose known `min_ram_bytes` exceeds the host's known RAM is rejected.
-5. Models whose limits were *assumed* (listed without metadata) are only used when the user names them explicitly.
+5. Models whose limits were *assumed* (listed without metadata) are only used when the user names them explicitly. Limits from the providers crate's known-family table (`CapabilitySource::Catalog`) count as verified, like discovered ones.
 
-Eligible models are ranked by: the `preferred` model (the configured default), the privacy mode's locality preference (local first for hybrid, remote first for cloud-preferred), role match (preferred role, then `general`, then other), native over structured tools when tools are needed, configured over discovered metadata, then `provider/model` for determinism.
+Eligible models are ranked by: the `preferred` model (the configured default), the privacy mode's locality preference (local first for hybrid, remote first for cloud-preferred), role match (preferred role, then `general`, then other), native over structured tools when tools are needed, the metadata source (configured, then discovered, then catalog), then `provider/model` for determinism.
 
 A `user_override` is used only if it passes every hard constraint; otherwise routing fails with `OverrideRejected` (it is never silently swapped), and an override disables fallback. Every decision carries human-readable `reasons` and the full list of rejected candidates.
 

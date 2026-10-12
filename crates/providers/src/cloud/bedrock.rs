@@ -4,7 +4,17 @@ use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use zeroize::Zeroizing;
+
+/// Longest Bedrock document name.
+const MAX_DOCUMENT_NAME: usize = 200;
+/// Most images and documents in one Bedrock message.
+const MAX_MESSAGE_IMAGES: usize = 20;
+const MAX_MESSAGE_DOCUMENTS: usize = 5;
+/// The text block Bedrock requires next to a document when the message has
+/// no text of its own.
+const DOCUMENT_TEXT: &str = "Attached document.";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,6 +125,58 @@ pub(super) fn sign(
     Ok(headers)
 }
 
+/// A Bedrock document name for `raw`: ASCII letters and digits, single
+/// spaces, hyphens, parentheses and square brackets (no underscores or
+/// dots), 1-200 characters, `document` when nothing usable remains, and
+/// unique within the request (` (2)`, ` (3)`, ...). A trailing `.pdf` is
+/// dropped because the format is sent separately.
+pub(super) fn document_name(raw: &str, used: &mut HashSet<String>) -> String {
+    let trimmed = raw.trim();
+    let stem = match trimmed.len().checked_sub(4) {
+        Some(cut)
+            if cut > 0
+                && trimmed.is_char_boundary(cut)
+                && trimmed[cut..].eq_ignore_ascii_case(".pdf") =>
+        {
+            &trimmed[..cut]
+        }
+        _ => trimmed,
+    };
+    let mut name = String::with_capacity(stem.len().min(MAX_DOCUMENT_NAME));
+    for c in stem.chars() {
+        let mapped = if c.is_ascii_alphanumeric() || matches!(c, '-' | '(' | ')' | '[' | ']') {
+            c
+        } else if c.is_whitespace() {
+            ' '
+        } else {
+            '-'
+        };
+        if matches!(mapped, ' ' | '-') && name.ends_with(mapped) {
+            continue;
+        }
+        name.push(mapped);
+    }
+    // Every character is ASCII, so byte offsets are character boundaries.
+    let clip = |name: &str, max: usize| {
+        name[..name.len().min(max)]
+            .trim_matches([' ', '-'])
+            .to_owned()
+    };
+    let mut base = clip(&name, MAX_DOCUMENT_NAME);
+    if base.is_empty() {
+        base = "document".into();
+    }
+    let mut candidate = base.clone();
+    let mut copy = 2;
+    while used.contains(&candidate) {
+        let suffix = format!(" ({copy})");
+        candidate = format!("{}{suffix}", clip(&base, MAX_DOCUMENT_NAME - suffix.len()));
+        copy += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
 pub(super) fn request(r: &ChatRequest) -> Result<(String, Value), ProviderError> {
     if r.response_format.is_some() {
         return Err(ProviderError::InvalidRequest(
@@ -122,41 +184,67 @@ pub(super) fn request(r: &ChatRequest) -> Result<(String, Value), ProviderError>
         ));
     }
     let mut system = Vec::new();
-    let mut messages: Vec<Value> = Vec::new();
-    let mut previous_was_tool = false;
+    let mut turns = super::requests::Turns::default();
+    let mut names = HashSet::new();
     for m in &r.messages {
         if m.role == Role::System {
             system.push(json!({"text":m.content}));
-            previous_was_tool = false;
             continue;
         }
-        let mut content = Vec::new();
+        let (mut results, mut blocks) = (Vec::new(), Vec::new());
         if m.role == Role::Tool {
-            content.push(
+            results.push(
                 json!({"toolResult":{"toolUseId":m.tool_call_id,"content":[{"text":m.content}]}}),
             );
         } else {
+            // Images and documents go before the text that refers to them.
+            for part in &m.parts {
+                blocks.push(match part {
+                    ContentPart::Image { mime, .. } => {
+                        let format = mime.strip_prefix("image/").unwrap_or(mime);
+                        json!({"image":{"format":format,"source":{"bytes":part.base64()}}})
+                    }
+                    ContentPart::Pdf { name, .. } => {
+                        json!({"document":{"format":"pdf","name":document_name(name, &mut names),"source":{"bytes":part.base64()}}})
+                    }
+                });
+            }
             if !m.content.is_empty() {
-                content.push(json!({"text":m.content}));
+                blocks.push(json!({"text":m.content}));
             }
             for call in &m.tool_calls {
                 let args: Value = serde_json::from_str(&call.arguments).map_err(|_| {
                     ProviderError::InvalidRequest("Bedrock tool arguments require JSON".into())
                 })?;
-                content
-                    .push(json!({"toolUse":{"toolUseId":call.id,"name":call.name,"input":args}}));
+                blocks.push(json!({"toolUse":{"toolUseId":call.id,"name":call.name,"input":args}}));
             }
         }
-        if m.role == Role::Tool && previous_was_tool {
-            messages
-                .last_mut()
-                .and_then(|v| v["content"].as_array_mut())
-                .ok_or_else(super::protocol)?
-                .extend(content);
-        } else {
-            messages.push(json!({"role":if m.role == Role::Assistant { "assistant" } else { "user" },"content":content}));
+        turns.push(
+            if m.role == Role::Assistant {
+                "assistant"
+            } else {
+                "user"
+            },
+            results,
+            blocks,
+        );
+    }
+    let mut messages: Vec<Value> = Vec::new();
+    for turn in turns.into_inner() {
+        let count = |key: &str| turn.blocks.iter().filter(|b| b.get(key).is_some()).count();
+        let documents = count("document");
+        if count("image") > MAX_MESSAGE_IMAGES || documents > MAX_MESSAGE_DOCUMENTS {
+            return Err(ProviderError::InvalidRequest(
+                "a Bedrock message may carry at most 20 images and 5 documents".into(),
+            ));
         }
-        previous_was_tool = m.role == Role::Tool;
+        let needs_text = documents > 0 && count("text") == 0;
+        let role = turn.role;
+        let mut content = turn.into_content();
+        if needs_text {
+            content.push(json!({"text":DOCUMENT_TEXT}));
+        }
+        messages.push(json!({"role":role,"content":content}));
     }
     let mut body = json!({"messages":messages,"inferenceConfig":{}});
     if !system.is_empty() {

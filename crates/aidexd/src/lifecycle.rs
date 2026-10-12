@@ -270,20 +270,9 @@ impl Daemon {
                 error.to_string(),
             )));
         }
+        let broker = Arc::clone(self.services.broker());
         let native = self.services.native().clone();
         let inference = self.services.inference().clone();
-        let extensions = self.services.extensions().clone();
-        let runtimes = self.services.runtime().clone();
-        let credential_guard = crate::services::credential_guard::CredentialGuard::start(
-            &self.services,
-        )
-        .map_err(|source| {
-            let _ = endpoint::remove(&self.root);
-            DaemonError::Io {
-                context: "cannot watch credential lifetime",
-                source,
-            }
-        })?;
         drop(self.services);
         let root = self.root.clone();
         let options = self.options;
@@ -299,16 +288,13 @@ impl Daemon {
                     &options.drive_present,
                     |outcome| {
                         native.shutdown();
-                        extensions.shutdown();
-                        let _ = runtimes.shutdown();
                         let _ = inference.shutdown();
                         record_stopping(&events, outcome);
+                        // No tool process outlives the daemon (or the drive).
+                        broker.shutdown_processes(matches!(outcome, Ok(StopReason::DriveRemoved)));
                     },
                 );
-                drop(credential_guard);
                 let _ = inference.shutdown();
-                extensions.shutdown();
-                let _ = runtimes.shutdown();
                 let cleanup = endpoint::remove(&root);
                 match (outcome, cleanup) {
                     (Ok(reason), Ok(())) => Ok(reason),

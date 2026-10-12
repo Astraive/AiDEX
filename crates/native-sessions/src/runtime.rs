@@ -6,6 +6,14 @@ use aidex_providers::ChatMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// `SessionConfig.provider_id` placeholder for sessions run by an external
+/// runtime; the harness ignores the provider for those sessions.
+pub const RUNTIME_PROVIDER_ID: &str = "runtime";
+/// `SessionConfig.model_id` that asks an external runtime to use its own
+/// configured default model: the harness sends [`RuntimeRequest::model`] as
+/// `None` instead of this literal.
+pub const RUNTIME_DEFAULT_MODEL: &str = "default";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeDescriptor {
     pub id: String,
@@ -44,15 +52,13 @@ pub struct RuntimeRequest {
     pub workspace: Option<RuntimeWorkspace>,
     pub permission_mode: PermissionMode,
     pub instructions: String,
+    /// The model to use; `None` means the runtime's own default.
     pub model: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub max_steps: u32,
     pub max_tokens: u32,
     pub runtime_ref: Option<Value>,
     pub approvals: Vec<RuntimeApprovalDecision>,
-    /// Backend-only per-run MCP capability; never persisted or sent through IPC.
-    #[serde(skip)]
-    pub bridge: Option<aidex_runtime_bridge::BridgeConnection>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -65,10 +71,6 @@ pub enum RuntimeToolStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
-    /// Durable native identity captured before the first turn can produce effects.
-    SessionStarted {
-        runtime_ref: Value,
-    },
     TextDelta {
         text: String,
     },
@@ -122,9 +124,6 @@ impl std::error::Error for RuntimeError {}
 /// operations continue that reference and must never blindly replay an old effect.
 pub trait RuntimeExecutor: Send + Sync {
     fn descriptor(&self) -> RuntimeDescriptor;
-    fn supports_mcp_bridge(&self) -> bool {
-        false
-    }
     fn validate(&self, request: &RuntimeRequest) -> Result<(), RuntimeError>;
     fn execute(
         &self,

@@ -1,0 +1,82 @@
+.overlay {
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--aidex-space-4);
+  border: 2px dashed color-mix(in srgb, var(--aidex-color-accent) 60%, transparent);
+  pointer-events: none;
+  animation: overlay-in var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+/* Over the composer: nearly opaque, so the draft does not show through the pill. */
+.inset {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--aidex-color-accent) 8%, var(--aidex-color-surface-raised));
+}
+
+/* Over a page: a light tint, so the conversation stays visible under the highlight. */
+.fixed {
+  position: fixed;
+  border-radius: var(--aidex-radius-2xl);
+  background: color-mix(in srgb, var(--aidex-color-accent) 4%, transparent);
+}
+
+.blocked {
+  border-color: var(--aidex-color-border-strong);
+}
+
+.inset.blocked {
+  background: var(--aidex-color-surface-raised);
+}
+
+.fixed.blocked {
+  background: color-mix(in srgb, var(--aidex-color-bg) 40%, transparent);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  max-width: 100%;
+  padding: var(--aidex-space-2) var(--aidex-space-4);
+  border: 1px solid var(--aidex-color-accent-subtle-border);
+  border-radius: var(--aidex-radius-full);
+  background: var(--aidex-color-surface-raised);
+  color: var(--aidex-color-text);
+  font-size: var(--aidex-text-sm);
+  font-weight: 500;
+  box-shadow: 0 8px 24px var(--aidex-color-shadow);
+}
+
+.pill svg {
+  flex: none;
+  color: var(--aidex-color-accent);
+}
+
+.blocked .pill {
+  border-color: var(--aidex-color-border-strong);
+}
+
+.blocked .pill svg {
+  color: var(--aidex-color-warning);
+}
+
+.text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .overlay {
+    animation: none;
+  }
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+}

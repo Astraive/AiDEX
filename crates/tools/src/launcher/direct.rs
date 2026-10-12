@@ -131,7 +131,7 @@ impl ProcessLauncher for DirectLauncher {
                 Err(error) => return Err(LaunchError::Io(error.to_string())),
             }
             if killed_by.is_none() {
-                if cancel.is_cancelled() {
+                if cancel.is_stopped() {
                     killed_by = Some(KillReason::Requested);
                 } else if started.elapsed() >= request.timeout() {
                     killed_by = Some(KillReason::WallTimeout);

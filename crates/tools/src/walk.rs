@@ -166,7 +166,7 @@ pub(crate) fn walk(
     let mut summary = WalkSummary::default();
     let mut stack = vec![(start_abs, start_components, 1usize, matchers)];
     while let Some((dir, components, depth, matchers)) = stack.pop() {
-        ctx.cancel.check()?;
+        crate::context::check_cancel(&ctx.cancel)?;
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(error) if depth == 1 => {

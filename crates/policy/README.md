@@ -160,4 +160,4 @@ Only one `global` document may carry `[network]` (`allow_domains`, `local_networ
 - **Fact computation.** Path confinement, symlink resolution, and `sensitive`/`protected` classification come from the workspace service and broker. Destinations are classified before DNS resolution; the broker must re-check resolved addresses (DNS rebinding).
 - **Heuristic classification.** The shell classifier is not a shell parser and will miss some obfuscation; risk is conservative, and the sandbox must contain what it misses. Project `never_modify` rules see only `fs.*` intents, not paths a shell command writes.
 - **Policy authoring.** Writing policy files must itself be gated as `policy.change` by whatever edits them; loading does not authenticate files.
-- No daemon or CLI wiring yet.
+- Wiring: `aidex-broker` enforces decisions, owns approvals and audit events, and serves `policy.*` through the daemon (`aidex policy show|profile|reload|explain`).

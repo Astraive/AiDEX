@@ -225,6 +225,44 @@ fn host_memory_and_unverified_limits_are_hard_constraints() {
 }
 
 #[test]
+fn catalog_limits_are_eligible_and_rank_after_discovered_ones() {
+    let models = vec![
+        model("cloud/catalog", Locality::Remote, 200_000)
+            .with_tool_calls(ToolCallSupport::Native)
+            .with_source(CapabilitySource::Catalog),
+        model("cloud/discovered", Locality::Remote, 200_000)
+            .with_tool_calls(ToolCallSupport::Native)
+            .with_source(CapabilitySource::Discovered),
+        model("cloud/configured", Locality::Remote, 200_000)
+            .with_tool_calls(ToolCallSupport::Native)
+            .with_source(CapabilitySource::Configured),
+        model("cloud/assumed", Locality::Remote, 200_000)
+            .with_tool_calls(ToolCallSupport::Native)
+            .with_source(CapabilitySource::Assumed),
+    ];
+    let request = RouteRequest::new(TaskKind::Code)
+        .needing_tools()
+        .with_required_context(100_000);
+    let decision = Router::new()
+        .with_max_fallbacks(3)
+        .route(&request, &models)
+        .unwrap();
+    assert_eq!(
+        names(&decision),
+        ["cloud/configured", "cloud/discovered", "cloud/catalog"]
+    );
+    assert!(
+        decision
+            .rejected
+            .iter()
+            .any(|r| r.model.to_string() == "cloud/assumed"
+                && r.reason == RejectReason::UnverifiedCapabilities)
+    );
+    let only_catalog = Router::new().route(&request, &models[..1]).unwrap();
+    assert_eq!(only_catalog.primary.to_string(), "cloud/catalog");
+}
+
+#[test]
 fn user_overrides_are_honoured_or_refused_explicitly() {
     let chosen = route(
         &RouteRequest::new(TaskKind::Code).with_override(ModelRef::parse("local/small").unwrap()),

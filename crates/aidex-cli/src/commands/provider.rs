@@ -104,8 +104,14 @@ fn print_entry(entry: &ProviderEntry) {
             format!("vault secret `{secret_name}`")
         }
     };
+    // Account metadata from provider-accounts.toml: the name and a disabled flag.
+    let name = entry
+        .display_name
+        .as_deref()
+        .map(|name| format!("  \"{name}\""))
+        .unwrap_or_default();
     println!(
-        "{}  {}  {}  {}  auth: {}  ({})",
+        "{}  {}  {}  {}  auth: {}  ({}){}{}",
         descriptor.id,
         descriptor.kind.as_str(),
         descriptor.locality.as_str(),
@@ -114,7 +120,9 @@ fn print_entry(entry: &ProviderEntry) {
         match entry.origin {
             aidex_providers::ProviderOrigin::Configured => "configured",
             aidex_providers::ProviderOrigin::Runtime => "runtime",
-        }
+        },
+        name,
+        if entry.enabled { "" } else { "  disabled" },
     );
 }
 

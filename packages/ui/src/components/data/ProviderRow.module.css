@@ -1,0 +1,147 @@
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+  border-bottom: 1px solid var(--aidex-color-border);
+  transition:
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    opacity var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.row:hover {
+  background: color-mix(in srgb, var(--aidex-color-text) 3%, transparent);
+}
+
+/* The inset bar is a non-color cue for the current row, alongside the tint. */
+.selected,
+.selected:hover {
+  background: var(--aidex-color-surface-hover);
+  box-shadow: inset 2px 0 0 var(--aidex-color-accent);
+}
+
+.dimmed {
+  opacity: 0.6;
+}
+
+.dimmed:hover,
+.dimmed:focus-within {
+  opacity: 1;
+}
+
+.select {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+  min-height: 56px;
+  margin: 0;
+  padding: var(--aidex-space-2) var(--aidex-space-3);
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Keep the focus ring inside the row so neighbouring rows do not cover it. */
+.select:focus-visible {
+  outline-offset: -2px;
+}
+
+.tile {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--aidex-color-border-subtle);
+  border-radius: var(--aidex-radius-sm);
+  background: var(--aidex-color-surface-strong);
+  color: var(--aidex-color-text);
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.titleLine {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+}
+
+.title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--aidex-color-text);
+  font-size: var(--aidex-text-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The tag gives up its space long before the title is truncated. */
+.version {
+  flex: 0 1000 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--aidex-color-text-muted);
+  font-family: var(--aidex-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badges {
+  display: inline-flex;
+  flex: none;
+  gap: var(--aidex-space-1);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.4;
+}
+
+.summaryText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warning .headline {
+  color: var(--aidex-color-warning);
+}
+
+.danger .headline {
+  color: var(--aidex-color-danger);
+}
+
+.success .headline,
+.neutral .headline {
+  color: var(--aidex-color-text-secondary);
+}
+
+.trailing {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  padding-right: var(--aidex-space-3);
+}

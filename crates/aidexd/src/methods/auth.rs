@@ -6,7 +6,9 @@ use crate::{
     services::Services,
 };
 use aidex_auth::{AuthError, AuthService};
-use aidex_providers::{AuthConfig, ProviderConfig, ProviderId, ProviderKind, ProviderRegistry};
+use aidex_providers::{
+    AccountMetadata, AuthConfig, ProviderConfig, ProviderId, ProviderKind, ProviderRegistry,
+};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -54,7 +56,9 @@ fn error(error: AuthError) -> RpcError {
     )
     .with_data(json!({"reason":error.code()}))
 }
-fn owned(config: &ProviderConfig) -> bool {
+/// Whether `config` is a ChatGPT account whose credential this daemon's OAuth
+/// service owns (`oauth.<id>.access`).
+pub(crate) fn owned(config: &ProviderConfig) -> bool {
     config.kind == ProviderKind::OpenaiResponses
         && config.base_url.trim_end_matches('/') == "https://api.openai.com/v1"
         && matches!(&config.auth,AuthConfig::VaultSecret {secret_name} if AuthService::owns_secret(config.id.as_str(),secret_name))
@@ -85,43 +89,61 @@ fn select_provider(registry: &ProviderRegistry, requested: &str) -> Result<Strin
     }
     Err(error(AuthError::Conflict))
 }
+/// The ChatGPT account endpoint every OAuth-owned account uses.
+const CHATGPT_BASE_URL: &str = "https://api.openai.com/v1";
+/// The provider preset recorded for accounts created by ChatGPT sign-in.
+const CHATGPT_PRESET: &str = "openai";
+
+/// Register (or re-point) the ChatGPT account after sign-in. A reconnect keeps
+/// the account's declared models, discovery flag, and account metadata; only
+/// the kind, endpoint, and credential name are reasserted.
 fn activate(
     registry: &Arc<ProviderRegistry>,
     provider: &str,
     secret: &str,
 ) -> Result<(), AuthError> {
     let id = ProviderId::new(provider).map_err(|_| AuthError::Invalid)?;
-    let mut config = ProviderConfig::new(
-        id.clone(),
-        ProviderKind::OpenaiResponses,
-        "https://api.openai.com/v1",
-    );
-    config.auth = AuthConfig::VaultSecret {
+    let auth = AuthConfig::VaultSecret {
         secret_name: secret.into(),
     };
-    if let Some(existing) = registry.provider_config(&id) {
+    if let Some(mut existing) = registry.provider_config(&id) {
         if !owned(&existing) {
             return Err(AuthError::Conflict);
         }
-        registry.update_provider(config)
+        existing.kind = ProviderKind::OpenaiResponses;
+        existing.base_url = CHATGPT_BASE_URL.into();
+        existing.auth = auth;
+        registry.update_provider(existing).map(drop)
     } else {
-        registry.add_provider(config)
+        let mut config =
+            ProviderConfig::new(id.clone(), ProviderKind::OpenaiResponses, CHATGPT_BASE_URL);
+        config.auth = auth;
+        registry
+            .add_provider_with(
+                config,
+                AccountMetadata {
+                    preset_id: Some(CHATGPT_PRESET.into()),
+                    ..AccountMetadata::default()
+                },
+            )
+            .map(drop)
     }
     .map_err(|_| AuthError::Unavailable)?;
     // Catalog calls resolve credentials; they run after the auth commit releases
     // its account mutex, and never report model listing as inference entitlement.
     let registry = registry.clone();
-    let provider = provider.to_owned();
     let _ = std::thread::Builder::new()
         .name("aidex-chatgpt-catalog".into())
         .spawn(move || {
             if registry.default_model().is_some() {
                 return;
             }
-            let catalog = registry.models();
-            if let Some(model) = catalog.models.into_iter().find(|model| {
-                model.model.provider_id.as_str() == provider && model.capabilities.chat
-            }) && registry.default_model().is_none()
+            // Only this account is listed; a disabled account sets no default.
+            let Ok(models) = registry.models_for(&id) else {
+                return;
+            };
+            if let Some(model) = models.into_iter().find(|model| model.capabilities.chat)
+                && registry.default_model().is_none()
             {
                 let _ = registry.set_default_model(model.model);
             }
@@ -311,5 +333,60 @@ mod tests {
             Err(AuthError::Conflict)
         );
         assert_eq!(registry.provider_config(&api.id).unwrap(), api);
+    }
+
+    #[test]
+    fn reconnect_keeps_declared_models_and_account_metadata() {
+        use aidex_providers::{
+            ModelConfig, ModelId, NoVault, OfflineMode, ProviderPatch, ToolCallSupport,
+        };
+        let registry = Arc::new(ProviderRegistry::in_memory(
+            Arc::new(NoVault::default()),
+            Arc::new(OfflineMode::new(true)),
+        ));
+        let id = ProviderId::new("openai-chatgpt").unwrap();
+        let secret = AuthService::secret_name(id.as_str());
+        activate(&registry, id.as_str(), &secret).unwrap();
+        let created = registry.provider_entry(&id).unwrap();
+        assert_eq!(created.preset_id.as_deref(), Some("openai"));
+        assert_eq!(created.display_name, None);
+        assert!(created.enabled);
+        assert!(created.discover_models);
+
+        let mut customized = registry.provider_config(&id).unwrap();
+        let mut declared = ModelConfig::new(ModelId::new("gpt-5.1-codex").unwrap(), 400_000);
+        declared.tool_calls = ToolCallSupport::Native;
+        customized.models = vec![declared];
+        customized.discover_models = false;
+        customized.base_url = "https://api.openai.com/v1/".into();
+        registry.update_provider(customized.clone()).unwrap();
+        registry
+            .patch_provider(
+                &id,
+                ProviderPatch {
+                    display_name: Some(Some("Work ChatGPT".into())),
+                    enabled: Some(false),
+                },
+            )
+            .unwrap();
+
+        activate(&registry, id.as_str(), &secret).unwrap();
+        let reconnected = registry.provider_config(&id).unwrap();
+        assert_eq!(reconnected.models, customized.models);
+        assert!(!reconnected.discover_models);
+        assert_eq!(reconnected.locality, customized.locality);
+        // Only kind, endpoint, and credential are reasserted.
+        assert_eq!(reconnected.base_url, "https://api.openai.com/v1");
+        assert_eq!(reconnected.kind, ProviderKind::OpenaiResponses);
+        assert_eq!(
+            reconnected.auth,
+            AuthConfig::VaultSecret {
+                secret_name: secret.clone()
+            }
+        );
+        let entry = registry.provider_entry(&id).unwrap();
+        assert_eq!(entry.display_name.as_deref(), Some("Work ChatGPT"));
+        assert_eq!(entry.preset_id.as_deref(), Some("openai"));
+        assert!(!entry.enabled, "a reconnect does not re-enable the account");
     }
 }

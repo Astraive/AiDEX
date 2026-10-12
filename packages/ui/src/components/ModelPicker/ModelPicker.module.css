@@ -1,0 +1,176 @@
+/* The panel manages its own scrolling regions (doubled class to win over the base popover rule). */
+.popover.popover {
+  overflow: hidden;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  width: min(380px, calc(100vw - 16px));
+  /* Fits inside the popover border (1px each side). */
+  max-height: min(420px, calc(var(--aidex-popover-available-height, 422px) - 2px));
+  min-height: 0;
+}
+
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.withRail {
+  border-left: 1px solid var(--aidex-color-border-subtle);
+}
+
+.search {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  margin: var(--aidex-space-2) var(--aidex-space-3) 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--aidex-color-border);
+  transition:
+    border-color var(--aidex-duration-fast) var(--aidex-ease),
+    box-shadow var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+/* The field's own outline is replaced by a stronger underline, so focus stays visible. */
+.search:focus-within {
+  border-bottom-color: var(--aidex-color-focus);
+  box-shadow: inset 0 -1px 0 var(--aidex-color-focus);
+}
+
+.searchIcon {
+  flex: none;
+  color: var(--aidex-color-text-muted);
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--aidex-color-text);
+  font-size: var(--aidex-text-sm);
+}
+
+.searchInput:focus-visible {
+  outline: none;
+}
+
+.searchInput::placeholder {
+  color: var(--aidex-color-text-muted);
+}
+
+.spinner {
+  flex: none;
+  color: var(--aidex-color-text-muted);
+  animation: spin 900ms linear infinite;
+}
+
+.footer {
+  flex: none;
+  max-height: 176px;
+  overflow-y: auto;
+  padding: var(--aidex-space-2) var(--aidex-space-3);
+  border-top: 1px solid var(--aidex-color-border-subtle);
+}
+
+.footerText {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--aidex-color-text-secondary);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.inlineButton {
+  margin-top: var(--aidex-space-1);
+  padding: 2px 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--aidex-color-accent);
+  font-size: var(--aidex-text-xs);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.inlineButton:hover {
+  color: var(--aidex-color-focus);
+}
+
+.bar {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  padding: var(--aidex-space-1);
+  border-top: 1px solid var(--aidex-color-border-subtle);
+  background: color-mix(in srgb, var(--aidex-color-surface) 60%, transparent);
+}
+
+.barButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-height: 30px;
+  padding: 0 var(--aidex-space-2);
+  border: 0;
+  border-radius: var(--aidex-radius-sm);
+  background: transparent;
+  color: var(--aidex-color-text-secondary);
+  font-size: var(--aidex-text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.barButton:hover {
+  background: var(--aidex-color-surface-hover);
+  color: var(--aidex-color-text);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

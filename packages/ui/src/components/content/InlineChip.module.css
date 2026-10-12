@@ -1,0 +1,55 @@
+/* Sized in `em` so the chip matches whatever text it sits in. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  max-width: 100%;
+  min-height: 1.45em;
+  padding: 0 0.45em;
+  border: 1px solid transparent;
+  border-radius: 0.5em;
+  font-size: 0.875em;
+  font-weight: 500;
+  line-height: 1.35;
+  vertical-align: baseline;
+  white-space: nowrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Text leans further toward the text color than links do, to keep 4.5:1 on the tinted fill in both themes. */
+.accent {
+  border-color: var(--aidex-color-accent-subtle-border);
+  background: var(--aidex-color-accent-soft);
+  color: color-mix(in srgb, var(--aidex-color-accent) 55%, var(--aidex-color-text));
+}
+
+.neutral {
+  border-color: var(--aidex-color-border);
+  background: var(--aidex-color-surface-strong);
+  color: var(--aidex-color-text);
+}
+
+/* Dashed, so an unknown token is distinguishable without relying on color. */
+.unresolved {
+  border-style: dashed;
+  border-color: var(--aidex-color-border-strong);
+  background: transparent;
+  color: var(--aidex-color-text-secondary);
+}
+
+.icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.icon svg {
+  width: 1.05em;
+  height: 1.05em;
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -1,0 +1,168 @@
+.row {
+  min-width: 0;
+  padding: 1px 0;
+}
+
+.headerRow {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+}
+
+/* Compact, quiet line: the work log reads as a margin note next to the answer. */
+.header {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 2px var(--aidex-space-1);
+  border-radius: var(--aidex-radius-sm);
+  color: var(--aidex-color-text-secondary);
+  font-size: var(--aidex-text-sm);
+  line-height: 1.5;
+  text-align: left;
+}
+
+.toggle {
+  margin: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.toggle:hover {
+  background: var(--aidex-color-surface-hover);
+  color: var(--aidex-color-text);
+}
+
+.toggle:focus-visible {
+  outline-offset: -2px;
+}
+
+.icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--aidex-color-text-muted);
+}
+
+.icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+[data-status="failed"] > .headerRow .icon {
+  color: var(--aidex-color-danger);
+}
+
+.label {
+  flex: none;
+  max-width: 70%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.secondary {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--aidex-color-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spinner {
+  flex: none;
+  color: var(--aidex-color-text-muted);
+  animation: spin 900ms linear infinite;
+}
+
+/* Failure is shown with a dot and a word, not color alone. */
+.failed {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--aidex-space-1);
+  color: var(--aidex-color-danger);
+  font-size: var(--aidex-text-xs);
+  font-weight: 500;
+}
+
+.chevron {
+  flex: none;
+  margin-left: auto;
+  color: var(--aidex-color-text-muted);
+  opacity: 0.7;
+  transition:
+    transform var(--aidex-duration-fast) var(--aidex-ease),
+    opacity var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.toggle:hover .chevron,
+.toggle:focus-visible .chevron,
+.chevronOpen {
+  opacity: 1;
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.trailing {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--aidex-space-1);
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+}
+
+/* Detail aligns with the label (icon 20px + gap 6px + padding 4px), scrolls, and stays selectable. */
+.detail {
+  max-height: 384px;
+  margin: var(--aidex-space-1) 0 var(--aidex-space-2) 30px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  color: var(--aidex-color-text-secondary);
+  font-size: var(--aidex-text-sm);
+  line-height: 1.55;
+  user-select: text;
+}
+
+/* A group's members are rows themselves, so they render in full instead of in a scroll box. */
+.group > .detail {
+  max-height: none;
+  margin-top: 0;
+  margin-left: var(--aidex-space-3);
+  padding-left: var(--aidex-space-3);
+  overflow: visible;
+  border-left: 1px solid var(--aidex-color-border-subtle);
+}
+
+.members {
+  display: flex;
+  flex-direction: column;
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

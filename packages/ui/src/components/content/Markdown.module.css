@@ -1,0 +1,252 @@
+/* Normal block flow (not flex), so vertical margins between blocks collapse like prose. */
+.markdown {
+  min-width: 0;
+  color: inherit;
+  font-size: inherit;
+  line-height: 1.7;
+  overflow-wrap: break-word;
+}
+
+/* Two classes so the spacing wins over a nested component's own reset (e.g. `CodeBlock`). */
+.markdown .block {
+  margin: 0 0 var(--aidex-space-4);
+}
+
+.markdown .block:last-child {
+  margin-bottom: 0;
+}
+
+/* Headings */
+
+.markdown .heading {
+  margin: var(--aidex-space-6) 0 var(--aidex-space-2);
+  color: var(--aidex-color-text);
+  font-family: var(--aidex-font-display);
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+}
+
+.markdown .heading:first-child {
+  margin-top: 0;
+}
+
+.h1 {
+  font-size: var(--aidex-text-xl);
+}
+
+.h2 {
+  font-size: calc((var(--aidex-text-xl) + var(--aidex-text-lg)) / 2);
+}
+
+.h3 {
+  font-size: var(--aidex-text-lg);
+}
+
+.h4 {
+  font-size: var(--aidex-text-md);
+}
+
+.h5 {
+  font-size: var(--aidex-text-sm);
+}
+
+.h6 {
+  color: var(--aidex-color-text-secondary);
+  font-size: var(--aidex-text-sm);
+}
+
+/* Lists */
+
+.list {
+  padding-left: var(--aidex-space-6);
+}
+
+.item::marker {
+  color: var(--aidex-color-text-muted);
+}
+
+.item + .item {
+  margin-top: var(--aidex-space-1);
+}
+
+/* Nested lists and other blocks inside an item sit closer than top-level blocks. */
+.markdown .item > .block {
+  margin-bottom: var(--aidex-space-2);
+}
+
+.markdown .item > .block:last-child {
+  margin-bottom: 0;
+}
+
+.markdown .item > .list {
+  margin-top: var(--aidex-space-1);
+}
+
+.tightText {
+  display: block;
+}
+
+.markdown .item > .tightText {
+  margin-bottom: 0;
+}
+
+.task {
+  position: relative;
+  list-style: none;
+}
+
+/* The checkbox sits where the bullet would be; the state is also spoken ("Completed"). */
+.checkbox {
+  position: absolute;
+  top: calc((1.7em - 14px) / 2);
+  left: calc(-1 * var(--aidex-space-5));
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--aidex-color-border-strong);
+  border-radius: 4px;
+  background: var(--aidex-color-surface);
+  color: var(--aidex-color-on-accent);
+}
+
+.checked {
+  border-color: var(--aidex-color-accent);
+  background: var(--aidex-color-accent);
+}
+
+/* Quotes and rules */
+
+.quote {
+  padding: 0 0 0 var(--aidex-space-4);
+  border-left: 3px solid var(--aidex-color-border-strong);
+  color: var(--aidex-color-text-secondary);
+}
+
+.markdown .rule {
+  height: 1px;
+  margin: var(--aidex-space-6) 0;
+  border: 0;
+  background: var(--aidex-color-border);
+}
+
+/* Tables */
+
+.tableScroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--aidex-color-border);
+  border-radius: var(--aidex-radius-md);
+}
+
+.tableScroll:focus-visible {
+  outline-offset: -2px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--aidex-text-sm);
+  line-height: 1.5;
+}
+
+.table th,
+.table td {
+  padding: var(--aidex-space-2) var(--aidex-space-3);
+  border-bottom: 1px solid var(--aidex-color-border-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+
+.table th {
+  background: var(--aidex-color-surface-raised);
+  color: var(--aidex-color-text);
+  font-weight: 600;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table .alignLeft {
+  text-align: left;
+}
+
+.table .alignCenter {
+  text-align: center;
+}
+
+.table .alignRight {
+  text-align: right;
+}
+
+/* Links and image chips. Links have no href, so the pointer cursor is set explicitly. */
+
+.link {
+  border-radius: 2px;
+  color: var(--aidex-color-link);
+  text-decoration: underline;
+  text-decoration-thickness: from-font;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.link:hover {
+  color: var(--aidex-color-text);
+}
+
+/* A link whose destination is unsafe, or that has no handler: readable, visibly not actionable. */
+.inertLink {
+  text-decoration: underline dotted;
+  text-decoration-color: var(--aidex-color-text-muted);
+  text-underline-offset: 2px;
+}
+
+.imageChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--aidex-space-1);
+  max-width: 100%;
+  padding: 0 0.5em;
+  border: 1px solid var(--aidex-color-border);
+  border-radius: var(--aidex-radius-full);
+  background: var(--aidex-color-surface-raised);
+  color: var(--aidex-color-text-secondary);
+  font-size: 0.875em;
+  line-height: 1.6;
+  vertical-align: baseline;
+}
+
+.interactiveChip {
+  color: var(--aidex-color-link);
+  cursor: pointer;
+  transition:
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.interactiveChip:hover {
+  background: var(--aidex-color-surface-hover);
+  color: var(--aidex-color-text);
+}
+
+.chipIcon {
+  flex: none;
+}
+
+.chipLabel {
+  min-width: 0;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markdown del {
+  color: var(--aidex-color-text-muted);
+}
+
+.markdown strong {
+  font-weight: 600;
+}

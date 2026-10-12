@@ -34,7 +34,7 @@ pub const DEFAULT_MAX_EVENTS: u64 = 100_000;
 pub struct RetentionPolicy {
     /// Keep at most this many of the newest events.
     pub max_events: Option<u64>,
-    /// Remove events older than this (by `occurred_at`).
+    /// Remove only the leading run of events older than this (by `occurred_at`).
     pub max_age: Option<Duration>,
 }
 
@@ -116,7 +116,6 @@ impl EventLog {
         retention.validate()?;
         let path = path.as_ref().to_path_buf();
         let mut connection = schema::open_connection(&path)?;
-        schema::prepare(&mut connection)?;
         let state = {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -289,17 +288,26 @@ impl EventLog {
     /// Runs at most once per log and only while this log is empty; the v1 file is
     /// never modified. Events are imported in their original order with fresh
     /// cursors and the import time as `occurred_at`.
+    /// Already-imported and nonempty targets skip without opening the v1 file.
     pub fn import_legacy(&self, legacy_path: &Path) -> Result<LegacyImport, EventError> {
-        let bodies = schema::read_v1_file(legacy_path)?;
         let mut inner = self.lock();
-        let (outcome, state) = schema::import_file(&mut inner.connection, &bodies)?;
+        let (outcome, state) =
+            schema::import_file(&mut inner.connection, legacy_path, &self.shared.retention)?;
         inner.last_cursor = state.last_cursor;
+        if matches!(outcome, LegacyImport::Imported { events } if events > 0) {
+            // Import commits a new durable range without offering its rows live.
+            // Reset subscribers through disk catch-up before any later append.
+            for slot in &inner.subscribers {
+                slot.require_catch_up();
+            }
+        }
         Ok(outcome)
     }
 
-    /// Stream events matching `filter` strictly after `after`: persisted history
-    /// first (paged from disk), then live events, in cursor order without duplicates
-    /// or gaps. Uses [`subscription::DEFAULT_CAPACITY`] for the live queue.
+    /// Stream matching events and consumed durable watermarks strictly after
+    /// `after`: persisted history first, then live deliveries, without duplicates
+    /// or gaps. Watermarks follow the matching events they cover. Uses
+    /// [`subscription::DEFAULT_CAPACITY`] for the live event queue.
     pub fn subscribe(
         &self,
         filter: EventFilter,

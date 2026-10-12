@@ -136,3 +136,45 @@ export const UserIcon = createIcon(
     <path d="M5 20a7 7 0 0 1 14 0" />
   </>,
 );
+
+const STAR_PATH = "M12 3.4 14.3 9.4l6.45.35-5.04 4.06 1.7 6.23L12 16.5l-5.41 3.54 1.7-6.23-5.04-4.06 6.45-.35Z";
+
+/** Outline star, e.g. for adding an item to favorites. */
+export const StarIcon = createIcon("StarIcon", <path d={STAR_PATH} />);
+
+/** Filled star marking a favorite. */
+export const StarFilledIcon = createIcon("StarFilledIcon", <path d={STAR_PATH} fill="currentColor" />);
+
+/** Picture placeholder, e.g. for an image that is linked rather than loaded. */
+export const ImageIcon = createIcon(
+  "ImageIcon",
+  <>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+    <circle cx="9" cy="10" r="1.75" />
+    <path d="m20.5 15.5-4.25-4.25a1.5 1.5 0 0 0-2.12 0L5.5 19.5" />
+  </>,
+);
+
+/** Magnifier with a plus, e.g. to zoom an image in. */
+export const ZoomInIcon = createIcon(
+  "ZoomInIcon",
+  <>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="m20 20-4.4-4.4M11 8.25v5.5M8.25 11h5.5" />
+  </>,
+);
+
+/** Magnifier with a minus, e.g. to fit a zoomed image back into view. */
+export const ZoomOutIcon = createIcon(
+  "ZoomOutIcon",
+  <>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="m20 20-4.4-4.4M8.25 11h5.5" />
+  </>,
+);
+
+/** Two opposing arrows, e.g. a conversation that switched mode or continued elsewhere. */
+export const ArrowRightLeftIcon = createIcon(
+  "ArrowRightLeftIcon",
+  <path d="M4.5 8h15M15.5 4l4 4-4 4M19.5 16h-15M8.5 12l-4 4 4 4" />,
+);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useFileDropGuard } from "@aidex/ui/components";
 import { SelectDrivePage } from "../features/launch/SelectDrivePage";
 import { UnlockPage } from "../features/launch/UnlockPage";
 import { useAidexStatus } from "../hooks/useAidexStatus";
@@ -11,6 +12,9 @@ type Stage = "drive" | "unlock" | "workspace";
 
 /** Launch flow: find the drive, start Core, unlock the vault, then enter chat. */
 export function App() {
+  // HTML5 drops reach the page (`dragDropEnabled: false`), so a file dropped anywhere outside a drop
+  // target must never navigate the window to it.
+  useFileDropGuard();
   return (
     <AidexProvider>
       <Launch />

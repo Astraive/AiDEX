@@ -5,19 +5,17 @@
 export type Shortcut = {
   id: string;
   action: string;
-  /** Key pressed together with the platform's command modifier. */
-  key: string;
-  shift?: boolean;
+  /** Chord such as "Mod+Shift+p"; `Mod` is ⌘ on Apple platforms and Ctrl elsewhere. */
+  chord: string;
   /** Whether the shortcut already works in this build. */
   wired: boolean;
 };
 
-export const sampleShortcuts: readonly Shortcut[] = [
-  { id: "new-session", action: "New session", key: "K", wired: true },
-  { id: "search", action: "Search", key: "F", wired: false },
-  { id: "toggle-sidebar", action: "Toggle sidebar", key: "B", wired: false },
-  { id: "switch-mode", action: "Switch Chat/Agent", key: "M", shift: true, wired: false },
-  { id: "open-settings", action: "Open settings", key: ",", wired: false },
+/** Planned shortcuts that no screen handles yet; working ones come from preferences and `lib/shortcuts.ts`. */
+export const plannedShortcuts: readonly Shortcut[] = [
+  { id: "search", action: "Search", chord: "Mod+f", wired: false },
+  { id: "toggle-sidebar", action: "Toggle sidebar", chord: "Mod+b", wired: false },
+  { id: "open-settings", action: "Open settings", chord: "Mod+,", wired: false },
 ];
 
 export const updateChannels = [

@@ -2,7 +2,8 @@
 //!
 //! `show` prints one replay page (`events.replay`). `tail` prints everything after a
 //! cursor and exits, or with `--follow` streams `events.subscribe`, reconnecting with
-//! backoff after transient disconnects and resuming after the last printed cursor.
+//! backoff after transient disconnects and resuming after the last processed
+//! durable event or consumed watermark.
 //! Human output is one line per event; `--json` prints envelopes as JSON lines
 //! (`show --json` prints the page as one JSON document).
 
@@ -166,19 +167,22 @@ fn show(args: ShowArgs, output: Output) -> Result<Exit, CliError> {
     let root = resolve_root(args.drive.as_deref())?;
     let mut client = connect_root(&root)?;
     let page = replay(&mut client, &filter, Cursor::new(args.after), args.limit)?;
-    output.emit(&page, || {
+    if output.is_json() {
+        output.emit(&page, || {})?;
+    } else {
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
         for event in &page.events {
-            let _ = writeln!(stdout, "{}", render::human_line(event));
+            render::write_event(&mut stdout, event, false).map_err(write_error)?;
         }
         let more = if page.has_more {
             format!(" (more: aidex events show --after {})", page.next_cursor)
         } else {
             String::new()
         };
-        let _ = writeln!(stdout, "next cursor: {}{more}", page.next_cursor);
-    })?;
+        writeln!(stdout, "next cursor: {}{more}", page.next_cursor).map_err(write_error)?;
+        stdout.flush().map_err(write_error)?;
+    }
     Ok(Exit::Success)
 }
 

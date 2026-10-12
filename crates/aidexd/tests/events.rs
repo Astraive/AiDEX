@@ -5,12 +5,14 @@ mod common;
 
 use aidex_core::EntityId;
 use aidex_drive::DrivePaths;
-use aidex_events::{Cursor, EventEnvelope, EventKind, EventLog, EventScope, RetentionPolicy};
+use aidex_events::{
+    Cursor, EventEnvelope, EventKind, EventLog, EventScope, RetentionPolicy, SubscriptionItem,
+};
 use aidexd::{
     Client, ErrorCode, TransportConfig,
     methods::events::{
-        EVENT_NOTIFICATION, LATEST, LatestCursor, REPLAY, ReplayPage, SUBSCRIBE, Subscribed,
-        decode_event,
+        EVENT_NOTIFICATION, LATEST, LatestCursor, REPLAY, ReplayPage, SUBSCRIBE, StreamWatermark,
+        Subscribed, WATERMARK_NOTIFICATION, decode_event,
     },
     services::{LEGACY_EVENT_FILE, event_log_path, event_retention},
 };
@@ -110,7 +112,7 @@ fn replay_survives_a_daemon_restart_with_one_global_cursor() {
     restarted.wait().unwrap();
 }
 
-fn next_event(subscription: &mut aidexd::Subscription<'_>) -> EventEnvelope {
+fn next_item(subscription: &mut aidexd::Subscription<'_>) -> SubscriptionItem {
     let deadline = Instant::now() + PATIENCE;
     loop {
         assert!(Instant::now() < deadline, "no event within {PATIENCE:?}");
@@ -118,8 +120,25 @@ fn next_event(subscription: &mut aidexd::Subscription<'_>) -> EventEnvelope {
             .next_timeout(Duration::from_millis(100))
             .unwrap()
         {
-            assert_eq!(notification.method, EVENT_NOTIFICATION);
-            return decode_event(notification.params).unwrap();
+            return match notification.method.as_str() {
+                EVENT_NOTIFICATION => {
+                    SubscriptionItem::event(decode_event(notification.params).unwrap())
+                }
+                WATERMARK_NOTIFICATION => {
+                    let watermark: StreamWatermark =
+                        serde_json::from_value(notification.params).unwrap();
+                    SubscriptionItem::watermark(watermark.cursor)
+                }
+                method => panic!("unexpected stream notification: {method}"),
+            };
+        }
+    }
+}
+
+fn next_event(subscription: &mut aidexd::Subscription<'_>) -> EventEnvelope {
+    loop {
+        if let Some(event) = next_item(subscription).event {
+            return event;
         }
     }
 }
@@ -183,6 +202,112 @@ fn subscribe_pushes_history_then_live_events_and_resumes_without_duplicates() {
         client.call("daemon.ping", Value::Null).unwrap()["pong"],
         true
     );
+}
+
+#[test]
+fn filtered_watermarks_follow_matches_and_survive_retention_and_restart() {
+    let root = common::temp_drive();
+    let (daemon, log) = start_with_log(root.path(), options());
+    let first = log.append(scope(), task("first")).unwrap();
+    log.append(EventScope::workspace(id("ws_other")), task("history_skip"))
+        .unwrap();
+    let mut client = common::client(daemon.endpoint());
+    let mut subscription = client
+        .subscribe(SUBSCRIBE, json!({"filter": {"workspace_id": "ws_main"}}))
+        .unwrap();
+    // The initial latest_cursor is metadata, not an acknowledgement. The pending
+    // matching event must arrive before the history watermark, never behind it.
+    assert_eq!(
+        next_item(&mut subscription),
+        SubscriptionItem::event(first.clone())
+    );
+    assert_eq!(
+        next_item(&mut subscription),
+        SubscriptionItem::watermark(Cursor::new(3))
+    );
+    let mut acknowledged = Cursor::new(3);
+    for cursor in 4..=10 {
+        log.append(
+            EventScope::workspace(id("ws_other")),
+            task(&format!("skip{cursor}")),
+        )
+        .unwrap();
+        assert_eq!(
+            next_item(&mut subscription),
+            SubscriptionItem::watermark(Cursor::new(cursor))
+        );
+        acknowledged = Cursor::new(cursor);
+    }
+    let delta = log
+        .append(
+            scope(),
+            EventKind::AgentDelta {
+                text: "partial".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(next_item(&mut subscription), SubscriptionItem::event(delta));
+    assert!(
+        subscription
+            .next_timeout(Duration::from_millis(250))
+            .unwrap()
+            .is_none()
+    );
+    subscription.unsubscribe().unwrap();
+    drop(client);
+
+    // Deterministic age retention: the next append removes all this consumed
+    // history without needing 100 000 appends or sleeping for ninety days.
+    let paths = DrivePaths::open(root.path()).unwrap();
+    let age_ms = i64::try_from(event_retention().max_age.unwrap().as_millis()).unwrap() + 60_000;
+    rusqlite::Connection::open(event_log_path(&paths))
+        .unwrap()
+        .execute(
+            "UPDATE event_log SET occurred_ms = occurred_ms - ?1",
+            [age_ms],
+        )
+        .unwrap();
+    log.prune().unwrap();
+    assert!(matches!(
+        log.subscribe(
+            aidex_events::EventFilter::for_workspace(id("ws_main")),
+            first.cursor
+        ),
+        Err(aidex_events::EventError::CursorExpired { .. })
+    ));
+    drop(log);
+    daemon.stop();
+    daemon.wait().unwrap();
+
+    let (restarted, log) = start_with_log(root.path(), options());
+    let mut client = common::client(restarted.endpoint());
+    let mut subscription = client
+        .subscribe(
+            SUBSCRIBE,
+            json!({
+                "after": acknowledged,
+                "filter": {"workspace_id": "ws_main"}
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        next_item(&mut subscription),
+        SubscriptionItem::watermark(Cursor::new(12))
+    );
+    let resumed = log.append(scope(), task("resumed")).unwrap();
+    assert_eq!(
+        next_item(&mut subscription),
+        SubscriptionItem::event(resumed)
+    );
+    assert!(
+        subscription
+            .next_timeout(Duration::from_millis(250))
+            .unwrap()
+            .is_none()
+    );
+    drop(subscription);
+    restarted.stop();
+    restarted.wait().unwrap();
 }
 
 #[test]

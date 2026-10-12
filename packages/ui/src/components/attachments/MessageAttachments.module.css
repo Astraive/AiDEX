@@ -1,0 +1,156 @@
+/* Usually the first child of a user bubble, which keeps its text as `pre-wrap`. */
+.attachments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+  white-space: normal;
+}
+
+.attachments:not(:last-child) {
+  margin-bottom: var(--aidex-space-2);
+}
+
+.grid,
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--aidex-space-2);
+  width: 210px;
+  max-width: 100%;
+}
+
+/* One image takes the whole width instead of half of it. */
+.single .tile {
+  grid-column: span 2;
+}
+
+.tile {
+  min-width: 0;
+  aspect-ratio: 4 / 3;
+}
+
+.tileButton {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--aidex-color-border);
+  border-radius: var(--aidex-radius-sm);
+  background: var(--aidex-color-surface);
+  cursor: zoom-in;
+}
+
+.image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--aidex-space-1);
+  width: 100%;
+  height: 100%;
+  padding: var(--aidex-space-2);
+  color: var(--aidex-color-text-muted);
+  text-align: center;
+}
+
+.placeholderName {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  font-size: var(--aidex-text-xs);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--aidex-space-1);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+  max-width: 360px;
+  padding: var(--aidex-space-1) var(--aidex-space-1) var(--aidex-space-1) var(--aidex-space-3);
+  border: 1px solid var(--aidex-color-border);
+  border-radius: var(--aidex-radius-md);
+  background: var(--aidex-color-surface);
+}
+
+.rowIcon {
+  display: inline-grid;
+  flex: none;
+  color: var(--aidex-color-text-muted);
+}
+
+.rowIcon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.rowText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.rowName {
+  overflow: hidden;
+  color: var(--aidex-color-text);
+  font-size: var(--aidex-text-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMeta {
+  overflow: hidden;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note {
+  font-style: italic;
+}
+
+.spinner {
+  animation: spin 900ms linear infinite;
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

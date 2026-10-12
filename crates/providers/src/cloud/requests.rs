@@ -16,7 +16,56 @@ pub(super) fn encode_segment(text: &str) -> String {
     }
     out
 }
+/// Vendor turns assembled from consecutive same-role messages.
+///
+/// Anthropic, Gemini and Bedrock need alternating roles and reject empty
+/// content arrays. Messages that produce no blocks (a failed run's empty
+/// assistant placeholder) are skipped, and a message whose role matches the
+/// previous turn joins it: tool results first (vendors require them to lead
+/// the turn that answers the calls), then the other blocks in message order.
+#[derive(Default)]
+pub(super) struct Turns(Vec<Turn>);
+
+pub(super) struct Turn {
+    pub role: &'static str,
+    pub results: Vec<Value>,
+    pub blocks: Vec<Value>,
+}
+
+impl Turn {
+    /// The turn's content array: tool results, then the other blocks.
+    pub fn into_content(self) -> Vec<Value> {
+        let mut content = self.results;
+        content.extend(self.blocks);
+        content
+    }
+}
+
+impl Turns {
+    pub fn push(&mut self, role: &'static str, results: Vec<Value>, blocks: Vec<Value>) {
+        if results.is_empty() && blocks.is_empty() {
+            return;
+        }
+        match self.0.last_mut() {
+            Some(last) if last.role == role => {
+                last.results.extend(results);
+                last.blocks.extend(blocks);
+            }
+            _ => self.0.push(Turn {
+                role,
+                results,
+                blocks,
+            }),
+        }
+    }
+
+    pub fn into_inner(self) -> Vec<Turn> {
+        self.0
+    }
+}
+
 pub(super) fn build(kind: ProviderKind, r: &ChatRequest) -> Result<(String, Value), ProviderError> {
+    crate::input::check_request(kind, r)?;
     match kind {
         ProviderKind::AzureOpenai => Ok((
             format!(
@@ -43,12 +92,30 @@ fn responses(r: &ChatRequest) -> Result<(String, Value), ProviderError> {
                 json!({"type":"function_call_output","call_id":m.tool_call_id,"output":m.content}),
             );
         } else {
-            if !m.content.is_empty() {
-                let role = if m.role == Role::System {
-                    "developer"
-                } else {
-                    m.role.as_str()
-                };
+            let role = if m.role == Role::System {
+                "developer"
+            } else {
+                m.role.as_str()
+            };
+            if !m.parts.is_empty() {
+                // Only user messages carry parts (validated); a message with
+                // parts is sent even when its text is empty.
+                let mut content = Vec::with_capacity(m.parts.len() + 1);
+                if !m.content.is_empty() {
+                    content.push(json!({"type":"input_text","text":m.content}));
+                }
+                for part in &m.parts {
+                    content.push(match part {
+                        ContentPart::Image { .. } => {
+                            json!({"type":"input_image","image_url":part.data_url(),"detail":"auto"})
+                        }
+                        ContentPart::Pdf { name, .. } => {
+                            json!({"type":"input_file","filename":crate::openai::wire::pdf_filename(name),"file_data":part.data_url()})
+                        }
+                    });
+                }
+                input.push(json!({"role":role,"content":content}));
+            } else if !m.content.is_empty() {
                 input.push(json!({"role":role,"content":m.content}));
             }
             for call in &m.tool_calls {
@@ -94,28 +161,55 @@ fn anthropic(r: &ChatRequest) -> Result<(String, Value), ProviderError> {
             "Anthropic constrained output is not supported by this adapter".into(),
         ));
     }
-    let mut messages = Vec::new();
+    let mut turns = Turns::default();
     let mut system = Vec::new();
     for m in &r.messages {
         if m.role == Role::System {
             system.push(json!({"type":"text","text":m.content}));
             continue;
         }
-        let mut content = Vec::new();
+        let (mut results, mut blocks) = (Vec::new(), Vec::new());
         if m.role == Role::Tool {
-            content.push(
+            results.push(
                 json!({"type":"tool_result","tool_use_id":m.tool_call_id,"content":m.content}),
             );
         } else {
+            // Images and documents go before the text that refers to them.
+            for part in &m.parts {
+                blocks.push(match part {
+                    ContentPart::Image { mime, .. } => {
+                        json!({"type":"image","source":{"type":"base64","media_type":mime,"data":part.base64()}})
+                    }
+                    ContentPart::Pdf { .. } => {
+                        json!({"type":"document","source":{"type":"base64","media_type":crate::PDF_MIME,"data":part.base64()}})
+                    }
+                });
+            }
             if !m.content.is_empty() {
-                content.push(json!({"type":"text","text":m.content}));
+                blocks.push(json!({"type":"text","text":m.content}));
             }
             for call in &m.tool_calls {
-                content.push(json!({"type":"tool_use","id":call.id,"name":call.name,"input":arguments(&call.arguments)?}));
+                blocks.push(json!({"type":"tool_use","id":call.id,"name":call.name,"input":arguments(&call.arguments)?}));
             }
         }
-        messages.push(json!({"role":if m.role == Role::Assistant { "assistant" } else { "user" },"content":content}));
+        turns.push(
+            if m.role == Role::Assistant {
+                "assistant"
+            } else {
+                "user"
+            },
+            results,
+            blocks,
+        );
     }
+    let messages: Vec<Value> = turns
+        .into_inner()
+        .into_iter()
+        .map(|turn| {
+            let role = turn.role;
+            json!({"role":role,"content":turn.into_content()})
+        })
+        .collect();
     let mut body = json!({"model":r.model,"messages":messages,"max_tokens":r.max_tokens.unwrap_or(4096),"stream":true});
     if !system.is_empty() {
         body["system"] = json!(system);
@@ -138,16 +232,14 @@ fn anthropic(r: &ChatRequest) -> Result<(String, Value), ProviderError> {
     Ok(("messages".into(), body))
 }
 fn gemini(r: &ChatRequest) -> Result<(String, Value), ProviderError> {
-    let mut contents: Vec<Value> = Vec::new();
+    let mut turns = Turns::default();
     let mut systems = Vec::new();
-    let mut previous_was_tool = false;
     for m in &r.messages {
         if m.role == Role::System {
             systems.push(json!({"text":m.content}));
-            previous_was_tool = false;
             continue;
         }
-        let mut parts = Vec::new();
+        let (mut results, mut parts) = (Vec::new(), Vec::new());
         if m.role == Role::Tool {
             let call = r
                 .messages
@@ -159,8 +251,12 @@ fn gemini(r: &ChatRequest) -> Result<(String, Value), ProviderError> {
                         "Gemini tool results require a preceding matching call".into(),
                     )
                 })?;
-            parts.push(json!({"functionResponse":{"id":call.id,"name":call.name,"response":{"result":m.content}}}));
+            results.push(json!({"functionResponse":{"id":call.id,"name":call.name,"response":{"result":m.content}}}));
         } else {
+            // Inline data goes before the text that refers to it.
+            for part in &m.parts {
+                parts.push(json!({"inlineData":{"mimeType":part.mime(),"data":part.base64()}}));
+            }
             if !m.content.is_empty() {
                 parts.push(json!({"text":m.content}));
             }
@@ -189,19 +285,24 @@ fn gemini(r: &ChatRequest) -> Result<(String, Value), ProviderError> {
                 parts.push(part);
             }
         }
-        if m.role == Role::Tool && previous_was_tool {
-            contents
-                .last_mut()
-                .and_then(|v| v["parts"].as_array_mut())
-                .ok_or_else(super::protocol)?
-                .extend(parts);
-        } else {
-            contents.push(
-            json!({"role":if m.role == Role::Assistant { "model" } else { "user" },"parts":parts}),
+        turns.push(
+            if m.role == Role::Assistant {
+                "model"
+            } else {
+                "user"
+            },
+            results,
+            parts,
         );
-        }
-        previous_was_tool = m.role == Role::Tool;
     }
+    let contents: Vec<Value> = turns
+        .into_inner()
+        .into_iter()
+        .map(|turn| {
+            let role = turn.role;
+            json!({"role":role,"parts":turn.into_content()})
+        })
+        .collect();
     let mut body = json!({"contents":contents,"generationConfig":{}});
     if !systems.is_empty() {
         body["systemInstruction"] = json!({"parts":systems});

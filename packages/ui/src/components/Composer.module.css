@@ -1,4 +1,6 @@
 .composer {
+  /* Anchors the drag-over overlay. */
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--aidex-space-2);
@@ -73,4 +75,21 @@
 
 .compact .field {
   min-height: 1.6em;
+}
+
+.hint {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--aidex-space-1);
+  margin: 0;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.4;
+  cursor: default;
+}
+
+.hint svg {
+  flex: none;
+  color: var(--aidex-color-warning);
 }

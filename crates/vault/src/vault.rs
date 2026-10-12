@@ -130,7 +130,7 @@ impl Vault {
                     digest: sha256(&bytes),
                 })
             }
-            None if dir.record_blobs()?.is_empty() => Err(VaultError::NotFound),
+            None if dir.record_blobs(None)?.is_empty() => Err(VaultError::NotFound),
             None => Err(VaultError::MissingHeader),
         }
     }

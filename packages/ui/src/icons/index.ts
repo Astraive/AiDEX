@@ -33,3 +33,4 @@ export {
 export * from "./development";
 export * from "./interface";
 export * from "./system";
+export { BrandIcon, brandTitle, hasBrandIcon, monogram, type BrandIconProps, type BrandId } from "./brands/BrandIcon";

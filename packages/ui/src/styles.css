@@ -27,6 +27,8 @@ html[data-theme="light"] {
   --aidex-color-success: #08794f;
   --aidex-color-warning: #936010;
   --aidex-color-danger: #b82940;
+  --aidex-color-shadow: color-mix(in srgb, var(--aidex-color-text) 16%, transparent);
+  --aidex-brand-color-strength: 78%;
 }
 
 html[data-density="compact"] {

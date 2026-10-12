@@ -32,10 +32,7 @@ fn every_variant_has_a_unique_dotted_name_matching_its_wire_type() {
         .filter(|kind| !kind.is_durable())
         .map(EventKind::name)
         .collect();
-    assert_eq!(
-        ephemeral,
-        ["agent.delta", "agent.run_delta", "process.output"]
-    );
+    assert_eq!(ephemeral, ["agent.delta", "process.output"]);
     assert_eq!(
         EventKind::AgentSubagentCreated {
             child_session_id: id("ses_child"),
@@ -162,7 +159,8 @@ fn every_text_bearing_kind_is_redacted_before_storage_and_delivery() {
                 .next_timeout(std::time::Duration::from_secs(5))
                 .unwrap()
                 .unwrap();
-            assert_eq!(delivered, returned);
+            assert_eq!(delivered.cursor, returned.cursor);
+            assert_eq!(delivered.event.as_ref(), Some(&returned));
             let wire = serde_json::to_value(&returned).unwrap();
             assert!(leaks(&wire).is_empty(), "{} leaked {wire}", returned.name());
             if has_text {

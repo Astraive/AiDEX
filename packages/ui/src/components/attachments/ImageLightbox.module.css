@@ -1,0 +1,137 @@
+/* Fills the window; the frame lays out the toolbar, the image stage, and the caption. */
+.dialog {
+  width: 100vw;
+  max-width: 100vw;
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--aidex-color-text);
+}
+
+.dialog::backdrop {
+  background: color-mix(in srgb, var(--aidex-color-bg) 90%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.dialog[open] {
+  animation: lightbox-in var(--aidex-duration-base) var(--aidex-ease);
+}
+
+.frame {
+  display: grid;
+  /* `minmax(0, …)` keeps a zoomed image from widening the column past the window. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: var(--aidex-space-2);
+  height: 100%;
+  padding: var(--aidex-space-4);
+}
+
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--aidex-space-2);
+}
+
+.stage {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* `margin: auto` on the image centers it without hiding the start of an oversized (zoomed) image. */
+.viewport {
+  display: flex;
+  flex: 1;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--aidex-color-border) transparent;
+}
+
+.image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  border: 1px solid var(--aidex-color-border);
+  border-radius: var(--aidex-radius-md);
+  background: var(--aidex-color-surface);
+  box-shadow: 0 20px 60px var(--aidex-color-shadow);
+  object-fit: contain;
+  cursor: zoom-in;
+}
+
+.viewport[data-zoomed="true"] .image {
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  cursor: zoom-out;
+}
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  margin: auto;
+  padding: var(--aidex-space-4) var(--aidex-space-5);
+  border: 1px solid var(--aidex-color-border);
+  border-radius: var(--aidex-radius-lg);
+  background: var(--aidex-color-surface-raised);
+  color: var(--aidex-color-text-secondary);
+  font-size: var(--aidex-text-sm);
+}
+
+.spinner {
+  animation: spin 900ms linear infinite;
+}
+
+.caption {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  margin: 0;
+  color: var(--aidex-color-text-secondary);
+  font-size: var(--aidex-text-sm);
+  white-space: nowrap;
+}
+
+.captionText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.captionCount {
+  flex: none;
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .dialog[open],
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes lightbox-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -231,12 +231,15 @@ pub fn bounded_review(diff: EphemeralDiff) -> EphemeralReview {
             }
         }
     }
-    while encoded_len(&review) > limit && !review.changes.is_empty() {
+    while encoded_len(&review) > limit
+        && (!review.changes.is_empty()
+            || !review.unsupported.is_empty()
+            || !review.conflicts.is_empty())
+    {
         review.truncated = true;
-        let keep = review.changes.len() / 2;
-        review.changes.truncate(keep);
-        review.unsupported.truncate(keep);
-        review.conflicts.truncate(keep);
+        review.changes.truncate(review.changes.len() / 2);
+        review.unsupported.truncate(review.unsupported.len() / 2);
+        review.conflicts.truncate(review.conflicts.len() / 2);
     }
     review
 }
@@ -520,5 +523,93 @@ mod tests {
         assert!(review.changes.len() <= MAX_REVIEW_ENTRIES);
         assert!(serde_json::to_vec(&review).unwrap().len() < MAX_MESSAGE_BYTES);
         assert_eq!(review.digest, "d");
+    }
+
+    #[test]
+    fn reviews_with_only_unsupported_or_conflicting_paths_fit_one_response() {
+        for (with_conflicts, with_unsupported) in [(false, true), (true, false), (true, true)] {
+            let paths: Vec<_> = (0..MAX_REVIEW_ENTRIES)
+                .map(|index| {
+                    WorkspacePath::new(format!("{}file{index}", "nested/".repeat(400))).unwrap()
+                })
+                .collect();
+            let diff = EphemeralDiff {
+                workspace_id: EntityId::new("wsp_a").unwrap(),
+                source_id: EntityId::new("wsp_b").unwrap(),
+                changes: Vec::new(),
+                conflicts: if with_conflicts {
+                    paths.clone()
+                } else {
+                    Vec::new()
+                },
+                unsupported: if with_unsupported {
+                    paths
+                        .iter()
+                        .map(|path| SkippedEntry {
+                            path: path.as_str().into(),
+                            reason: aidex_workspace::SkipReason::Link,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                digest: "unchanged-full-review-digest".into(),
+            };
+            let total_conflicts = diff.conflicts.len();
+            let review = bounded_review(diff);
+            assert!(review.truncated);
+            assert!(review.changes.is_empty());
+            assert_eq!(review.total_changes, 0);
+            assert_eq!(review.total_conflicts, total_conflicts);
+            assert_eq!(review.digest, "unchanged-full-review-digest");
+            assert!(
+                serde_json::to_vec(&review).unwrap().len() <= MAX_MESSAGE_BYTES - RESPONSE_HEADROOM
+            );
+            let response = json!({"jsonrpc": "2.0", "id": "review", "result": review});
+            assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_MESSAGE_BYTES);
+        }
+    }
+
+    #[test]
+    fn trimming_continues_after_the_last_change_is_removed() {
+        let paths: Vec<_> = (0..MAX_REVIEW_ENTRIES)
+            .map(|index| {
+                WorkspacePath::new(format!("{}file{index}", "nested/".repeat(400))).unwrap()
+            })
+            .collect();
+        let diff = EphemeralDiff {
+            workspace_id: EntityId::new("wsp_a").unwrap(),
+            source_id: EntityId::new("wsp_b").unwrap(),
+            changes: vec![FileChange {
+                path: WorkspacePath::new("small.txt").unwrap(),
+                kind: aidex_workspace::ChangeKind::Modified,
+                binary: false,
+                size: Some(1),
+                sha256: Some("0".repeat(64)),
+                unified_diff: None,
+                diff_truncated: false,
+                conflict: Some(aidex_workspace::ConflictReason::SourceChanged),
+            }],
+            conflicts: paths.clone(),
+            unsupported: paths
+                .iter()
+                .map(|path| SkippedEntry {
+                    path: path.as_str().into(),
+                    reason: aidex_workspace::SkipReason::Link,
+                })
+                .collect(),
+            digest: "full-digest".into(),
+        };
+        let review = bounded_review(diff);
+        assert!(review.truncated);
+        assert!(review.changes.is_empty());
+        assert!(!review.conflicts.is_empty());
+        assert!(!review.unsupported.is_empty());
+        assert_eq!(review.total_changes, 1);
+        assert_eq!(review.total_conflicts, MAX_REVIEW_ENTRIES);
+        assert_eq!(review.digest, "full-digest");
+        assert!(
+            serde_json::to_vec(&review).unwrap().len() <= MAX_MESSAGE_BYTES - RESPONSE_HEADROOM
+        );
     }
 }

@@ -393,3 +393,116 @@ fn a_drive_workspace_redirected_through_a_link_is_refused() {
         "secret"
     );
 }
+
+#[test]
+fn a_host_root_replaced_by_a_link_is_unavailable_and_never_accessed() {
+    let drive = Drive::new();
+    let registry = drive.registry();
+    let repo = project(&[("root/original.txt", "original")]);
+    let root = repo.path().join("root");
+    let outside = project(&[("secret.txt", "secret"), (".git/HEAD", "ref")]);
+    let workspace = registry.add_host(&root, Some("redirected-host")).unwrap();
+    fs::rename(&root, repo.path().join("original")).unwrap();
+    if !common::dir_link(outside.path(), &root) {
+        return;
+    }
+
+    for current in [
+        registry.get(&workspace.id).unwrap(),
+        registry.list().unwrap().remove(0),
+        drive.registry().get(&workspace.id).unwrap(),
+    ] {
+        assert!(matches!(
+            current.availability,
+            WorkspaceAvailability::Unavailable { .. }
+        ));
+        assert!(current.repository.is_none());
+    }
+    assert!(matches!(
+        registry.confined_root(&workspace.id),
+        Err(WorkspaceError::RootUnavailable { .. })
+    ));
+    assert!(matches!(
+        registry.handle(&workspace.id),
+        Err(WorkspaceError::RootUnavailable { .. })
+    ));
+    assert!(matches!(
+        registry.create_ephemeral(&workspace.id),
+        Err(WorkspaceError::RootUnavailable { .. })
+    ));
+    assert_eq!(
+        fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+        "secret"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("original/original.txt")).unwrap(),
+        "original"
+    );
+}
+
+#[test]
+fn host_roots_cannot_contain_or_be_inside_any_managed_directory() {
+    let drive = Drive::new();
+    let paths = drive.paths();
+    let registry = drive.registry();
+    for (_, relative) in paths.layout().entries() {
+        let managed = relative.resolve_under(paths.root());
+        let child = managed.join("nested");
+        fs::create_dir_all(&child).unwrap();
+        for forbidden in [
+            managed.clone(),
+            child,
+            managed.parent().unwrap().to_path_buf(),
+        ] {
+            assert!(
+                matches!(
+                    registry.add_host(&forbidden, Some("forbidden")),
+                    Err(WorkspaceError::Forbidden(_))
+                ),
+                "{}",
+                forbidden.display()
+            );
+        }
+    }
+    for allowed in ["private/projects/mine", "models-neighbor", "projects/mine"] {
+        let root = paths.root().join(allowed);
+        fs::create_dir_all(&root).unwrap();
+        registry
+            .add_host(&root, Some(allowed.replace('/', "-").as_str()))
+            .unwrap();
+    }
+}
+
+#[test]
+fn host_overlap_checks_use_custom_layouts_and_repeat_when_resolving_roots() {
+    let drive = Drive::new();
+    let registry = drive.registry();
+    let root = drive.paths().root().join("projects/mine");
+    fs::create_dir_all(&root).unwrap();
+    let workspace = registry.add_host(&root, Some("project")).unwrap();
+    let layout = aidex_drive::DriveLayout {
+        private_vault: aidex_drive::RelativePath::new("projects/mine/state/vault").unwrap(),
+        ..aidex_drive::DriveLayout::default()
+    };
+    let paths = DrivePaths::from_layout(drive.paths().root().to_path_buf(), layout);
+    // Refuse containing roots even before the managed child is created.
+    let relocated = WorkspaceRegistry::open(&paths).unwrap();
+    assert!(matches!(
+        relocated.handle(&workspace.id),
+        Err(WorkspaceError::Forbidden(_))
+    ));
+    assert!(matches!(
+        relocated.create_ephemeral(&workspace.id),
+        Err(WorkspaceError::Forbidden(_))
+    ));
+    fs::create_dir_all(paths.vault()).unwrap();
+    for forbidden in [root.clone(), root.join("state"), paths.vault()] {
+        assert!(matches!(
+            relocated.add_host(&forbidden, Some("forbidden")),
+            Err(WorkspaceError::Forbidden(_))
+        ));
+    }
+    let sibling = root.join("other-project");
+    fs::create_dir_all(&sibling).unwrap();
+    assert!(relocated.add_host(&sibling, Some("sibling")).is_ok());
+}

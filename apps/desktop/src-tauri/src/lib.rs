@@ -5,6 +5,7 @@ mod bridge;
 mod commands;
 mod error;
 mod lifecycle;
+mod navigation;
 mod state;
 
 pub use app::run;

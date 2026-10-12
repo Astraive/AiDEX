@@ -33,7 +33,7 @@ export function LocalInferenceNotice({
           {status.state === "starting"
             ? "Preparing local chat from this drive. You can send a message when loading finishes."
             : (status.startup_error ??
-              "Check the local model and runtime in Models and accounts, then retry.")}
+              "Check the local model and runtime in Local models, then retry.")}
         </Text>
         {error && <Text>{error}</Text>}
         {status.state === "failed" && (
@@ -48,7 +48,7 @@ export function LocalInferenceNotice({
                   .then(async () => {
                     if (!status.model_id)
                       throw new Error(
-                        "Choose an installed model in Models and accounts to start local chat.",
+                        "Choose an installed model in Local models to start local chat.",
                       );
                     const start = call("inference.start", {
                       model_id: status.model_id,
@@ -70,9 +70,9 @@ export function LocalInferenceNotice({
             </Button>
             <Button
               variant="ghost"
-              onClick={() => navigate({ page: "models" })}
+              onClick={() => navigate({ page: "models", tab: "local" })}
             >
-              Models and accounts
+              Local models
             </Button>
           </Stack>
         )}

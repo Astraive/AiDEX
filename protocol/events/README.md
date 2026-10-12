@@ -19,7 +19,8 @@ document describes their JSON form. Events are served by the daemon as
   (`UnsupportedVersion`). Version 1 was PR #40's per-workspace `Event` record.
 - `cursor` is the drive's single, strictly increasing position: durable events get
   consecutive cursors from 1, and a failed append assigns none. Acknowledge the
-  cursor of the last event you processed and resume strictly after it.
+  last durable event you processed or an ordered consumed watermark, then resume
+  strictly after it with the same filter.
 - `scope` names the workspace and/or session; both are omitted for drive-wide
   events. A session scope always names its workspace.
 - `occurred_at` is wall-clock time (RFC 3339 UTC). Order by `cursor`, not time.
@@ -39,6 +40,18 @@ exactly (drive-wide events do not match a workspace filter). Kind prefixes match
 whole dotted segments: `tool` matches `tool.requested`, `agent.subagent` matches
 `agent.subagent.created`, an exact name matches itself. A prefix that matches no
 catalog name is rejected. At most 32 prefixes.
+
+Filtered subscriptions also send `events.watermark` notifications with
+`data: {"cursor": N}`. Every durable event through `N` was either sent in a
+preceding `events.event` notification or excluded by this subscription's filter.
+Process all preceding events before acknowledging the watermark. It never
+overtakes a queued matching event, including during history paging or overflow
+catch-up; multiple filtered-out events may share one coalesced watermark. This
+keeps a current filtered consumer's reconnect cursor current even when retention
+removes old nonmatches. Watermarks are not envelopes, do not print as events, and
+are only sent on durable progress, not as periodic heartbeats. Neither an
+ephemeral envelope's cursor nor the subscribe result's `latest_cursor` alone
+acknowledges durable progress.
 
 ## Retention and cursors
 
@@ -77,8 +90,6 @@ durable unless marked *ephemeral*.
 | `agent.started` | `agent_id: id`, `model: id?` |
 | `agent.message` | `role: user\|assistant\|system\|tool`, `content: text` |
 | `agent.delta` (*ephemeral*) | `text: text` |
-| `agent.run_delta` (*ephemeral*) | `agent_id: id`, `text: text` |
-| `agent.child_spawned` | `agent_id: id`, `parent_agent_id: id`, `role: text` |
 | `agent.subagent.created` | `child_session_id: id`, `role: text` |
 | `agent.error` | `code: text`, `message: text` |
 | `agent.retry` | `attempt: u32`, `reason: text` |
@@ -108,7 +119,6 @@ durable unless marked *ephemeral*.
 | `workspace.ephemeral_created` | `workspace_id: id`, `source_workspace_id: id` |
 | `workspace.ephemeral_applied` | `workspace_id: id`, `files_changed: u64` |
 | `vault.unlocked` / `locked` | `vault_id: id` |
-| `secret.stored` / `deleted` | `secret_ref: {vault_id: id, secret_id: id}`; no name or value |
 | `secret.granted` | `handle_id: id`, `secret_name: text`, `consumer: id` (never the value) |
 | `secret.revoked` | `handle_id: id`, `reason: text?` |
 | `sandbox.negotiated` | `level: sandbox level`, `enforced: bool` |
@@ -122,6 +132,8 @@ durable unless marked *ephemeral*.
 | `remote.disconnected` | `device_id: id`, `reason: text?` |
 | `daemon.started` | `pid: u32`, `version: text` |
 | `daemon.stopping` | `reason: requested\|drive_removed` |
+| `emergency.stopped` | `reason: text`, `cancelled_approvals: u64`, `revoked_approvals: u64`, `terminated_processes: u64`, `revoked_handles: u64` |
+| `emergency.resumed` | — |
 | `extension.enabled` / `disabled` | `extension_id: id`, `kind: skill\|mcp\|plugin\|agent` |
 | `update.staged` | `update_id: id`, `version: text`, `target: text` |
 | `update.verified` | `update_id: id`, `version: text`, `signer_key_id: text?` (`null` only for an unsigned bundle accepted by the development opt-in), `unsigned_allowed: bool` |

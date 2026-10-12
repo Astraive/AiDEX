@@ -42,13 +42,6 @@ impl NativeEngine {
         if !descriptor.risk.is_read_only() {
             return Err("desktop inspection accepts read-only tools only".into());
         }
-        if descriptor
-            .capabilities
-            .iter()
-            .any(|tag| tag == "permissions:full_access")
-        {
-            return Err("inspection cannot authorize a full_access extension tool".into());
-        }
         let plan = self
             .broker
             .tools
@@ -63,8 +56,6 @@ impl NativeEngine {
                 .join("inspection-processes"),
             plan.fingerprint(),
             aidex_sandbox::SandboxLevel::Brokered,
-            context.events.clone(),
-            context.scope(),
         ));
         let context = context.with_launcher(launcher);
         let output = self

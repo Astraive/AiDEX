@@ -8,7 +8,7 @@ AiDEX is a portable AI development environment: its agent workflows, tools, mode
 - `apps/desktop` — Tauri desktop client. Its Rust bridge talks to `aidexd` (drive resolution, daemon start/stop, a generic RPC proxy, and event subscriptions); launch, vault unlock, Home status, diagnostics, drive, and sandbox screens are live, and the remaining screens are labelled sample data.
 - `apps/installer` — Tauri drive setup: lists real volumes (removable drives and USB SSDs only; never the system drive) and initializes the AiDEX drive layout. Copying the app bundle, models, and agents is not available yet.
 - `apps/mobile` — reserved future client; not implemented yet.
-- `crates/` — active Rust workspace for the CLI, host, portable paths, sessions, storage, events, workspaces, repository context (index, search, rules, memory), and daemon foundations.
+- `crates/` — active Rust workspace for the CLI, host, portable paths, sessions, storage, events, workspaces, vault, policy, tools, sandbox, the execution broker and approvals, model providers, repository context (index, search, rules, memory), and daemon foundations.
 - `packages/` — shared frontend packages; `packages/ui` (`@aidex/ui`) provides the design tokens and components the app screens are built from, and `packages/client` (`@aidex/client`) the typed client for the Tauri bridges and daemon RPC.
 - `protocol/` — reserved versioned API-contract boundary; no generated client exists yet.
 - `integrations/` — reserved metadata and definitions for adapters, MCP, skills, plugins, and providers.

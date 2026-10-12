@@ -25,9 +25,16 @@ let envelope: EventEnvelope = log.append(EventScope::global(), EventKind::DriveS
 let page: ReplayPage = log.replay(&EventFilter::for_workspace(ws).with_kind("tool"), Cursor::ZERO, 256)?;
 // page.events, page.next_cursor (resume after this), page.has_more
 
-// Subscribe: history first (paged from disk), then live events, in cursor order.
+// Subscribe: history first, then live events and consumed durable watermarks.
 let mut subscription = log.subscribe(EventFilter::all(), last_acknowledged)?;
-while let Some(envelope) = subscription.next_timeout(Duration::from_secs(1))? { /* ... */ }
+while let Some(item) = subscription.next_timeout(Duration::from_secs(1))? {
+    if let Some(envelope) = item.event {
+        process_event(&envelope)?;
+        if envelope.is_durable() { last_acknowledged = envelope.cursor; }
+    } else {
+        last_acknowledged = item.cursor;
+    }
+}
 
 log.latest_cursor()?; log.oldest_cursor()?; log.prune()?;
 log.import_legacy(&old_pr40_file)?; // read-only, once, only into an empty log
@@ -45,7 +52,8 @@ Key types: `EventKind` (catalog; `name()`, `domain()`, `is_durable()`), `EventEn
 first), `Cursor(u64)` (`Cursor::ZERO`), `EventScope { workspace_id, session_id }`
 (`global()`, `workspace(..)`, `session(ws, ses)`), `EventFilter { workspace_id,
 session_id, kinds }`, `RetentionPolicy { max_events, max_age }`, `ReplayPage`,
-`Subscription`, `EventSink`, `EventError` (with `code() -> ServiceErrorCode`),
+`Subscription`, `SubscriptionItem { event: Option<EventEnvelope>, cursor }`, `EventSink`,
+`EventError` (with `code() -> ServiceErrorCode`),
 `LegacyImport`. Small payload enums: `Outcome`, `MessageRole`, `RiskLevel`,
 `ApprovalScope`, `Verdict`, `ProcessStream`, `FileChange`, `SandboxLevel`,
 `WorkspaceKind`, `DaemonStopReason`, `ExtensionKind`, `LegacyRecord`,
@@ -61,16 +69,28 @@ session_id, kinds }`, `RetentionPolicy { max_events, max_age }`, `ReplayPage`,
   subscribing after a cursor whose successors were removed fails with
   `CursorExpired { requested, oldest_available }`; a cursor the log never assigned
   fails with `CursorAhead`.
+  Age retention stops at the first fresh retained event, even when wall-clock
+  timestamps run backwards; expired events after it remain until the leading
+  history expires or count retention removes it.
 - **Replay exactness.** `replay(filter, after, limit)` returns matching events with
   cursor `> after` in cursor order. `next_cursor` is where to resume; without
   `has_more` it is the latest cursor, so filtered readers skip ahead.
 - **Subscriptions.** A subscription is registered at a live-from cursor under the
   log lock: durable history up to it is paged from disk, everything after it is
   offered to a bounded live queue (default 1024 events, at most 4 MiB). Delivery is
-  in cursor order without duplicates or gaps. Publishers never block: a full queue
-  marks the subscriber lagged and drops its queue; the subscriber then catches up
-  from disk after the last cursor it delivered and rejoins. Dropping a subscription
-  unregisters it.
+  in cursor order without duplicates or gaps. An item with `Some(event)` carries
+  `event.cursor`; process it before acknowledging its durable cursor, never an
+  ephemeral cursor. An item with `event: None` is a consumed watermark: every
+  durable event through `item.cursor` was delivered earlier or filtered out;
+  acknowledge it only after processing preceding items. Watermarks never
+  overtake queued matching events, are coalesced in constant space for nonmatches,
+  and are progress notifications, not periodic heartbeats. Publishers never block:
+  a full event queue marks the subscriber lagged and drops its queue; the subscriber
+  then catches up from disk after the last consumed cursor and rejoins. A successful
+  legacy import also sends existing subscribers through disk catch-up before later
+  live events, without increasing `Subscription::lag_count()` (which counts live
+  queue overflows). If import retention removed unseen history, they report
+  `CursorExpired` rather than skipping it. Dropping a subscription unregisters it.
 - **Ephemeral events** (`agent.delta`, `process.output`) are never stored and take
   no cursor; their envelope carries the latest durable cursor. They reach live
   subscribers only, and are lost while a subscriber lags.
@@ -80,16 +100,24 @@ session_id, kinds }`, `RetentionPolicy { max_events, max_age }`, `ReplayPage`,
   like a credential refuses the event (`SensitiveIdentifier`), since rewriting it
   would change what it names. Encoded events are limited to 256 KiB. `Debug` of an
   `EventKind` shows only redacted data.
+  `NullEventSink` enforces the encoded-envelope limit conservatively by reserving
+  space for the largest possible `u64` cursor, while still returning `Cursor::ZERO`.
+  Oversized aggregate payloads fail before success is reported, even if their
+  envelope would fit with a smaller cursor.
 - **Closed, versioned wire format.** Unknown event types, unknown payload fields,
   and unknown envelope versions are rejected. Envelope version 2 (PR #40's `Event`
   record was version 1).
 - **Schema safety.** A `schema_version` table records schema 2; newer or unknown
-  schemas and non-event databases are refused untouched. PR #40's
+  schemas and non-event databases are refused untouched, before enabling WAL.
+  PR #40's
   `events(workspace_id, sequence, session_id, body)` table is migrated in place in
   one transaction (rows imported in their original write order, then the old table
   is dropped); a corrupt row fails the migration and leaves the database unchanged.
   `import_legacy` imports a separate PR #40 file read-only, once (recorded in
-  `event_migrations`), and only into an empty log. Symlinked database paths
+  `event_migrations`), and only into an empty log. Already-imported or nonempty
+  targets skip without opening or reading the legacy file. Import retention and
+  its cursor boundary are committed with the imported rows, so the configured
+  bound applies immediately. Symlinked database paths
   (including `-wal`/`-shm`/`-journal` sidecars) are refused.
 
 ## Migration of PR #40 records
@@ -114,6 +142,8 @@ time as `occurred_at` (v1 had no timestamps).
   `password`, `token`, `secret`, `key`). It errs toward redacting but cannot
   recognise arbitrary secrets; producers must still keep secret values out of
   events and reference secrets by handle.
+  Authorization-header redaction accepts horizontal spaces/tabs and HTTP-token
+  authentication schemes, including schemes such as `Api-Key`.
 - The log is not encrypted at rest (spec §94 asks for encrypted audit history; that
   needs the vault and drive encryption).
 - `occurred_at` is wall-clock time; ordering is defined by cursor only.

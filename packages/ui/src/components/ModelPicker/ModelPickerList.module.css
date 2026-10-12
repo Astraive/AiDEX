@@ -1,0 +1,174 @@
+.list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--aidex-space-1) var(--aidex-space-1) var(--aidex-space-2);
+  scroll-padding-block: var(--aidex-space-1);
+}
+
+.listEmpty {
+  flex: none;
+  padding: 0;
+}
+
+.empty {
+  margin: 0;
+  padding: var(--aidex-space-4) var(--aidex-space-3);
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-sm);
+  line-height: 1.5;
+  text-align: center;
+}
+
+.option {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+  min-height: 48px;
+  padding: var(--aidex-space-1) var(--aidex-space-1) var(--aidex-space-1) var(--aidex-space-2);
+  border-radius: var(--aidex-radius-sm);
+  color: var(--aidex-color-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.selected {
+  background: color-mix(in srgb, var(--aidex-color-text) 5%, transparent);
+}
+
+/* The active option is the keyboard focus target (aria-activedescendant), so it gets a visible ring. */
+.active {
+  background: var(--aidex-color-surface-hover);
+  box-shadow: inset 0 0 0 1px var(--aidex-color-accent-subtle-border);
+}
+
+.selected.active {
+  background: var(--aidex-color-surface-strong);
+}
+
+.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.nameLine {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--aidex-text-sm);
+  font-weight: 500;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex: none;
+}
+
+.detailLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--aidex-color-text-muted);
+}
+
+.detailIcon {
+  flex: none;
+}
+
+.detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trailing {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--aidex-space-1);
+}
+
+.check {
+  color: var(--aidex-color-accent);
+}
+
+.trailing .jump {
+  min-height: 20px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.star {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--aidex-radius-sm);
+  background: transparent;
+  color: var(--aidex-color-text-muted);
+  cursor: pointer;
+  transition:
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.star:hover:not(:disabled) {
+  background: var(--aidex-color-surface-stronger);
+  color: var(--aidex-color-text);
+}
+
+.star:disabled {
+  cursor: not-allowed;
+}
+
+/* Favorites use the filled glyph, so the state is not color alone. */
+.starred,
+.starred:hover:not(:disabled) {
+  color: var(--aidex-color-warning);
+}
+
+.legacy .detail {
+  margin-top: 0;
+}
+
+.chevron {
+  flex: none;
+  margin-right: var(--aidex-space-1);
+  color: var(--aidex-color-text-muted);
+  transition: transform var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.expanded {
+  transform: rotate(90deg);
+}

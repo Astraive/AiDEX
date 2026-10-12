@@ -48,13 +48,10 @@ dependencies = [
  "aidex-events",
  "aidex-native-sessions",
  "aidex-providers",
- "aidex-runtime-bridge",
  "aidex-sandbox",
  "aidex-vault",
- "base64 0.22.1",
  "chacha20poly1305",
  "getrandom 0.3.4",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -81,6 +78,28 @@ dependencies = [
  "url",
  "winreg",
  "zeroize",
+]
+
+[[package]]
+name = "aidex-broker"
+version = "0.1.0"
+dependencies = [
+ "aidex-broker",
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "aidex-policy",
+ "aidex-providers",
+ "aidex-sandbox",
+ "aidex-tools",
+ "aidex-vault",
+ "aidex-workspace",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -115,6 +134,7 @@ dependencies = [
  "aidex-providers",
  "aidex-router",
  "aidex-sessions",
+ "aidex-skills",
  "aidex-updater",
  "aidex-vault",
  "aidex-workspace",
@@ -178,26 +198,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aidex-extensions"
-version = "0.1.0"
-dependencies = [
- "aidex-core",
- "aidex-drive",
- "aidex-events",
- "aidex-policy",
- "aidex-sandbox",
- "aidex-tools",
- "aidex-vault",
- "aidex-workspace",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "ureq",
- "zeroize",
-]
-
-[[package]]
 name = "aidex-harness"
 version = "0.1.0"
 dependencies = [
@@ -207,7 +207,6 @@ dependencies = [
  "aidex-native-sessions",
  "aidex-policy",
  "aidex-providers",
- "aidex-runtime-bridge",
  "aidex-sandbox",
  "aidex-tools",
  "aidex-vault",
@@ -216,6 +215,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -260,14 +260,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aidex-mcp"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "aidex-sandbox",
+ "aidex-vault",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
 name = "aidex-native-sessions"
 version = "0.1.0"
 dependencies = [
  "aidex-core",
  "aidex-providers",
- "aidex-runtime-bridge",
  "aidex-vault",
  "chacha20poly1305",
+ "flate2",
  "getrandom 0.3.4",
  "rusqlite",
  "serde",
@@ -290,6 +307,23 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "aidex-plugins"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "flate2",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+ "zip 7.2.0",
 ]
 
 [[package]]
@@ -323,6 +357,7 @@ version = "0.1.0"
 dependencies = [
  "aidex-core",
  "aidex-drive",
+ "base64 0.22.1",
  "crc32fast",
  "getrandom 0.3.4",
  "hmac",
@@ -343,18 +378,6 @@ dependencies = [
  "aidex-providers",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "aidex-runtime-bridge"
-version = "0.1.0"
-dependencies = [
- "aidex-core",
- "getrandom 0.3.4",
- "serde",
- "serde_json",
- "sha2",
- "zeroize",
 ]
 
 [[package]]
@@ -386,6 +409,19 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "aidex-skills"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -461,16 +497,13 @@ version = "0.1.0"
 dependencies = [
  "aidex-core",
  "aidex-drive",
- "aidex-events",
- "aidex-policy",
- "aidex-tools",
- "aidex-vault",
- "aidex-workspace",
- "reqwest",
- "schemars",
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "tempfile",
+ "toml",
+ "ureq",
+ "url",
  "zeroize",
 ]
 
@@ -495,31 +528,38 @@ version = "0.1.0"
 dependencies = [
  "aidex-adapters",
  "aidex-auth",
+ "aidex-broker",
  "aidex-bundle",
  "aidex-context",
  "aidex-core",
  "aidex-drive",
  "aidex-events",
- "aidex-extensions",
  "aidex-harness",
  "aidex-host",
  "aidex-inference",
+ "aidex-mcp",
  "aidex-native-sessions",
+ "aidex-plugins",
+ "aidex-policy",
  "aidex-preferences",
  "aidex-providers",
  "aidex-router",
  "aidex-sandbox",
  "aidex-sessions",
+ "aidex-skills",
  "aidex-tools",
  "aidex-updater",
  "aidex-vault",
  "aidex-web",
  "aidex-workspace",
+ "base64 0.22.1",
  "getrandom 0.3.4",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

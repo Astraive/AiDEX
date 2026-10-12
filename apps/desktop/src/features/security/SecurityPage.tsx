@@ -1,14 +1,15 @@
-import { useEffect } from "react";
+import { useState } from "react";
 import { PageHeader } from "@aidex/ui/components";
 import { PageFrame } from "@aidex/ui/desktop";
 import { StatusIndicator, TabPanel, Tabs } from "@aidex/ui/primitives";
 import { useNavigation } from "../../app/providers/navigation";
 import { tabOf } from "../../lib/routes";
-import { LiveApprovalsPanel } from "../approvals/LiveApprovalsPanel";
-import { useRpc } from "../../hooks/useRpc";
+import { ApprovalsPanel } from "../approvals/ApprovalsPanel";
+import { useApprovals } from "../approvals/useApprovals";
 import { OverviewPanel } from "./OverviewPanel";
 import { SandboxPanel } from "./SandboxPanel";
 import { VaultPanel } from "./VaultPanel";
+import type { IsolationLevel } from "./sample";
 import { securityTabs, type SecurityTab } from "./tabs";
 
 const TABS_ID = "security-tabs";
@@ -18,22 +19,14 @@ export function SecurityPage() {
   const { route, replace } = useNavigation();
   const tab = tabOf(route, "security");
   // Shared across tabs so the dashboard and tab count reflect decisions and isolation changes.
-  const approvals = useRpc("approval.list", {
-    status: "pending",
-    offset: 0,
-    limit: 1,
-  });
-  useEffect(() => {
-    const timer = setInterval(approvals.refetch, 2000);
-    return () => clearInterval(timer);
-  }, [approvals.refetch]);
-  const pendingCount = approvals.data?.total_approvals ?? null;
+  const approvals = useApprovals();
+  const [isolation, setIsolation] = useState<IsolationLevel>("brokered");
 
   const tabItems = securityTabs.map(({ value, label, Icon }) => ({
     value,
     label,
     icon: <Icon />,
-    count: value === "approvals" ? (pendingCount ?? undefined) : undefined,
+    count: value === "approvals" ? approvals.pending.length : undefined,
   }));
 
   return (
@@ -41,12 +34,7 @@ export function SecurityPage() {
       <PageHeader
         title="Security"
         description="Policies, secrets, and approvals that govern what agents can do."
-        meta={
-          <StatusIndicator
-            tone="neutral"
-            label="Live vault metadata, broker approvals, host capabilities, and recorded audit"
-          />
-        }
+        meta={<StatusIndicator tone="neutral" label="Sandbox capabilities are live; policy, vault, audit, and approvals are sample data" />}
       />
       <Tabs
         id={TABS_ID}
@@ -57,14 +45,10 @@ export function SecurityPage() {
         onValueChange={(next: SecurityTab) => replace({ ...route, tab: next })}
       />
       <TabPanel tabsId={TABS_ID} value={tab}>
-        {tab === "overview" ? (
-          <OverviewPanel pendingCount={pendingCount} />
-        ) : null}
+        {tab === "overview" ? <OverviewPanel pendingCount={approvals.pending.length} isolation={isolation} /> : null}
         {tab === "vault" ? <VaultPanel /> : null}
-        {tab === "sandbox" ? <SandboxPanel /> : null}
-        {tab === "approvals" ? (
-          <LiveApprovalsPanel onChanged={approvals.refetch} />
-        ) : null}
+        {tab === "sandbox" ? <SandboxPanel isolation={isolation} onIsolationChange={setIsolation} /> : null}
+        {tab === "approvals" ? <ApprovalsPanel {...approvals} /> : null}
       </TabPanel>
     </PageFrame>
   );

@@ -53,7 +53,8 @@ let locked = vault.lock();                                   // keys zeroized, h
 Option<_>, new)`, `issue_handle`, `resolve`, `revoke_handle`, `revoke_all_handles`,
 `backup_to`, `set_kdf_params`, `set_idle_timeout`. It locks itself after 30 minutes
 without secret operations (configurable), re-reads the disk while locked (so damage or
-an external restore is reported), and drops its session on a `Conflict`.
+an external restore is reported), and drops its session on a `Conflict` or an
+ambiguous post-rename commit to its own header.
 
 Types:
 
@@ -75,9 +76,19 @@ Types:
   grep of the vault directory finds none of them (tested).
 - Wrong passphrase, tampered/truncated/missing/swapped files, unknown versions, and
   links are explicit errors; nothing falls back to plaintext or to an empty vault.
-- An interrupted write leaves the previous committed state readable; stray temp files
-  and orphaned records are ignored and cleaned up.
+- A failure before header rename leaves the previous committed state readable.
+  A directory-sync failure after rename returns `CommitUncertain`: direct callers
+  reconcile the visible header/index and revoke handles; the service invalidates
+  its session. Ordinary pre-rename errors and backup-destination errors do not
+  invalidate unchanged source sessions. Newly referenced records are preserved.
 - No API returns a secret value except handle resolution for an allowed consumer.
+- Revoked and expired handles are pruned before capacity checks, so revocation
+  immediately makes room for replacements without extending an old handle's life.
+- Unauthenticated KDF parameters are capped at 64 MiB, three Argon2id iterations,
+  and four lanes. Headers above that budget are rejected before key derivation,
+  including vaults created with previously accepted oversized parameters.
+- Restore accepts at most 4096 well-named record files and rejects excess records
+  before collecting references or copying files into the destination.
 
 ## Limitations
 

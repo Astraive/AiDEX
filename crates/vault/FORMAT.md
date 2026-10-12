@@ -6,7 +6,9 @@
 > pre-release until that review is complete (issue #13 acceptance criterion).
 
 This document is normative for `aidex-vault` format version 1. Any change to a byte
-layout, label, or validation rule requires a new format version.
+layout, label, or cryptographic validation rule requires a new format version.
+Operational resource-admission budgets may tighten without changing the byte format;
+an otherwise well-formed header exceeding the current KDF budget is refused.
 
 ## Directory layout
 
@@ -164,8 +166,11 @@ across replacements while `revision` and `blob` change on every write.
 3. `format` must be `aidex-vault`; an unknown `format_version` is
    `UnsupportedVersion` and is checked before strict parsing.
 4. Strict structural parsing (`CorruptHeader`): one passphrase slot with Argon2id
-   parameters inside the accepted bounds (m ≤ 1 GiB, t ≤ 64, p ≤ 16, m ≥ 8·p KiB),
-   at most one HKDF recovery slot, exact salt/nonce/key/MAC lengths.
+   parameters inside the accepted bounds (8·p KiB ≤ m ≤ 64 MiB, 1 ≤ t ≤ 3,
+   1 ≤ p ≤ 4), at most one HKDF recovery slot, exact salt/nonce/key/MAC lengths.
+   These unauthenticated limits cap one unlock at the default memory/work budget;
+   headers above them are refused before deriving a key, even if an older version
+   accepted their parameters.
 
 `unlock`:
 
@@ -197,6 +202,13 @@ Every file write is: write a new `.<name>.<random>.tmp` in the same directory
 - **conflict detection**: before each commit the on-disk header is re-read and must
   match the SHA-256 of the state this session loaded or wrote; otherwise the write
   fails with `Conflict` and the daemon drops the session (unlock again).
+- **ambiguous header commit**: a directory-sync failure after successful header
+  rename returns `CommitUncertain` with the original I/O cause (`kind() == Io`,
+  service code `Unavailable`). Direct callers reconcile the visible header and
+  index and revoke handles; `VaultService` drops the session when its own header
+  is affected, requiring fresh unlock before metadata or values can be read.
+  Newly referenced records are preserved. Ordinary pre-rename I/O errors retain
+  the old session; an uncertain backup commit does not invalidate its source.
 
 Durability limits: Windows provides no directory flush through the Rust standard
 library, and FAT/exFAT (common on removable drives) do not journal metadata, so a
@@ -244,6 +256,8 @@ a new passphrase without the old one (`reset_passphrase`).
   the header and all well-formed record files, compares them byte-for-byte, and
   returns the restored vault locked. Cryptographic verification needs a credential:
   unlock it and call `UnlockedVault::verify()`.
+  Enumeration rejects more than 4096 well-named records before constructing the
+  reference collection or copying any record, bounding damaged-backup restores.
 - A backup is protected exactly like the live vault: the same passphrase and the
   same recovery key unlock it, and changing the passphrase later does not change
   the backup's slot (the old passphrase keeps opening the old backup).
@@ -267,6 +281,10 @@ current policy still allows the consumer. Handles exist only in the memory of on
 unlock session: lock, idle auto-lock, daemon restart, and `revoke_all_handles`
 invalidate them. Handle issuance and resolution are Rust APIs for the broker; they
 are not exposed over IPC.
+
+Issuance prunes revoked and expired entries before enforcing the 4096-handle
+registry limit. Revocation immediately frees capacity; a pruned handle is denied
+as unknown rather than remaining retained until its former expiry.
 
 ## In-memory handling
 

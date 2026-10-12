@@ -185,10 +185,22 @@ fn check(
             available,
         });
     }
-    if !explicit && model.source == CapabilitySource::Assumed {
+    if !explicit && source_rank(model.source).is_none() {
         return Err(RejectReason::UnverifiedCapabilities);
     }
     Ok(())
+}
+
+/// Preference among metadata sources: declared limits first, then limits the
+/// provider reported, then the conservative known-family catalog. Assumed
+/// limits (`None`) are only usable when the user names the model.
+fn source_rank(source: CapabilitySource) -> Option<u8> {
+    match source {
+        CapabilitySource::Configured => Some(0),
+        CapabilitySource::Discovered => Some(1),
+        CapabilitySource::Catalog => Some(2),
+        CapabilitySource::Assumed => None,
+    }
 }
 
 fn locality_rank(privacy: PrivacyMode, locality: Locality) -> u8 {
@@ -222,7 +234,7 @@ fn compare(request: &RouteRequest, a: &ModelDescriptor, b: &ModelDescriptor) -> 
             u8::from(
                 request.needs_tools && model.capabilities.tool_calls != ToolCallSupport::Native,
             ),
-            model.source,
+            source_rank(model.source).unwrap_or(u8::MAX),
         )
     };
     key(a).cmp(&key(b)).then_with(|| a.model.cmp(&b.model))

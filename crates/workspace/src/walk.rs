@@ -88,6 +88,45 @@ fn matcher(root: &Path, file: &Path) -> Option<Arc<Gitignore>> {
     builder.build().ok().map(Arc::new)
 }
 
+/// Resolve Git's metadata directory, including separate git dirs and the shared
+/// directory used by linked worktrees. Relative paths in each metadata file are
+/// relative to that file's containing directory, not the selected source root.
+fn git_common_dir(repository: &Path) -> Option<PathBuf> {
+    let git = repository.join(".git");
+    let metadata = fs::symlink_metadata(&git).ok()?;
+    let git = if metadata.is_dir() {
+        git
+    } else if metadata.is_file() {
+        let contents = fs::read_to_string(&git).ok()?;
+        let target = contents.strip_prefix("gitdir:")?.trim();
+        if target.is_empty() || target.contains(['\r', '\n']) {
+            return None;
+        }
+        repository.join(target)
+    } else {
+        return None;
+    };
+    if !fs::symlink_metadata(&git).is_ok_and(|metadata| metadata.is_dir()) {
+        return None;
+    }
+    let commondir = git.join("commondir");
+    match fs::symlink_metadata(&commondir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(git),
+        Ok(metadata) if metadata.is_file() => {
+            let contents = fs::read_to_string(commondir).ok()?;
+            let target = contents.trim();
+            if target.is_empty() || target.contains(['\r', '\n']) {
+                return None;
+            }
+            let common = git.join(target);
+            fs::symlink_metadata(&common)
+                .is_ok_and(|metadata| metadata.is_dir())
+                .then_some(common)
+        }
+        _ => None,
+    }
+}
+
 /// Ignore matchers that apply to `root` from above it: the enclosing repository's
 /// `info/exclude` and every `.gitignore` between the repository root and `root`.
 pub(crate) fn inherited_matchers(root: &Path) -> Vec<Arc<Gitignore>> {
@@ -95,8 +134,7 @@ pub(crate) fn inherited_matchers(root: &Path) -> Vec<Arc<Gitignore>> {
         return Vec::new();
     };
     let mut matchers = Vec::new();
-    let git = repository.join(".git");
-    if fs::symlink_metadata(&git).is_ok_and(|metadata| metadata.is_dir()) {
+    if let Some(git) = git_common_dir(&repository) {
         matchers.extend(matcher(&repository, &git.join("info").join("exclude")));
     }
     let mut between: Vec<&Path> = root

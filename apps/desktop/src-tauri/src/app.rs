@@ -10,6 +10,8 @@ pub fn run() {
     let state = Arc::new(AppState::default());
     let app = tauri::Builder::default()
         .manage(Arc::clone(&state))
+        // The window stays on the app's pages, e.g. when a file is dropped outside a drop target.
+        .plugin(crate::navigation::plugin())
         .invoke_handler(tauri::generate_handler![
             commands::aidex_status,
             commands::drive_status,

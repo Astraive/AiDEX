@@ -1,0 +1,106 @@
+/* Wraps the actions under the details when the card is narrow. */
+.card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+  padding: var(--aidex-space-3);
+  border: 1px solid var(--aidex-color-border-subtle);
+  border-radius: var(--aidex-radius-lg);
+  background: var(--aidex-color-surface);
+}
+
+.media {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--aidex-color-border);
+  border-radius: var(--aidex-radius-md);
+  background: var(--aidex-color-surface-raised);
+  color: var(--aidex-color-text-secondary);
+}
+
+.media svg {
+  width: 20px;
+  height: 20px;
+}
+
+.main {
+  display: flex;
+  flex: 1 1 160px;
+  flex-direction: column;
+  gap: var(--aidex-space-1);
+  min-width: 0;
+}
+
+.name {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  color: var(--aidex-color-text);
+  font-size: var(--aidex-text-sm);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.nameText,
+.nameButton {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nameButton {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-weight: inherit;
+  line-height: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nameButton:hover {
+  color: var(--aidex-color-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--aidex-space-1) var(--aidex-space-2);
+  min-width: 0;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: 1.4;
+}
+
+.fact {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.separator {
+  flex: none;
+}
+
+.actions {
+  display: inline-flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--aidex-space-1);
+  margin-left: auto;
+}

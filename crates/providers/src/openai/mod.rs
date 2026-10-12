@@ -25,10 +25,9 @@ pub use url::{BaseUrl, InvalidUrl, Scheme};
 pub use wire::DiscoveredModel;
 
 use crate::{
-    ASSUMED_CONTEXT_WINDOW, AuthConfig, CapabilitySource, ChatRequest, ChatResponse,
-    CredentialError, CredentialResolver, EgressGate, FinishReason, Locality, ModelConfig,
-    ModelDescriptor, ModelProvider, ModelRef, ProviderConfig, ProviderDescriptor, ProviderError,
-    ProviderHealth, SecretBytes, StreamEvent,
+    AuthConfig, ChatRequest, ChatResponse, CredentialError, CredentialResolver, EgressGate,
+    FinishReason, Locality, ModelConfig, ModelDescriptor, ModelProvider, ProviderConfig,
+    ProviderDescriptor, ProviderError, ProviderHealth, SecretBytes, StreamEvent,
 };
 use transport::{Exchange, Frame, HttpRequest, Limits, Method};
 
@@ -45,7 +44,8 @@ pub struct HttpOptions {
     pub list_timeout: Duration,
     pub max_body_bytes: u64,
     pub max_line_bytes: usize,
-    /// How long a successful model listing is reused.
+    /// How long a successful model listing is reused (both HTTP adapters);
+    /// [`crate::ModelProvider::invalidate_models`] drops it early.
     pub model_cache_ttl: Duration,
 }
 
@@ -190,11 +190,18 @@ impl OpenAiClient {
         let result = transport::check_cancel(cancel)
             .and_then(|()| request.validate())
             .and_then(|()| {
+                crate::input::check_request(crate::ProviderKind::OpenaiCompatible, request)
+            })
+            .and_then(|()| {
                 let exchange = Exchange::start(
                     &self.agent,
                     HttpRequest {
                         url: self.base.join("chat/completions"),
-                        method: Method::Post(wire::request_body(request, true)),
+                        method: Method::Post(wire::request_body_with(
+                            request,
+                            true,
+                            wire::is_openrouter(self.base.host()),
+                        )),
                         authorization,
                         headers: Vec::new(),
                         stream: true,
@@ -407,26 +414,12 @@ impl OpenAiCompatibleProvider {
     }
 
     fn merge(&self, discovered: Vec<DiscoveredModel>) -> Vec<ModelDescriptor> {
-        let mut models = self.declared_descriptors();
-        for found in discovered {
-            if self.declared.iter().any(|declared| declared.id == found.id) {
-                continue;
-            }
-            let source = if found.context_window.is_some() {
-                CapabilitySource::Discovered
-            } else {
-                CapabilitySource::Assumed
-            };
-            models.push(
-                ModelDescriptor::new(
-                    ModelRef::new(self.descriptor.id.clone(), found.id),
-                    self.descriptor.locality,
-                    found.context_window.unwrap_or(ASSUMED_CONTEXT_WINDOW),
-                )
-                .with_source(source),
-            );
-        }
-        models
+        wire::merge_discovered(
+            &self.descriptor.id,
+            self.descriptor.locality,
+            &self.declared,
+            discovered,
+        )
     }
 }
 
@@ -502,6 +495,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             )),
             Err(error) => ProviderHealth::from_error(&error),
+        }
+    }
+
+    fn invalidate_models(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            *cache = None;
         }
     }
 }

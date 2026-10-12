@@ -6,23 +6,3 @@
   font-size: var(--aidex-text-md);
   white-space: nowrap;
 }
-
-.dot {
-  flex: none;
-  width: 9px;
-  height: 9px;
-  border-radius: var(--aidex-radius-full);
-}
-
-.success .dot {
-  background: var(--aidex-color-success);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--aidex-color-success) 60%, transparent);
-}
-
-.warning .dot {
-  background: var(--aidex-color-warning);
-}
-
-.neutral .dot {
-  background: var(--aidex-color-text-muted);
-}

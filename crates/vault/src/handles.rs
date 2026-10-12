@@ -15,7 +15,7 @@ use std::{
 
 /// Longest lifetime a handle may be issued with.
 pub const MAX_HANDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-/// Most handles tracked per unlock session (expired ones are pruned at the limit).
+/// Most handles tracked per unlock session (expired and revoked ones are pruned at the limit).
 pub const MAX_HANDLES: usize = 4096;
 
 /// A value-free, serializable reference that lets one consumer obtain one secret
@@ -58,7 +58,8 @@ impl HandleRegistry {
             return Err(VaultError::InvalidTtl("must be at most 24 hours"));
         }
         if self.issued.len() >= MAX_HANDLES {
-            self.issued.retain(|_, issued| issued.deadline > now);
+            self.issued
+                .retain(|_, issued| !issued.revoked && issued.deadline > now);
             if self.issued.len() >= MAX_HANDLES {
                 return Err(VaultError::LimitExceeded("too many active secret handles"));
             }
@@ -234,6 +235,41 @@ mod tests {
         }
         assert_eq!(registry.revoke_all(now), 3);
         assert_eq!(registry.revoke_all(now), 0);
+    }
+
+    #[test]
+    fn revocation_reclaims_capacity_without_waiting_for_expiry() {
+        let mut registry = HandleRegistry::default();
+        let scope = ConsumerScope::provider("openai").unwrap();
+        let now = Instant::now();
+        let mut handles = Vec::with_capacity(MAX_HANDLES);
+        for _ in 0..MAX_HANDLES {
+            handles.push(
+                registry
+                    .issue(secret_ref("sec_a"), scope.clone(), MAX_HANDLE_TTL, now)
+                    .unwrap(),
+            );
+        }
+        assert!(matches!(
+            registry.issue(secret_ref("sec_a"), scope.clone(), MAX_HANDLE_TTL, now),
+            Err(VaultError::LimitExceeded(_))
+        ));
+        assert!(registry.revoke(&handles[0].handle_id));
+        let replacement = registry
+            .issue(secret_ref("sec_a"), scope.clone(), MAX_HANDLE_TTL, now)
+            .unwrap();
+        assert_eq!(registry.active(now), MAX_HANDLES);
+        assert!(registry.check(&handles[0], &scope, now).is_err());
+        assert!(registry.check(&replacement, &scope, now).is_ok());
+
+        assert_eq!(registry.revoke_all(now), MAX_HANDLES);
+        for _ in 0..MAX_HANDLES {
+            registry
+                .issue(secret_ref("sec_a"), scope.clone(), MAX_HANDLE_TTL, now)
+                .unwrap();
+        }
+        assert_eq!(registry.active(now), MAX_HANDLES);
+        assert!(registry.check(&replacement, &scope, now).is_err());
     }
 
     #[test]

@@ -249,16 +249,18 @@ fn bedrock_parallel_results_form_one_user_turn_with_every_call_id() {
         .chat(&request, &mut |_| {}, &CancelToken::new())
         .unwrap();
     let body = server.requests()[0].json();
-    assert_eq!(body["messages"].as_array().unwrap().len(), 4);
+    // Converse needs alternating roles: the follow-up user text joins the
+    // turn that answers the calls, after the tool results.
+    assert_eq!(body["messages"].as_array().unwrap().len(), 3);
     assert_eq!(body["messages"][2]["role"], "user");
     assert_eq!(
         body["messages"][2]["content"],
         json!([
             {"toolResult":{"toolUseId":"one","content":[{"text":"first"}]}},
-            {"toolResult":{"toolUseId":"two","content":[{"text":"second"}]}}
+            {"toolResult":{"toolUseId":"two","content":[{"text":"second"}]}},
+            {"text":"summarize"}
         ])
     );
-    assert_eq!(body["messages"][3]["content"][0]["text"], "summarize");
 }
 
 #[test]

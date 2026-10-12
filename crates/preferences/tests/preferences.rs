@@ -79,3 +79,87 @@ fn invalid_or_unknown_preference_fields_never_replace_saved_settings() {
     );
     assert_eq!(prefs.get().unwrap().accent, "#abcdef");
 }
+
+fn unlocked_vault(dir: &std::path::Path) -> Arc<VaultService> {
+    let vault = Arc::new(
+        VaultService::open(
+            dir,
+            VaultServiceConfig {
+                kdf: KdfParams::new(8, 1, 1).unwrap(),
+                idle_timeout: None,
+            },
+        )
+        .unwrap(),
+    );
+    vault
+        .init(&SecretString::new("correct test passphrase".into()), false)
+        .unwrap();
+    vault
+}
+
+#[test]
+fn model_preferences_are_a_separate_record_with_partial_updates() {
+    use aidex_preferences::{ModelPreferencesPatch, ModelPreferencesService};
+    let dir = tempfile::tempdir().unwrap();
+    let vault = unlocked_vault(dir.path());
+    let models = ModelPreferencesService::new(vault.clone());
+    assert_eq!(models.get().unwrap(), Default::default());
+
+    let saved = models
+        .set(ModelPreferencesPatch {
+            favorite_models: Some(vec![
+                "openai/gpt-5".into(),
+                "runtime:codex/default".into(),
+                "openai/gpt-5".into(),
+            ]),
+            hidden_models: None,
+        })
+        .unwrap();
+    assert_eq!(
+        saved.favorite_models,
+        ["openai/gpt-5", "runtime:codex/default"]
+    );
+    assert!(saved.hidden_models.is_empty());
+
+    let saved = models
+        .set(ModelPreferencesPatch {
+            favorite_models: None,
+            hidden_models: Some(vec!["openai/dall-e-3".into()]),
+        })
+        .unwrap();
+    assert_eq!(
+        saved.favorite_models,
+        ["openai/gpt-5", "runtime:codex/default"]
+    );
+    assert_eq!(saved.hidden_models, ["openai/dall-e-3"]);
+
+    // A refused update leaves the saved record alone.
+    assert!(
+        models
+            .set(ModelPreferencesPatch {
+                favorite_models: Some(vec!["no-slash".into()]),
+                hidden_models: None,
+            })
+            .is_err()
+    );
+    assert_eq!(models.get().unwrap(), saved);
+
+    // App preferences are untouched and still readable on their own.
+    let prefs = PreferencesService::new(vault.clone());
+    assert_eq!(prefs.get().unwrap().accent, "#1a8cff");
+    prefs.update(json!({"accent":"#abcdef"})).unwrap();
+    assert_eq!(
+        ModelPreferencesService::new(vault.clone()).get().unwrap(),
+        saved
+    );
+
+    vault.lock();
+    assert!(matches!(
+        models.get(),
+        Err(aidex_preferences::PreferencesError::Vault(_))
+    ));
+    assert!(matches!(
+        models.set(ModelPreferencesPatch::default()),
+        Err(aidex_preferences::PreferencesError::Vault(_))
+    ));
+}

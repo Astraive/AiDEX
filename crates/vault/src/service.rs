@@ -288,31 +288,6 @@ impl VaultService {
         self.with_vault(|vault| vault.meta(name))
     }
 
-    /// Backend-only metadata; no credential value or handle is exposed.
-    pub fn secret_version(&self, name: &SecretName) -> Result<crate::SecretVersion, VaultError> {
-        self.with_vault(|vault| vault.secret_version(name))
-    }
-
-    /// Atomically check an approved revision, then resolve and revoke its scoped handle.
-    pub fn resolve_versioned(
-        &self,
-        name: &SecretName,
-        consumer: &ConsumerScope,
-        expected: &crate::SecretVersion,
-    ) -> Result<SecretBytes, VaultError> {
-        self.with_vault(|vault| {
-            if &vault.secret_version(name)? != expected {
-                return Err(VaultError::HandleDenied(
-                    crate::HandleDenial::RevisionChanged,
-                ));
-            }
-            let handle = vault.issue_handle(name, consumer, Duration::from_secs(30))?;
-            let result = vault.resolve(&handle, consumer);
-            vault.revoke_handle(&handle.handle_id);
-            result
-        })
-    }
-
     pub fn delete_secret(&self, name: &SecretName) -> Result<SecretMeta, VaultError> {
         self.with_vault(|vault| vault.delete(name))
     }
@@ -390,11 +365,15 @@ impl VaultService {
         };
         current.last_used = now;
         let result = operation(&mut current.vault);
-        if result
-            .as_ref()
-            .is_err_and(|error| error.kind() == VaultErrorKind::Conflict)
-        {
-            // The on-disk vault changed underneath this session; require a fresh unlock.
+        if result.as_ref().is_err_and(|error| {
+            error.kind() == VaultErrorKind::Conflict
+                || matches!(
+                    error,
+                    VaultError::CommitUncertain { path, .. }
+                        if path.parent() == Some(current.vault.dir())
+                )
+        }) {
+            // External changes or an ambiguous local commit require a fresh unlock.
             *session = None;
         }
         result
@@ -460,5 +439,206 @@ impl fmt::Debug for VaultService {
         f.debug_struct("VaultService")
             .field("dir", &self.inner.dir)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fsio::{WriteFailure, fail_next_write};
+
+    const PASSPHRASE: &str = "correct horse battery staple";
+
+    fn passphrase(text: &str) -> SecretString {
+        SecretString::from(text.to_owned())
+    }
+
+    fn service_with_secret() -> (
+        tempfile::TempDir,
+        VaultService,
+        SecretName,
+        ConsumerScope,
+        SecretHandle,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let service = VaultService::open(
+            root.path().join("vault"),
+            VaultServiceConfig {
+                kdf: KdfParams::new(8, 1, 1).unwrap(),
+                idle_timeout: None,
+            },
+        )
+        .unwrap();
+        service.init(&passphrase(PASSPHRASE), false).unwrap();
+        let name = SecretName::new("api-key").unwrap();
+        let scope = ConsumerScope::provider("openai").unwrap();
+        service
+            .put_secret(
+                &name,
+                SecretKind::ApiKey,
+                SecretBytes::from(b"original".to_vec()),
+                SecretPolicy::new([scope.clone()]).unwrap(),
+            )
+            .unwrap();
+        let handle = service
+            .issue_handle(&name, &scope, Duration::from_secs(60))
+            .unwrap();
+        (root, service, name, scope, handle)
+    }
+
+    fn assert_uncertain(error: &VaultError) {
+        assert!(matches!(error, VaultError::CommitUncertain { .. }));
+        assert_eq!(error.kind(), VaultErrorKind::Io);
+        assert_eq!(error.code(), aidex_core::ServiceErrorCode::Unavailable);
+        assert!(std::error::Error::source(error).is_some());
+    }
+
+    #[test]
+    fn ambiguous_delete_drops_session_and_stale_handles() {
+        let (_root, service, name, scope, handle) = service_with_secret();
+        fail_next_write(service.dir(), WriteFailure::AfterRename);
+        assert_uncertain(&service.delete_secret(&name).unwrap_err());
+        assert_eq!(service.status().state, VaultState::Locked);
+        assert_eq!(
+            service.list_secrets().unwrap_err().kind(),
+            VaultErrorKind::Locked
+        );
+        assert_eq!(
+            service.secret_meta(&name).unwrap_err().kind(),
+            VaultErrorKind::Locked
+        );
+        assert_eq!(
+            service.resolve(&handle, &scope).unwrap_err().kind(),
+            VaultErrorKind::Locked
+        );
+
+        service.unlock(&passphrase(PASSPHRASE)).unwrap();
+        assert!(service.list_secrets().unwrap().is_empty());
+        assert_eq!(
+            service.secret_meta(&name).unwrap_err().kind(),
+            VaultErrorKind::SecretNotFound
+        );
+        assert_eq!(
+            service.resolve(&handle, &scope).unwrap_err().kind(),
+            VaultErrorKind::HandleDenied
+        );
+    }
+
+    #[test]
+    fn ambiguous_policy_replacement_preserves_new_record_and_requires_unlock() {
+        let (_root, service, name, scope, handle) = service_with_secret();
+        let replacement_scope = ConsumerScope::provider("other").unwrap();
+        fail_next_write(service.dir(), WriteFailure::AfterRename);
+        let error = service
+            .put_secret(
+                &name,
+                SecretKind::ApiKey,
+                SecretBytes::from(b"replacement".to_vec()),
+                SecretPolicy::new([replacement_scope.clone()]).unwrap(),
+            )
+            .unwrap_err();
+        assert_uncertain(&error);
+        assert_eq!(service.status().state, VaultState::Locked);
+        assert!(service.resolve(&handle, &scope).is_err());
+        service.unlock(&passphrase(PASSPHRASE)).unwrap();
+        assert_eq!(
+            service
+                .issue_handle(&name, &scope, Duration::from_secs(60))
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::ConsumerNotAllowed
+        );
+        let replacement = service
+            .issue_handle(&name, &replacement_scope, Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            service
+                .resolve(&replacement, &replacement_scope)
+                .unwrap()
+                .expose(),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn ambiguous_passphrase_change_requires_new_passphrase_on_fresh_unlock() {
+        let (_root, service, _name, scope, handle) = service_with_secret();
+        let new = passphrase("a different long passphrase");
+        fail_next_write(service.dir(), WriteFailure::AfterRename);
+        assert_uncertain(
+            &service
+                .change_passphrase(Some(&passphrase(PASSPHRASE)), &new)
+                .unwrap_err(),
+        );
+        assert_eq!(service.status().state, VaultState::Locked);
+        assert_eq!(
+            service.unlock(&passphrase(PASSPHRASE)).unwrap_err().kind(),
+            VaultErrorKind::WrongPassphrase
+        );
+        service.unlock(&new).unwrap();
+        assert_eq!(
+            service.resolve(&handle, &scope).unwrap_err().kind(),
+            VaultErrorKind::HandleDenied
+        );
+    }
+
+    #[test]
+    fn pre_rename_io_error_keeps_original_session_and_committed_state() {
+        let (_root, service, name, scope, handle) = service_with_secret();
+        let header = std::fs::read(service.dir().join("vault.json")).unwrap();
+        fail_next_write(service.dir(), WriteFailure::BeforeRename);
+        let error = service.delete_secret(&name).unwrap_err();
+        assert!(matches!(error, VaultError::Io { .. }));
+        assert_eq!(error.kind(), VaultErrorKind::Io);
+        assert_eq!(service.status().state, VaultState::Unlocked);
+        assert_eq!(
+            std::fs::read(service.dir().join("vault.json")).unwrap(),
+            header
+        );
+        assert_eq!(service.list_secrets().unwrap().len(), 1);
+        assert_eq!(
+            service.resolve(&handle, &scope).unwrap().expose(),
+            b"original"
+        );
+        service.delete_secret(&name).unwrap();
+        assert!(service.list_secrets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_session_reconciles_index_and_revokes_handles_after_ambiguous_commit() {
+        let (_root, service, name, scope, handle) = service_with_secret();
+        // Retain a direct UnlockedVault to exercise the storage boundary independently
+        // of the service's invalidation.
+        service.lock();
+        let mut vault = Vault::open(service.dir())
+            .unwrap()
+            .unlock(&passphrase(PASSPHRASE))
+            .unwrap();
+        let direct_handle = vault
+            .issue_handle(&name, &scope, Duration::from_secs(60))
+            .unwrap();
+        fail_next_write(vault.dir(), WriteFailure::AfterRename);
+        assert_uncertain(&vault.delete(&name).unwrap_err());
+        assert!(vault.list().is_empty());
+        assert!(vault.meta(&name).is_err());
+        assert_eq!(vault.active_handles(), 0);
+        assert!(vault.resolve(&direct_handle, &scope).is_err());
+        assert!(vault.resolve(&handle, &scope).is_err());
+        assert_eq!(vault.verify().unwrap().records, 0);
+    }
+
+    #[test]
+    fn ambiguous_backup_commit_does_not_discard_unchanged_source_session() {
+        let (root, service, _name, scope, handle) = service_with_secret();
+        let destination = root.path().join("backup");
+        // Avoid injecting the failure at initial records-directory creation.
+        std::fs::create_dir_all(destination.join("records")).unwrap();
+        fail_next_write(&destination, WriteFailure::AfterRename);
+        assert_uncertain(&service.backup_to(&destination).unwrap_err());
+        assert_eq!(service.status().state, VaultState::Unlocked);
+        assert_eq!(
+            service.resolve(&handle, &scope).unwrap().expose(),
+            b"original"
+        );
     }
 }

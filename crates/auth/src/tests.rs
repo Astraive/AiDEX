@@ -16,35 +16,6 @@ use std::{
 use url::Url;
 
 #[test]
-fn account_binding_uses_verified_profile_identity_and_survives_token_refresh() {
-    let (_root, vault) = vault();
-    let service = AuthService::new(vault.clone()).unwrap();
-    assert!(service.account_binding("openai").is_err());
-    let mut profile = crate::storage::Profile::registration("registered-client".into());
-    profile.subject = Some("verified-account-a".into());
-    profile.issuer = Some("https://auth.openai.com".into());
-    profile.tokens = Some(crate::oauth::Tokens {
-        access_token: "first-marker".into(),
-        refresh_token: None,
-        id_token: None,
-        expires_at: crate::oauth::now() + 3600,
-        earliest_refresh_at: None,
-        scope: "resource.invoke chatgpt.tokens.use.direct".into(),
-    });
-    crate::storage::write_profile(&vault, "openai", &profile).unwrap();
-    let first = service.account_binding("openai").unwrap();
-    profile.tokens.as_mut().unwrap().access_token = "refreshed-marker".into();
-    crate::storage::write_profile(&vault, "openai", &profile).unwrap();
-    assert_eq!(first, service.account_binding("openai").unwrap());
-    profile.subject = Some("verified-account-b".into());
-    crate::storage::write_profile(&vault, "openai", &profile).unwrap();
-    assert_ne!(first, service.account_binding("openai").unwrap());
-    profile.subject = None;
-    crate::storage::write_profile(&vault, "openai", &profile).unwrap();
-    assert!(service.account_binding("openai").is_err());
-}
-
-#[test]
 fn unavailable_host_identity_leaves_service_usable_and_denies_signin_before_network() {
     let (_root, vault) = vault();
     let admissions = Arc::new(AtomicUsize::new(0));
@@ -519,7 +490,6 @@ fn refresh_omission_retains_previous_rotation_and_earliest_refresh_is_enforced()
         await_state(&auth, &start.flow_id).state,
         AuthState::Connected
     );
-    let account_before_refresh = auth.account_binding("openai").unwrap();
     let mut profile = crate::storage::read_profile(&vault, "openai")
         .unwrap()
         .unwrap();
@@ -539,10 +509,6 @@ fn refresh_omission_retains_previous_rotation_and_earliest_refresh_is_enforced()
             .unwrap()
             .expose(),
         b"fixture-access-refreshed"
-    );
-    assert_eq!(
-        account_before_refresh,
-        auth.account_binding("openai").unwrap()
     );
     let saved = crate::storage::read_profile(&vault, "openai")
         .unwrap()

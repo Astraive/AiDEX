@@ -31,9 +31,18 @@ The encrypted `oauth.hosts` mapping associates hashed host facts with a random
 UUIDv4 URI. Windows uses MachineGuid and Linux uses `/etc/machine-id` only as
 local mapping keys. Only the opaque UUID URI is sent to OpenAI. Moving the
 portable drive to a different host preserves registrations and receives that
-host's own ID. Windows browser opening uses an absolute system PowerShell
-binary, fixed command text, and the exact pending URL as environment data.
-Other platforms have no browser opener in this desktop task.
+host's own ID.
+
+Browser opening is one shared helper, `open_in_browser(url, network_allowed)`.
+It checks the network gate first, then accepts only an absolute `https://` URL
+with a host and no embedded credentials, whitespace, or control characters
+(`validate_browser_url`). On Windows it runs the absolute system PowerShell
+binary with fixed command text (`Start-Process -FilePath $env:AIDEX_OPEN_URL`)
+and passes the URL as environment data, so the URL never becomes command text.
+Other platforms report unavailable. `AuthService::open` uses it only for the
+exact URL of a pending sign-in flow; the daemon's `provider.open_link` uses it
+only for links stored in the built-in provider presets. Neither accepts an
+arbitrary URL from a client.
 
 Resolution serializes refresh per provider in the daemon, obeys expiry and
 `earliest_refresh_at`, preserves an existing refresh token when a replacement

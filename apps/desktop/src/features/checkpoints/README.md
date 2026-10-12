@@ -1,5 +1,9 @@
-# Checkpoints and recovery
+# Checkpoints feature
 
-`CheckpointsPage` reads paginated `checkpoint.list` records for the selected saved conversation. Original content is paged through `checkpoint.content`, current workspace content is read through the confined workspace API, and `checkpoint.compare` checks whether restoration would conflict with later edits.
+Owns Checkpoints & Recovery (`checkpoints` route): saved workspace states you can resume, restore, branch from, or compare with the current workspace.
 
-Restore requires explicit confirmation and the saved digest. The backend refuses conflicting changes and owns restoration. Async content responses are bound to the selected conversation/checkpoint so a late read cannot replace another selection. Review routes to this same live page. External vendor file writes only have checkpoints when the runtime supplies verified capture support; a generic external run is not presented as a complete workspace snapshot.
+- `CheckpointsPage` lists the current workspace's checkpoints in a `Timeline` beside `CheckpointDetail`. `route.id` selects a checkpoint and falls back to the most recent one. Workspaces without checkpoints show an empty state.
+- `CheckpointDetail` holds the actions. Compare toggles `CheckpointComparison` (a representative diff plus every changed file). Restore first shows `RestoreConfirmation` inline.
+- `CheckpointsSidebar` has a workspace picker (the shared `workspaceId` preference), the checkpoint list, and links to Review and the agent task.
+
+Nothing is restored, resumed, branched, or saved yet. Those actions show "Preview" toasts. Checkpoints, snapshot details, and diffs are sample data in `sample.ts` until AiDEX Core exposes durable checkpoints.

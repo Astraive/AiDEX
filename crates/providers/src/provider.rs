@@ -105,4 +105,8 @@ pub trait ModelProvider: Send + Sync {
 
     /// A bounded liveness check.
     fn health(&self) -> ProviderHealth;
+
+    /// Drop any cached model listing so the next [`ModelProvider::models`]
+    /// call asks the provider again. Providers without a cache do nothing.
+    fn invalidate_models(&self) {}
 }

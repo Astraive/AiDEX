@@ -1,0 +1,69 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+  padding: var(--aidex-space-4) var(--aidex-space-5);
+  border: 1px solid var(--aidex-color-border-subtle);
+  border-radius: var(--aidex-radius-lg);
+  background: var(--aidex-color-surface);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+}
+
+.heading {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+}
+
+.icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--aidex-color-text-secondary);
+}
+
+.icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.title {
+  margin: 0;
+  min-width: 0;
+  color: var(--aidex-color-text);
+  font-size: var(--aidex-text-md);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--aidex-space-2);
+}
+
+.description {
+  margin-top: calc(var(--aidex-space-1) * -1);
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-sm);
+  line-height: 1.5;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+}

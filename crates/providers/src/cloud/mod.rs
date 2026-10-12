@@ -1,6 +1,9 @@
 //! Protocol-specific cloud providers sharing bounded HTTP transport.
 mod bedrock;
 mod events;
+#[cfg(test)]
+mod golden_tests;
+mod listing;
 mod requests;
 
 use crate::openai::{
@@ -9,7 +12,10 @@ use crate::openai::{
     wire,
 };
 use crate::*;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 use zeroize::Zeroizing;
 
 pub(crate) struct CloudProvider {
@@ -20,6 +26,8 @@ pub(crate) struct CloudProvider {
     gate: Arc<dyn EgressGate>,
     agent: ureq::Agent,
     options: HttpOptions,
+    /// The last successful listing, reused for `options.model_cache_ttl`.
+    cache: Mutex<Option<(Instant, Vec<ModelDescriptor>)>>,
 }
 
 impl CloudProvider {
@@ -82,6 +90,7 @@ impl CloudProvider {
             gate,
             agent,
             options,
+            cache: Mutex::new(None),
         })
     }
 
@@ -239,6 +248,65 @@ impl CloudProvider {
         }
         assembler.finish(on_event)
     }
+
+    /// `GET endpoint` and return the 2xx body.
+    fn fetch(&self, endpoint: &str, cancel: &CancelToken) -> Result<String, ProviderError> {
+        let exchange = self.exchange(endpoint, Method::Get, false, cancel)?;
+        let Frame::Head {
+            status,
+            retry_after,
+            ..
+        } = exchange.next(cancel)?
+        else {
+            return Err(protocol());
+        };
+        let body = match exchange.next(cancel)? {
+            Frame::Body(body) => body,
+            Frame::End => String::new(),
+            _ => return Err(protocol()),
+        };
+        if !(200..300).contains(&status) {
+            return Err(wire::http_error(status, retry_after, &body, None));
+        }
+        Ok(body)
+    }
+
+    /// The vendor's model listing, following pagination for Anthropic and
+    /// Gemini (at most [`listing::MAX_PAGES`] pages within one list timeout).
+    fn discover(&self) -> Result<Vec<DiscoveredModel>, ProviderError> {
+        let cancel = CancelToken::new().with_timeout(self.options.list_timeout);
+        type PageParser = fn(&str) -> Result<listing::Page, ProviderError>;
+        let (first, cursor_param, parse): (&str, &str, PageParser) = match self.config.kind {
+            ProviderKind::Anthropic => ("models?limit=1000", "after_id", listing::anthropic_page),
+            ProviderKind::Gemini => ("models?pageSize=1000", "pageToken", listing::gemini_page),
+            _ => {
+                let body = self.fetch("models", &cancel)?;
+                let value: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|_| protocol())?;
+                // ChatGPT plan tokens use an account-specific catalog envelope
+                // at the same public /models route; API-key accounts retain
+                // data/id discovery.
+                return if self.config.kind == ProviderKind::OpenaiResponses
+                    && value.get("models").is_some()
+                {
+                    listing::chatgpt_catalog(&value)
+                } else {
+                    wire::parse_model_list(&value)
+                };
+            }
+        };
+        let mut models = Vec::new();
+        let mut endpoint = first.to_owned();
+        for _ in 0..listing::MAX_PAGES {
+            let page = parse(&self.fetch(&endpoint, &cancel)?)?;
+            models.extend(page.models);
+            let Some(next) = page.next else {
+                break;
+            };
+            endpoint = format!("{first}&{cursor_param}={}", requests::encode_segment(&next));
+        }
+        Ok(models)
+    }
 }
 pub(super) fn protocol() -> ProviderError {
     ProviderError::Protocol("malformed or incomplete provider stream".into())
@@ -249,95 +317,40 @@ impl ModelProvider for CloudProvider {
         &self.descriptor
     }
     fn models(&self) -> Result<Vec<ModelDescriptor>, ProviderError> {
-        let mut declared: Vec<_> = self
-            .config
-            .models
-            .iter()
-            .map(|m| m.descriptor(&self.config.id, self.descriptor.locality))
-            .collect();
         if !self.config.discover_models {
-            return Ok(declared);
+            return Ok(self
+                .config
+                .models
+                .iter()
+                .map(|m| m.descriptor(&self.config.id, self.descriptor.locality))
+                .collect());
         }
-        let cancel = CancelToken::new().with_timeout(self.options.list_timeout);
-        let exchange = self.exchange("models", Method::Get, false, &cancel)?;
-        let Frame::Head {
-            status,
-            retry_after,
-            ..
-        } = exchange.next(&cancel)?
-        else {
-            return Err(protocol());
-        };
-        let Frame::Body(body) = exchange.next(&cancel)? else {
-            return Err(protocol());
-        };
-        if !(200..300).contains(&status) {
-            return Err(wire::http_error(status, retry_after, &body, None));
+        // Gate first even when cached, so an offline listing reports the refusal.
+        if self.descriptor.locality == Locality::Remote {
+            self.gate
+                .check_remote(&self.descriptor.id, self.base.host())?;
         }
-        let value: serde_json::Value = serde_json::from_str(&body).map_err(|_| protocol())?;
-        // ChatGPT plan tokens use an account-specific catalog envelope at the
-        // same public /models route; API-key accounts retain data/id discovery.
-        let chatgpt_catalog =
-            self.config.kind == ProviderKind::OpenaiResponses && value.get("models").is_some();
-        let list = value
-            .get(
-                if self.config.kind == ProviderKind::Gemini || chatgpt_catalog {
-                    "models"
-                } else {
-                    "data"
-                },
-            )
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(protocol)?;
-        if list.len() > 1000 {
-            return Err(protocol());
+        if let Ok(cache) = self.cache.lock()
+            && let Some((at, models)) = cache.as_ref()
+            && at.elapsed() < self.options.model_cache_ttl
+        {
+            return Ok(models.clone());
         }
-        for item in list {
-            if chatgpt_catalog && item["visibility"].as_str() != Some("list") {
-                continue;
-            }
-            let raw = item
-                .get(if self.config.kind == ProviderKind::Gemini {
-                    "name"
-                } else if chatgpt_catalog {
-                    "slug"
-                } else {
-                    "id"
-                })
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(protocol)?;
-            let id =
-                ModelId::new(raw.strip_prefix("models/").unwrap_or(raw)).map_err(|_| protocol())?;
-            if declared.iter().any(|m| m.model.model_id == id) {
-                continue;
-            }
-            let context = item
-                .get("inputTokenLimit")
-                .or_else(|| item.get("context_window"))
-                .or_else(|| item.get("context_length"))
-                .unwrap_or(&serde_json::Value::Null)
-                .as_u64()
-                .and_then(|n| u32::try_from(n).ok());
-            let mut descriptor = ModelDescriptor::new(
-                ModelRef::new(self.config.id.clone(), id),
-                self.descriptor.locality,
-                context.unwrap_or(ASSUMED_CONTEXT_WINDOW),
-            )
-            .with_source(if context.is_some() {
-                CapabilitySource::Discovered
-            } else {
-                CapabilitySource::Assumed
-            });
-            if chatgpt_catalog
-                && let Some(label) = item["display_name"].as_str().filter(|label| {
-                    !label.is_empty() && label.len() <= 128 && !label.chars().any(char::is_control)
-                })
-            {
-                descriptor.display_name = label.to_owned();
-            }
-            declared.push(descriptor);
+        let models = wire::merge_discovered(
+            &self.config.id,
+            self.descriptor.locality,
+            &self.config.models,
+            self.discover()?,
+        );
+        if let Ok(mut cache) = self.cache.lock() {
+            *cache = Some((Instant::now(), models.clone()));
         }
-        Ok(declared)
+        Ok(models)
+    }
+    fn invalidate_models(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            *cache = None;
+        }
     }
     fn chat(
         &self,

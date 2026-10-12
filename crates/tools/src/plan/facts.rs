@@ -1,8 +1,6 @@
 //! Facts a plan computes for policy evaluation, convertible to policy intents.
 
-use aidex_policy::{
-    Action, IntentAttributes, NetworkTarget, PathClass, PathScope, SecretUse, ShellCommand,
-};
+use aidex_policy::{Action, IntentAttributes, NetworkTarget, PathClass, PathScope, ShellCommand};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -90,8 +88,6 @@ pub struct NetworkFacts {
 /// the validated input and the workspace, never copied from model output.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct PlanFacts {
-    /// Credential references required by execution, never credential values.
-    pub secrets: Vec<SecretUse>,
     pub paths: Vec<PlanPath>,
     /// The classified command line for process-running tools.
     pub command: Option<ShellCommand>,
@@ -141,11 +137,7 @@ impl PlanFacts {
             paths,
             command: self.command.clone(),
             network,
-            secret: if self.secrets.len() == 1 {
-                self.secrets.first().cloned()
-            } else {
-                None
-            },
+            secret: None,
             model_locality: None,
             remote_write: self.remote_write,
             destructive: self.destructive,

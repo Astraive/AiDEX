@@ -51,9 +51,10 @@ fn chatgpt_catalog_uses_visible_slugs_labels_and_server_order() {
     assert_eq!(models[1].display_name, "GPT 6 Sol");
     assert_eq!(
         models[0].source,
-        CapabilitySource::Assumed,
-        "a visible catalog entry must not invent verified context limits"
+        CapabilitySource::Catalog,
+        "a visible catalog entry reports no limits; only the known-family table supplies them"
     );
+    assert_eq!(models[0].context_window, 128_000);
     let sent = &server.requests()[0];
     assert_eq!(sent.path, "/v1/models");
     assert_eq!(sent.header("authorization"), Some("Bearer fixture-token"));

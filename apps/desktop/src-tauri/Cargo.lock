@@ -48,13 +48,10 @@ dependencies = [
  "aidex-events",
  "aidex-native-sessions",
  "aidex-providers",
- "aidex-runtime-bridge",
  "aidex-sandbox",
  "aidex-vault",
- "base64 0.22.1",
  "chacha20poly1305",
  "getrandom 0.3.4",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -78,6 +75,26 @@ dependencies = [
  "url",
  "winreg 0.55.0",
  "zeroize",
+]
+
+[[package]]
+name = "aidex-broker"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "aidex-policy",
+ "aidex-providers",
+ "aidex-sandbox",
+ "aidex-tools",
+ "aidex-vault",
+ "aidex-workspace",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.8.2",
 ]
 
 [[package]]
@@ -161,25 +178,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aidex-extensions"
-version = "0.1.0"
-dependencies = [
- "aidex-core",
- "aidex-drive",
- "aidex-events",
- "aidex-policy",
- "aidex-sandbox",
- "aidex-tools",
- "aidex-vault",
- "aidex-workspace",
- "serde",
- "serde_json",
- "sha2",
- "ureq",
- "zeroize",
-]
-
-[[package]]
 name = "aidex-harness"
 version = "0.1.0"
 dependencies = [
@@ -188,13 +186,13 @@ dependencies = [
  "aidex-native-sessions",
  "aidex-policy",
  "aidex-providers",
- "aidex-runtime-bridge",
  "aidex-sandbox",
  "aidex-tools",
  "aidex-workspace",
  "serde",
  "serde_json",
  "sha2",
+ "url",
 ]
 
 [[package]]
@@ -222,20 +220,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "aidex-mcp"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "aidex-sandbox",
+ "aidex-vault",
+ "serde",
+ "serde_json",
+ "toml 0.8.2",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
 name = "aidex-native-sessions"
 version = "0.1.0"
 dependencies = [
  "aidex-core",
  "aidex-providers",
- "aidex-runtime-bridge",
  "aidex-vault",
  "chacha20poly1305",
+ "flate2",
  "getrandom 0.3.4",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "zeroize",
+]
+
+[[package]]
+name = "aidex-plugins"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "flate2",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.8.2",
+ "zip",
 ]
 
 [[package]]
@@ -265,6 +295,7 @@ version = "0.1.0"
 dependencies = [
  "aidex-core",
  "aidex-drive",
+ "base64 0.22.1",
  "crc32fast",
  "getrandom 0.3.4",
  "hmac",
@@ -283,18 +314,6 @@ dependencies = [
  "aidex-core",
  "aidex-providers",
  "serde",
-]
-
-[[package]]
-name = "aidex-runtime-bridge"
-version = "0.1.0"
-dependencies = [
- "aidex-core",
- "getrandom 0.3.4",
- "serde",
- "serde_json",
- "sha2",
- "zeroize",
 ]
 
 [[package]]
@@ -324,6 +343,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "aidex-skills"
+version = "0.1.0"
+dependencies = [
+ "aidex-core",
+ "aidex-drive",
+ "aidex-events",
+ "serde",
+ "toml 0.8.2",
 ]
 
 [[package]]
@@ -391,14 +421,12 @@ version = "0.1.0"
 dependencies = [
  "aidex-core",
  "aidex-drive",
- "aidex-events",
- "aidex-policy",
- "aidex-tools",
- "aidex-vault",
- "reqwest 0.12.28",
- "schemars 0.8.22",
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
+ "toml 0.8.2",
+ "ureq",
+ "url",
  "zeroize",
 ]
 
@@ -422,28 +450,35 @@ version = "0.1.0"
 dependencies = [
  "aidex-adapters",
  "aidex-auth",
+ "aidex-broker",
  "aidex-context",
  "aidex-core",
  "aidex-drive",
  "aidex-events",
- "aidex-extensions",
  "aidex-harness",
  "aidex-host",
  "aidex-inference",
+ "aidex-mcp",
  "aidex-native-sessions",
+ "aidex-plugins",
+ "aidex-policy",
  "aidex-preferences",
  "aidex-providers",
  "aidex-router",
  "aidex-sandbox",
  "aidex-sessions",
+ "aidex-skills",
  "aidex-tools",
  "aidex-updater",
  "aidex-vault",
  "aidex-web",
  "aidex-workspace",
+ "base64 0.22.1",
  "getrandom 0.3.4",
  "serde",
  "serde_json",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

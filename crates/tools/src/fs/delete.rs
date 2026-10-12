@@ -68,7 +68,7 @@ fn enumerate(
     prefix: &str,
     out: &mut Vec<TreeEntry>,
 ) -> Result<(), ToolError> {
-    ctx.cancel.check()?;
+    crate::context::check_cancel(&ctx.cancel)?;
     let mut children: Vec<fs::DirEntry> = fs::read_dir(dir)
         .map_err(|error| ToolError::io(format!("cannot list `{prefix}`"), error))?
         .collect::<Result<_, _>>()

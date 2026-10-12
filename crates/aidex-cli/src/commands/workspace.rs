@@ -228,7 +228,7 @@ fn remove(
             );
             if workspace.kind != aidex_workspace::WorkspaceKind::Host {
                 println!(
-                    "Its AiDEX-created directory remains at {}; pass --delete-data to delete it",
+                    "Its AiDEX-created directory remains at {}; registration is gone, so remove it manually. To delete automatically, use --delete-data in the original remove command.",
                     workspace.path
                 );
             }

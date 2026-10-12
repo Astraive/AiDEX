@@ -11,7 +11,10 @@ use std::{
 use aidex_core::Timestamp;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 
-use super::store::{self, State};
+use super::{
+    RetentionPolicy,
+    store::{self, State},
+};
 use crate::{EventError, catalog::import_v1_body, error::storage, sanitize};
 
 /// Current schema. Version 1 is PR #40's `events(workspace_id, sequence, session_id, body)`.
@@ -73,7 +76,7 @@ pub(crate) fn refuse_symlinks(path: &Path) -> Result<(), EventError> {
     Ok(())
 }
 
-/// Open read-write with WAL, full synchronous commits, and a busy timeout.
+/// Open, prepare the schema, then enable WAL with full synchronous commits.
 pub(crate) fn open_connection(path: &Path) -> Result<Connection, EventError> {
     refuse_symlinks(path)?;
     match path.parent() {
@@ -85,10 +88,11 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection, EventError> {
         }
         _ => {}
     }
-    let connection = Connection::open(path).map_err(storage)?;
+    let mut connection = Connection::open(path).map_err(storage)?;
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(storage)?;
+    prepare(&mut connection)?;
     connection
         .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         .map_err(storage)?;
@@ -247,10 +251,11 @@ pub enum LegacyImport {
     SkippedNonEmpty,
 }
 
-/// Import `bodies` into an empty log once, recorded by a migration marker.
+/// Check the target state before reading and importing a separate v1 file.
 pub(crate) fn import_file(
     connection: &mut Connection,
-    bodies: &[String],
+    legacy_path: &Path,
+    retention: &RetentionPolicy,
 ) -> Result<(LegacyImport, State), EventError> {
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -262,9 +267,12 @@ pub(crate) fn import_file(
     if state.last_cursor.get() > 0 {
         return Ok((LegacyImport::SkippedNonEmpty, state));
     }
-    let events = import_v1(&tx, bodies)?;
+    let bodies = read_v1_file(legacy_path)?;
+    let events = import_v1(&tx, &bodies)?;
     record_migration(&tx, FILE_IMPORT_MIGRATION, events)?;
-    let state = store::read_state(&tx)?;
+    let mut state = store::read_state(&tx)?;
+    store::prune(&tx, retention, &mut state, Timestamp::now().unix_millis())?;
+    store::write_state(&tx, &state)?;
     tx.commit().map_err(storage)?;
     Ok((LegacyImport::Imported { events }, state))
 }

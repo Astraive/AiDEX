@@ -1,0 +1,26 @@
+[package]
+name = "aidex-plugins"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Portable AiDEX plugin bundles of skills and MCP servers: manifests, bounded install, tree hashes, provenance, and trust-gated enablement."
+
+[dependencies]
+aidex-core = { path = "../core" }
+aidex-drive = { path = "../drive" }
+aidex-events = { path = "../events" }
+# Selects the pure-Rust deflate backend for `zip`.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+zip = { version = "7.2", default-features = false, features = ["deflate-flate2"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

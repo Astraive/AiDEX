@@ -1,44 +1,21 @@
 //! The per-call execution context: identity, workspace root, events, limits.
 
-use std::{
-    fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{fmt, sync::Arc, time::Duration};
 
+pub use aidex_core::CancelToken;
 use aidex_core::EntityId;
 use aidex_events::{EventScope, EventSink};
 use aidex_workspace::ConfinedRoot;
 
 use crate::{ProcessLauncher, ToolError};
 
-/// Cooperative cancellation shared by everything working on one call.
-#[derive(Clone, Debug, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
-
-impl CancelToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-
-    /// `Err(ToolError::Cancelled)` once cancelled.
-    pub fn check(&self) -> Result<(), ToolError> {
-        if self.is_cancelled() {
-            Err(ToolError::Cancelled)
-        } else {
-            Ok(())
-        }
+/// `Err(ToolError::Cancelled)` once the call's token (shared with the broker and
+/// harness, `aidex_core::CancelToken`) is cancelled or its deadline passed.
+pub(crate) fn check_cancel(cancel: &CancelToken) -> Result<(), ToolError> {
+    if cancel.is_stopped() {
+        Err(ToolError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -162,7 +139,7 @@ impl fmt::Debug for ToolContext {
             .field("workspace_id", &self.workspace_id)
             .field("call_id", &self.call_id)
             .field("root", &self.root.display_root())
-            .field("cancelled", &self.cancel.is_cancelled())
+            .field("cancelled", &self.cancel.is_stopped())
             .field("limits", &self.limits)
             .field("launcher", &self.processes.is_some())
             .finish_non_exhaustive()

@@ -14,6 +14,54 @@ fn cursors(page: &aidex_events::ReplayPage) -> Vec<u64> {
 }
 
 #[test]
+fn age_retention_stops_at_fresh_events_after_clock_rollback() {
+    for (expired, max_events, pruned) in [
+        ([false, true, false, true], None, 0),
+        ([true, false, true, false], None, 1),
+        ([true, false, true, false], Some(2), 3),
+        ([true, true, true, true], None, 4),
+    ] {
+        let retention = RetentionPolicy {
+            max_events,
+            max_age: Some(Duration::from_secs(3600)),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(dir.path());
+        let log = EventLog::open(&path, RetentionPolicy::UNBOUNDED).unwrap();
+        for index in 1..=4 {
+            log.append(session_scope(), task_started(&format!("t{index}")))
+                .unwrap();
+        }
+        drop(log);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        for (index, expired) in expired.into_iter().enumerate() {
+            if expired {
+                connection
+                    .execute(
+                        "UPDATE event_log SET occurred_ms = 0 WHERE cursor = ?1",
+                        [index as i64 + 1],
+                    )
+                    .unwrap();
+            }
+        }
+        drop(connection);
+        let log = EventLog::open(&path, retention).unwrap();
+        let page = log
+            .replay(&EventFilter::all(), Cursor::new(pruned), 10)
+            .unwrap();
+        assert_eq!(cursors(&page), (pruned + 1..=4).collect::<Vec<_>>());
+        assert_eq!(log.latest_cursor().unwrap(), Cursor::new(4));
+        assert_eq!(log.prune().unwrap(), 0);
+        if pruned > 0 {
+            assert!(matches!(
+                log.replay(&EventFilter::all(), Cursor::new(pruned - 1), 10),
+                Err(EventError::CursorExpired { .. })
+            ));
+        }
+    }
+}
+
+#[test]
 fn concurrent_appenders_get_strictly_increasing_gap_free_cursors() {
     let fixture = temp_log(RetentionPolicy::UNBOUNDED);
     let log = Arc::new(fixture.log.clone());
@@ -350,8 +398,9 @@ fn newer_schemas_and_foreign_databases_are_refused() {
     drop(EventLog::open(&path, RetentionPolicy::UNBOUNDED).unwrap());
     rusqlite::Connection::open(&path)
         .unwrap()
-        .execute("UPDATE schema_version SET version = 99", [])
+        .execute_batch("PRAGMA journal_mode=DELETE; UPDATE schema_version SET version = 99;")
         .unwrap();
+    let newer_before = std::fs::read(&path).unwrap();
     assert_eq!(
         EventLog::open(&path, RetentionPolicy::UNBOUNDED).err(),
         Some(EventError::IncompatibleSchema {
@@ -359,16 +408,26 @@ fn newer_schemas_and_foreign_databases_are_refused() {
             supported: 2
         })
     );
+    assert_eq!(std::fs::read(&path).unwrap(), newer_before);
 
     let foreign = dir.path().join("other.sqlite3");
     rusqlite::Connection::open(&foreign)
         .unwrap()
         .execute_batch("CREATE TABLE kv (key TEXT, value TEXT);")
         .unwrap();
+    let foreign_before = std::fs::read(&foreign).unwrap();
     assert!(matches!(
         EventLog::open(&foreign, RetentionPolicy::UNBOUNDED),
         Err(EventError::Migration(_))
     ));
+    assert_eq!(std::fs::read(&foreign).unwrap(), foreign_before);
+    for database in [&path, &foreign] {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = database.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            assert!(!std::path::Path::new(&sidecar).exists());
+        }
+    }
     // The foreign database was not modified.
     let tables: i64 = rusqlite::Connection::open(&foreign)
         .unwrap()

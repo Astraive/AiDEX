@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ModelId, ProviderError};
+use crate::{ContentPart, MAX_PARTS_PER_MESSAGE, ModelId, PDF_PAGE_TOKENS, ProviderError};
 
 /// Most messages accepted in one request.
 pub const MAX_MESSAGES: usize = 4096;
@@ -57,6 +57,12 @@ pub struct ChatMessage {
     /// The call answered by a `tool` message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Images and PDFs the model reads with this (user) message, for one
+    /// request only. Never serialized or deserialized, so persisted
+    /// transcripts and older daemons never see them; the harness resolves
+    /// them per request from the attachment store.
+    #[serde(skip)]
+    pub parts: Vec<ContentPart>,
 }
 
 impl ChatMessage {
@@ -66,7 +72,15 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            parts: Vec::new(),
         }
+    }
+
+    /// This message with `parts` (only user messages may carry them).
+    #[must_use]
+    pub fn with_parts(mut self, parts: Vec<ContentPart>) -> Self {
+        self.parts = parts;
+        self
     }
 
     pub fn system(content: impl Into<String>) -> Self {
@@ -259,13 +273,32 @@ impl ChatRequest {
             {
                 return invalid("tool calls need an id and a valid tool name");
             }
+            if !message.parts.is_empty() {
+                if message.role != Role::User {
+                    return invalid("only user messages may carry image or PDF parts");
+                }
+                if message.parts.len() > MAX_PARTS_PER_MESSAGE {
+                    return invalid("a message may carry at most 20 image or PDF parts");
+                }
+                for part in &message.parts {
+                    part.check().or_else(invalid)?;
+                }
+            }
         }
         Ok(())
     }
 
-    /// A rough prompt-size estimate (about four bytes per token plus framing),
-    /// for budgeting before a provider reports real usage.
+    /// A rough prompt-size estimate (about four bytes per token plus framing,
+    /// and each image or PDF part by [`ContentPart::estimated_tokens`], never
+    /// by its base64 size), for budgeting before a provider reports real
+    /// usage.
     pub fn estimated_input_tokens(&self) -> u32 {
+        self.estimated_input_tokens_with(PDF_PAGE_TOKENS)
+    }
+
+    /// [`Self::estimated_input_tokens`] with `pdf_page_tokens` per PDF page,
+    /// the model's [`crate::PartLimits::pdf_page_tokens`].
+    pub fn estimated_input_tokens_with(&self, pdf_page_tokens: u32) -> u32 {
         let bytes: usize = self
             .messages
             .iter()
@@ -281,7 +314,13 @@ impl ChatRequest {
                 tool.name.len() + tool.description.len() + tool.parameters.to_string().len()
             }))
             .sum();
-        u32::try_from(bytes.div_ceil(4)).unwrap_or(u32::MAX)
+        let parts: u64 = self
+            .messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .map(|part| u64::from(part.estimated_tokens_with(pdf_page_tokens)))
+            .sum();
+        u32::try_from((bytes.div_ceil(4) as u64).saturating_add(parts)).unwrap_or(u32::MAX)
     }
 }
 
@@ -435,6 +474,86 @@ mod tests {
                 "case {index}"
             );
         }
+    }
+
+    #[test]
+    fn parts_are_request_only_and_belong_to_user_messages() {
+        use crate::parts::fixtures::{pdf, png};
+        let image = || ContentPart::image("image/png", png(28, 28));
+        let message = ChatMessage::user("see").with_parts(vec![image()]);
+        // Parts are never serialized: sealed transcripts and older daemons
+        // see exactly the text-only record.
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value, json!({"role": "user", "content": "see"}));
+        let back: ChatMessage = serde_json::from_value(value).unwrap();
+        assert!(back.parts.is_empty());
+        assert!(
+            serde_json::from_value::<ChatMessage>(
+                json!({"role": "user", "content": "x", "parts": []})
+            )
+            .is_err()
+        );
+        let model = || ModelId::new("m").unwrap();
+        assert!(
+            ChatRequest::new(model(), vec![message.clone()])
+                .validate()
+                .is_ok()
+        );
+        let blank = ChatMessage::user("").with_parts(vec![image()]);
+        assert!(ChatRequest::new(model(), vec![blank]).validate().is_ok());
+
+        type Mutation = Box<dyn Fn(&mut ChatMessage)>;
+        let cases: Vec<Mutation> = vec![
+            Box::new(|m| m.role = Role::Assistant),
+            Box::new(|m| m.role = Role::System),
+            Box::new(|m| {
+                m.role = Role::Tool;
+                m.tool_call_id = Some("c".into());
+            }),
+            Box::new(move |m| m.parts = vec![image(); MAX_PARTS_PER_MESSAGE + 1]),
+            Box::new(|m| m.parts = vec![ContentPart::image("image/jpeg", png(1, 1))]),
+            Box::new(|m| m.parts = vec![ContentPart::image("image/bmp", b"BM".to_vec())]),
+            Box::new(|m| m.parts = vec![ContentPart::pdf("a.pdf", pdf(), 0)]),
+            Box::new(|m| m.parts = vec![ContentPart::pdf("a.pdf", png(1, 1), 1)]),
+        ];
+        for (index, mutate) in cases.iter().enumerate() {
+            let mut message = message.clone();
+            mutate(&mut message);
+            let request = ChatRequest::new(model(), vec![message]);
+            assert!(
+                matches!(request.validate(), Err(ProviderError::InvalidRequest(_))),
+                "case {index}"
+            );
+        }
+        let full = ChatMessage::user("x").with_parts(vec![image(); MAX_PARTS_PER_MESSAGE]);
+        assert!(ChatRequest::new(model(), vec![full]).validate().is_ok());
+    }
+
+    #[test]
+    fn estimates_count_parts_by_size_and_pages_not_bytes() {
+        use crate::parts::fixtures::{pdf, png};
+        let model = || ModelId::new("m").unwrap();
+        let mut bytes = png(28, 28);
+        bytes.resize(4 * 1024 * 1024, 0);
+        let image = ChatRequest::new(
+            model(),
+            vec![ChatMessage::user("").with_parts(vec![ContentPart::image("image/png", bytes)])],
+        );
+        // 16 bytes of framing (4 tokens) plus one 28x28 tile.
+        assert_eq!(image.estimated_input_tokens(), 5);
+        let document = ChatRequest::new(
+            model(),
+            vec![ChatMessage::user("").with_parts(vec![ContentPart::pdf("a.pdf", pdf(), 10)])],
+        );
+        assert_eq!(document.estimated_input_tokens(), 4 + 10 * PDF_PAGE_TOKENS);
+        // A family's own page cost (Gemini's 560); text and images are
+        // estimated the same way.
+        assert_eq!(document.estimated_input_tokens_with(560), 4 + 10 * 560);
+        assert_eq!(image.estimated_input_tokens_with(560), 5);
+        assert_eq!(
+            request().estimated_input_tokens(),
+            ChatRequest::new(model(), vec![ChatMessage::user("hello")]).estimated_input_tokens()
+        );
     }
 
     #[test]

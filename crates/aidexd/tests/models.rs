@@ -4,17 +4,20 @@
 mod common;
 
 use aidex_providers::{
-    FakeProvider, Locality, ModelDescriptor, ModelId, ModelRef, ModelRole, ProviderId,
-    ToolCallSupport,
+    FakeProvider, Locality, ModelDescriptor, ModelId, ModelRef, ModelRole, ProviderEntry,
+    ProviderId, ToolCallSupport,
 };
 use aidex_vault::KdfParams;
 use aidexd::{
     Client, ClientError, ErrorCode,
     methods::{
         models::{
-            MODEL_LIST, MODEL_ROUTE, ModelList, NETWORK_OFFLINE, NETWORK_STATUS, NetworkStatus,
-            PROVIDER_ADD, RouteResult,
+            MODEL_LIST, MODEL_PROVIDERS, MODEL_ROUTE, ModelList, NETWORK_OFFLINE, NETWORK_STATUS,
+            NetworkStatus, PROVIDER_ADD, PROVIDER_OPEN_LINK, PROVIDER_PATCH, ProviderList,
+            RouteResult,
         },
+        runtime::{RUNTIME_CATALOG, RUNTIME_LIST},
+        settings::{MODEL_PREFERENCES_GET, MODEL_PREFERENCES_SET},
         vault::{INIT, LOCK, SECRET_SET},
     },
 };
@@ -285,6 +288,91 @@ fn routing_and_network_state_are_inspectable_over_ipc() {
             .as_str()
             .unwrap()
             .contains("offline mode on")
+    );
+    drop(client);
+    daemon.stop();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn account_metadata_refresh_and_model_preferences_over_ipc() {
+    let server = ModelServer::start();
+    let root = common::temp_drive();
+    let daemon = start(root.path(), options(), |daemon| {
+        daemon
+            .services()
+            .vault()
+            .set_kdf_params(KdfParams::new(8, 1, 1).unwrap());
+    });
+    let mut client = Client::connect(root.path(), "test-models").unwrap();
+    let added: ProviderEntry = client
+        .call_as(
+            PROVIDER_ADD,
+            json!({"id": "lab", "base_url": server.base_url(), "display_name": "Lab box", "preset_id": "vllm"}),
+        )
+        .unwrap();
+    assert_eq!(added.display_name.as_deref(), Some("Lab box"));
+    assert_eq!(added.preset_id.as_deref(), Some("vllm"));
+
+    // One provider at a time; cached until an explicit refresh.
+    for (params, connections) in [
+        (json!({"provider_id": "lab"}), 1),
+        (json!({"provider_id": "lab"}), 1),
+        (json!({"provider_id": "lab", "refresh": true}), 2),
+    ] {
+        let listing: ModelList = client.call_as(MODEL_LIST, params).unwrap();
+        assert_eq!(listing.models[0].model.to_string(), "lab/gpt-test");
+        assert_eq!(server.connections.load(Ordering::SeqCst), connections);
+    }
+
+    let disabled: ProviderEntry = client
+        .call_as(PROVIDER_PATCH, json!({"id": "lab", "enabled": false}))
+        .unwrap();
+    assert!(!disabled.enabled);
+    let listing: ModelList = client.call_as(MODEL_LIST, Value::Null).unwrap();
+    assert!(listing.models.is_empty() && listing.failures.is_empty());
+    let providers: ProviderList = client.call_as(MODEL_PROVIDERS, Value::Null).unwrap();
+    let lab = &providers.providers[0];
+    assert_eq!(lab.display_name.as_deref(), Some("Lab box"));
+    assert!(!lab.enabled);
+    assert_eq!(lab.catalog.as_ref().unwrap().model_count, 1);
+    assert_eq!(server.connections.load(Ordering::SeqCst), 2);
+
+    let (kind, _) = rpc_error(
+        client
+            .call(
+                PROVIDER_OPEN_LINK,
+                json!({"preset_id": "nope", "link": "docs"}),
+            )
+            .unwrap_err(),
+    );
+    assert_eq!(kind, Some(ErrorCode::InvalidParams));
+    let catalog = client.call(RUNTIME_CATALOG, Value::Null).unwrap();
+    assert_eq!(catalog.as_array().unwrap().len(), 10);
+
+    // No vault yet: the vault's own error, never an empty record.
+    let (kind, _) = rpc_error(client.call(MODEL_PREFERENCES_GET, Value::Null).unwrap_err());
+    assert_eq!(kind, Some(ErrorCode::NotFound));
+    client
+        .call(INIT, json!({"passphrase": "correct horse battery staple"}))
+        .unwrap();
+    let saved = client
+        .call(
+            MODEL_PREFERENCES_SET,
+            json!({"favorite_models": ["lab/gpt-test", "lab/gpt-test"]}),
+        )
+        .unwrap();
+    assert_eq!(
+        saved,
+        json!({"favorite_models": ["lab/gpt-test"], "hidden_models": []})
+    );
+    assert_eq!(
+        client.call(MODEL_PREFERENCES_GET, Value::Null).unwrap(),
+        saved
+    );
+    assert_eq!(
+        client.call(RUNTIME_LIST, Value::Null).unwrap(),
+        json!({"runtimes": []})
     );
     drop(client);
     daemon.stop();

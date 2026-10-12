@@ -225,7 +225,7 @@ fn read_lines(
     let mut resume = None;
     let mut done = binary;
     loop {
-        ctx.cancel.check()?;
+        crate::context::check_cancel(&ctx.cancel)?;
         let chunk = match reader.fill_buf() {
             Ok(chunk) => chunk,
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,

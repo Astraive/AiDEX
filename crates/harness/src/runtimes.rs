@@ -1,5 +1,5 @@
 //! Injected external execution with the same encrypted history and approvals.
-use crate::NativeEngine;
+use crate::{NativeEngine, engine::relock};
 use aidex_core::{CancelToken, EntityId};
 use aidex_events::{EventKind, RiskLevel};
 use aidex_native_sessions::*;
@@ -26,10 +26,7 @@ impl NativeEngine {
         &self,
         mutation: impl FnOnce() -> Result<(T, Vec<Arc<dyn RuntimeExecutor>>), String>,
     ) -> Result<T, String> {
-        let _guard = self
-            .operations
-            .lock()
-            .map_err(|_| "native operations poisoned")?;
+        let _guard = relock(&self.operations);
         for run in self.store.run_summaries()? {
             if run.status.active() {
                 let config = self.store.get(&run.session_id)?.configuration;
@@ -56,10 +53,7 @@ impl NativeEngine {
             }
             replacement.insert(descriptor.id, executor);
         }
-        *self
-            .runtimes
-            .lock()
-            .map_err(|_| "runtime registry poisoned")? = replacement;
+        *relock(&self.runtimes) = replacement;
         Ok(result)
     }
     pub fn synchronize_runtimes(
@@ -82,10 +76,7 @@ impl NativeEngine {
         {
             return Err("invalid external runtime descriptor".into());
         }
-        let mut registry = self
-            .runtimes
-            .lock()
-            .map_err(|_| "runtime registry poisoned")?;
+        let mut registry = relock(&self.runtimes);
         if registry.contains_key(id) {
             return Err("runtime already registered".into());
         }
@@ -93,10 +84,7 @@ impl NativeEngine {
         Ok(())
     }
     pub fn runtime_descriptors(&self) -> Vec<RuntimeDescriptor> {
-        let mut items = self
-            .runtimes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let mut items = relock(&self.runtimes)
             .values()
             .map(|r| r.descriptor())
             .collect::<Vec<_>>();
@@ -111,10 +99,7 @@ impl NativeEngine {
             .runtime_id
             .as_deref()
             .ok_or("external runtime was not selected")?;
-        let runtime = self
-            .runtimes
-            .lock()
-            .map_err(|_| "runtime registry poisoned")?
+        let runtime = relock(&self.runtimes)
             .get(id)
             .cloned()
             .ok_or("selected external runtime is not registered")?;
@@ -135,14 +120,6 @@ impl NativeEngine {
         operation: RuntimeOperation,
     ) -> Result<RuntimeRequest, String> {
         let s = self.store.get(&run.session_id)?;
-        // SDK model routing can include cloud providers. Treat this boundary as
-        // remote unless a future verified adapter locality contract says otherwise.
-        self.broker.authorize_native(
-            &run.session_id,
-            &s.configuration,
-            aidex_policy::Action::ModelInvoke,
-            Some(aidex_policy::ModelLocality::Remote),
-        )?;
         let workspace = s
             .configuration
             .workspace_id
@@ -182,11 +159,14 @@ impl NativeEngine {
         if operation != RuntimeOperation::Approval {
             approvals.clear();
         }
-        let contextual = self.workspace_context(&s, run)?;
-        let instructions = std::iter::once(s.configuration.instructions.clone())
-            .chain(contextual.into_iter().map(|message| message.content))
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        // Runtimes cannot receive files: attachments of the conversation
+        // reach them as placeholder lines.
+        let mut messages = run.transcript.clone();
+        let runtime_name = self
+            .runtime_for(&s.configuration)
+            .map(|runtime| runtime.descriptor().name)
+            .unwrap_or_else(|_| "this runtime".into());
+        self.runtime_placeholders(&s, run, &runtime_name, &mut messages)?;
         Ok(RuntimeRequest {
             session_id: run.session_id.clone(),
             run_id: run.id.clone(),
@@ -199,14 +179,15 @@ impl NativeEngine {
             } else {
                 s.configuration.permission_mode
             },
-            instructions,
-            model: Some(s.configuration.model_id.clone()),
-            messages: run.transcript.clone(),
+            instructions: s.configuration.instructions.clone(),
+            // The default-model sentinel lets the runtime pick its own default.
+            model: (s.configuration.model_id != RUNTIME_DEFAULT_MODEL)
+                .then(|| s.configuration.model_id.clone()),
+            messages,
             max_steps: s.configuration.max_steps.saturating_sub(run.steps),
             max_tokens: s.configuration.max_tokens,
             runtime_ref: run.runtime_ref.clone(),
             approvals,
-            bridge: None,
         })
     }
     pub(crate) fn respond_runtime(
@@ -221,27 +202,16 @@ impl NativeEngine {
             return Err("runtime approval continuation is unavailable".into());
         }
         self.store.update(&run.session_id, |s| {
-            let active = s
-                .runs
-                .iter_mut()
-                .find(|r| r.id == run.id)
-                .ok_or("run not found")?;
-            if active.status != RunStatus::WaitingApproval {
-                return Err("runtime approval no longer has a waiting run".into());
-            }
-            let pending = s
-                .approvals
+            s.approvals
                 .iter_mut()
                 .find(|a| a.id == approval.id)
-                .ok_or("approval not found")?;
-            if pending.status != "pending"
-                || pending.fingerprint != approval.fingerprint
-                || pending.bridge_call_id.is_some()
-            {
-                return Err("runtime approval changed or expired".into());
-            }
-            pending.status = if approved { "approved" } else { "denied" }.into();
-            active.status = RunStatus::Running;
+                .ok_or("approval not found")?
+                .status = if approved { "approved" } else { "denied" }.into();
+            s.runs
+                .iter_mut()
+                .find(|r| r.id == run.id)
+                .ok_or("run not found")?
+                .status = RunStatus::Running;
             Ok(())
         })?;
         let approval_id = EntityId::new(&approval.id).map_err(|e| e.to_string())?;
@@ -260,37 +230,20 @@ impl NativeEngine {
             },
         );
         let current = self.store.run(&run.id)?;
-        if current.status != RunStatus::Running {
-            return Err("runtime approval was interrupted before continuation".into());
-        }
         self.launch_operation(&current, RuntimeOperation::Approval)?;
         Ok(current)
     }
     pub(crate) fn execute_runtime(
-        self: &Arc<Self>,
+        &self,
         id: &str,
         operation: RuntimeOperation,
         cancel: &CancelToken,
     ) -> Result<(), String> {
-        if cancel.is_stopped() {
-            return Err("runtime launch was cancelled".into());
-        }
-        if let Some(live) = self
-            .live
-            .lock()
-            .map_err(|_| "native run registry unavailable")?
-            .get_mut(id)
-        {
-            live.executing = true;
-        }
         let run = self.store.run(id)?;
         let s = self.store.get(&run.session_id)?;
         let runtime = self.runtime_for(&s.configuration)?;
         let descriptor = runtime.descriptor();
-        let mut request = self.runtime_request(&run, operation)?;
-        if request.mode == Mode::Agent && runtime.supports_mcp_bridge() {
-            request.bridge = Some(self.runtime_bridge(&run, cancel)?);
-        }
+        let request = self.runtime_request(&run, operation)?;
         if request.max_steps == 0 {
             return Err("runtime step budget exhausted".into());
         }
@@ -303,9 +256,6 @@ impl NativeEngine {
             );
         }
         runtime.validate(&request).map_err(|e| e.to_string())?;
-        if cancel.is_stopped() {
-            return Err("runtime launch was cancelled".into());
-        }
         self.transition(id, RunStatus::Running, None)?;
         let index = self.store.update(&run.session_id, |s| {
             let r = s
@@ -327,21 +277,13 @@ impl NativeEngine {
         let mut saved = 0;
         let mut error = None;
         let mut paused = false;
-        let mut approval_event = None;
-        let mut started_reference: Option<Value> = None;
         let mut tools = HashSet::new();
         let response=runtime.execute(&request,&mut|event|{
    if cancel.is_stopped()||error.is_some(){return RuntimeControl::Pause;}
    let result=(||->Result<RuntimeControl,String>{
     match event{
-     RuntimeEvent::SessionStarted {runtime_ref} => {
-      if paused{return Err("runtime identity arrived after an approval pause".into());}safe_reference(runtime_ref)?;
-      if let Some(previous)=&started_reference{if previous!=runtime_ref{return Err("runtime session-start identity changed within one launch".into());}return Ok(RuntimeControl::Continue);}
-      self.store.update(&run.session_id,|session|{let active=session.runs.iter_mut().find(|active|active.id==id).ok_or("run not found")?;if !active.status.active(){return Err("runtime identity requires an active run".into());}active.runtime_ref=Some(runtime_ref.clone());if active.parent_run_id.is_none(){session.runtime_ref=Some(runtime_ref.clone());}Ok(())})?;
-      started_reference=Some(runtime_ref.clone());Ok(RuntimeControl::Continue)
-     },
      RuntimeEvent::TextDelta{text}=>{partial.push_str(text);if partial.len()>1024*1024{return Err("runtime text exceeds output bound".into());}
-      self.emit(&run.session_id,EventKind::AgentRunDelta{agent_id:EntityId::new(id).map_err(|e|e.to_string())?,text:text.clone()});if run.parent_run_id.is_none(){self.emit(&run.session_id,EventKind::AgentDelta{text:text.clone()});}
+     if run.parent_run_id.is_none(){self.emit(&run.session_id,EventKind::AgentDelta{text:text.clone()});}
      if last.elapsed()>=Duration::from_millis(100)||partial.len()-saved>=4096{if let Some(index)=index{self.store.update(&run.session_id,|s|{s.messages[index].content=partial.clone();Ok(())})?;}last=Instant::now();saved=partial.len();}Ok(RuntimeControl::Continue)},
      RuntimeEvent::ToolProgress{call_id,tool_name,status,summary}=>{
       if paused||request.mode!=Mode::Agent{return Err("runtime attempted tool execution outside an active agent scope".into());}
@@ -356,7 +298,7 @@ impl NativeEngine {
       if let Some(a)=existing{if a.fingerprint!=fingerprint{return Err("runtime approval request ID was reused with changed arguments".into());}
       if matches!(a.status.as_str(),"approved"|"denied"){return Ok(RuntimeControl::Continue);}
       if a.status=="pending"{paused=true;return Ok(RuntimeControl::Pause);}}
-      let approval=Approval{id:aidex_native_sessions::id("approval")?,run_id:id.into(),tool_name:tool_name.clone(),arguments:arguments.clone(),fingerprint,status:"pending".into(),preview:None,runtime_id:Some(descriptor.id.clone()),runtime_request_id:Some(request_id.clone()),runtime_ref:Some(runtime_ref.clone()),bridge_call_id:None};self.store.update(&run.session_id,|s|{if s.approvals.iter().any(|approval|approval.run_id==id&&approval.status=="pending"){return Err("another approval is already pending for this run".into());}let active=s.runs.iter_mut().find(|active|active.id==id).ok_or("run not found")?;if active.status!=RunStatus::Running{return Err("runtime approval requires a running run".into());}active.runtime_ref=Some(runtime_ref.clone());if active.parent_run_id.is_none(){s.runtime_ref=Some(runtime_ref.clone());}s.approvals.push(approval.clone());Ok(())})?;approval_event=Some(EventKind::ApprovalCreated{approval_id:EntityId::new(&approval.id).map_err(|e|e.to_string())?,intent_id:event_id("intent",request_id)?,summary:"review external runtime tool arguments".into(),scope:aidex_events::ApprovalScope::Once,expires_at:None});paused=true;Ok(RuntimeControl::Pause)
+      let approval=Approval{id:aidex_native_sessions::id("approval")?,run_id:id.into(),tool_name:tool_name.clone(),arguments:arguments.clone(),fingerprint,status:"pending".into(),preview:None,runtime_id:Some(descriptor.id.clone()),runtime_request_id:Some(request_id.clone()),runtime_ref:Some(runtime_ref.clone())};self.store.update(&run.session_id,|s|{s.approvals.push(approval.clone());Ok(())})?;self.emit(&run.session_id,EventKind::ApprovalCreated{approval_id:EntityId::new(&approval.id).map_err(|e|e.to_string())?,intent_id:event_id("intent",request_id)?,summary:"review external runtime tool arguments".into(),scope:aidex_events::ApprovalScope::Once,expires_at:None});paused=true;Ok(RuntimeControl::Pause)
      }
     }
    })();match result{Ok(control)=>control,Err(problem)=>{error=Some(problem);RuntimeControl::Pause}}
@@ -370,9 +312,6 @@ impl NativeEngine {
         }
         if let Some(reference) = &response.runtime_ref {
             safe_reference(reference)?;
-        }
-        if response.status == RuntimeStatus::Completed {
-            self.wait_bridge_calls(id, cancel)?;
         }
         if paused && response.status != RuntimeStatus::WaitingApproval {
             return Err("runtime completed while approval was pending".into());
@@ -388,11 +327,9 @@ impl NativeEngine {
                 .iter_mut()
                 .find(|r| r.id == id)
                 .ok_or("run not found")?;
-            if let Some(reference) = &response.runtime_ref {
-                r.runtime_ref = Some(reference.clone());
-                if r.parent_run_id.is_none() {
-                    s.runtime_ref = Some(reference.clone());
-                }
+            r.runtime_ref = response.runtime_ref.clone();
+            if r.parent_run_id.is_none() {
+                s.runtime_ref = response.runtime_ref.clone();
             }
             if response.status == RuntimeStatus::Completed {
                 let message = response
@@ -401,30 +338,17 @@ impl NativeEngine {
                     .unwrap_or_else(|| ChatMessage::assistant(partial.clone()));
                 r.transcript.push(message.clone());
                 if let Some(index) = index {
-                    // Bridge calls append evidence while the streamed assistant
-                    // placeholder is open. Keep final text after those pairs.
-                    s.messages.remove(index);
-                    s.messages.push(message);
+                    s.messages[index] = message;
                 }
             }
             Ok(())
         })?;
-        if response.status == RuntimeStatus::Completed && self.settle_children(id, cancel)? {
-            if !descriptor.supports_resume || response.runtime_ref.is_none() {
-                return Err("runtime cannot safely continue with delegated child results; explicit context handoff required".into());
-            }
-            return self.execute_runtime(id, RuntimeOperation::Resume, cancel);
-        }
         if response.status == RuntimeStatus::WaitingApproval
-            && let Some(live) = self
-                .live
-                .lock()
-                .map_err(|_| "run registry poisoned")?
-                .get_mut(id)
+            && let Some(live) = relock(&self.live).get_mut(id)
         {
             live.executing = false;
         }
-        let finished = self.transition(
+        self.transition(
             id,
             if response.status == RuntimeStatus::WaitingApproval {
                 RunStatus::WaitingApproval
@@ -433,11 +357,6 @@ impl NativeEngine {
             },
             None,
         )?;
-        if finished.status == RunStatus::WaitingApproval
-            && let Some(event) = approval_event
-        {
-            self.emit(&run.session_id, event);
-        }
         Ok(())
     }
 }

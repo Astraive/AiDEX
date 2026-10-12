@@ -21,12 +21,35 @@ fn messages(
             .get(session)
             .map_err(native_error)?
             .messages),
-        (None, Some(run)) => Ok(s
-            .native()
-            .store()
-            .run(run)
-            .map_err(native_error)?
-            .transcript),
+        _ => scoped(s, session, run).map(|(messages, _)| messages),
+    }
+}
+/// The scope's messages and, for session history, the skills invoked by and
+/// the attachments sent with its user messages.
+fn scoped(
+    s: &Services,
+    session: Option<&str>,
+    run: Option<&str>,
+) -> Result<(Vec<ChatMessage>, view::MessageExtras), RpcError> {
+    match (session, run) {
+        (Some(session), None) => {
+            let detail = s.native().store().get(session).map_err(native_error)?;
+            let attachments = s
+                .native()
+                .store()
+                .message_attachments(session)
+                .map_err(native_error)?;
+            let extras = view::MessageExtras::of(&detail, attachments);
+            Ok((detail.messages, extras))
+        }
+        (None, Some(run)) => Ok((
+            s.native()
+                .store()
+                .run(run)
+                .map_err(native_error)?
+                .transcript,
+            view::MessageExtras::default(),
+        )),
         _ => Err(RpcError::invalid_params(
             "choose exactly one session_id or run_id",
         )),
@@ -36,11 +59,8 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let s = services.clone();
     router.register("history.list", move |_, p| {
         let p: view::HistoryParams = parse_params(p)?;
-        view::history(
-            &messages(&s, p.session_id.as_deref(), p.run_id.as_deref())?,
-            p.offset,
-            p.limit,
-        )
+        let (messages, extras) = scoped(&s, p.session_id.as_deref(), p.run_id.as_deref())?;
+        view::history(&messages, p.offset, p.limit, &extras)
     })?;
     let s = services.clone();
     router.register("history.read", move |_, p| {

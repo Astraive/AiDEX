@@ -1,0 +1,46 @@
+/* Above `ToastRegion` (50) so a popover opened next to a toast stays usable. */
+.popover {
+  position: fixed;
+  z-index: 60;
+  min-width: 180px;
+  max-width: calc(100vw - 16px);
+  max-height: var(--aidex-popover-available-height, calc(100dvh - 16px));
+  overflow: auto;
+  border: 1px solid var(--aidex-color-border-strong);
+  border-radius: var(--aidex-radius-lg);
+  background: var(--aidex-color-surface-raised);
+  color: var(--aidex-color-text);
+  /* Theme-aware token: dark shadow on dark surfaces, a soft text-tinted one in the light theme. */
+  box-shadow: 0 16px 40px var(--aidex-color-shadow);
+  animation: enter-below var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+/* The surface takes focus only programmatically or from a click on non-interactive content. */
+.popover:focus {
+  outline: none;
+}
+
+.top {
+  animation-name: enter-above;
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .popover {
+    animation: none;
+  }
+}
+
+@keyframes enter-below {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes enter-above {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}

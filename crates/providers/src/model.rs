@@ -137,6 +137,10 @@ pub struct CostHint {
 }
 
 /// Where a descriptor's limits and capabilities came from.
+///
+/// The declaration order is the router's preference order: configured
+/// metadata ranks before discovered, discovered before catalog, and catalog
+/// before assumed.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilitySource {
@@ -145,6 +149,12 @@ pub enum CapabilitySource {
     Configured,
     /// Reported by the provider's model listing (for example a context length).
     Discovered,
+    /// The provider listed the model without limits, and the built-in table of
+    /// well-known model families supplied conservative ones. Eligible for
+    /// automatic routing like discovered metadata, but ranked after it. The
+    /// values are lower bounds, so the harness does not enforce a Catalog
+    /// context window as a hard limit.
+    Catalog,
     /// Defaults for a listed model without metadata. The router does not select
     /// such models automatically; only an explicit user override can.
     Assumed,
@@ -155,6 +165,7 @@ impl CapabilitySource {
         match self {
             Self::Configured => "configured",
             Self::Discovered => "discovered",
+            Self::Catalog => "catalog",
             Self::Assumed => "assumed",
         }
     }

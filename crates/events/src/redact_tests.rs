@@ -63,6 +63,35 @@ fn bearer_and_authorization_credentials_are_redacted() {
 }
 
 #[test]
+fn authorization_headers_accept_horizontal_whitespace_and_http_token_schemes() {
+    for (header, expected) in [
+        (
+            "Authorization:\tBasic dXNlcjpwYXNzd29yZA==",
+            "Authorization:\tBasic [REDACTED]",
+        ),
+        (
+            "Authorization: Api-Key opaque-credential",
+            "Authorization: Api-Key [REDACTED]",
+        ),
+        (
+            "authorization\t:\tCustom_2\t\tlowercase-credential",
+            "authorization\t:\tCustom_2\t\t[REDACTED]",
+        ),
+        (
+            "Authorization: !#$%&'*+-.^_`|~09Az opaque-credential",
+            "Authorization: !#$%&'*+-.^_`|~09Az [REDACTED]",
+        ),
+    ] {
+        assert_eq!(redacted(header), expected);
+        assert_eq!(redacted(expected), expected);
+    }
+    assert_eq!(
+        redacted("Authorization:\nBasic opaque-credential"),
+        "Authorization:\nBasic opaque-credential"
+    );
+}
+
+#[test]
 fn sensitive_assignments_are_redacted_in_common_syntaxes() {
     assert_eq!(redacted("PASSWORD=hunter2"), "PASSWORD=[REDACTED]");
     assert_eq!(redacted("db_passwd: s3cr3t!"), "db_passwd: [REDACTED]");

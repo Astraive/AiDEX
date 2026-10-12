@@ -1,0 +1,21 @@
+[package]
+name = "aidex-skills"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Portable agent skills for AiDEX: SKILL.md discovery, validation, enablement, and drive authoring."
+
+[dependencies]
+aidex-core = { path = "../core" }
+aidex-drive = { path = "../drive" }
+aidex-events = { path = "../events" }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+
+[lints]
+workspace = true

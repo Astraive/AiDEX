@@ -11,9 +11,8 @@ use aidex_drive::DrivePaths;
 use crate::{WorkspaceError, platform};
 
 /// Canonicalize an explicitly selected host directory and refuse locations that
-/// would expose AiDEX state: the drive root, any directory containing the drive
-/// (its vault, identity, and sessions would become workspace files), and anything
-/// inside the drive's managed directories or `.aidex`.
+/// overlap AiDEX state: the drive root, any directory containing the drive, and
+/// directories containing or inside managed directories or `.aidex`.
 pub(crate) fn validate_host_root(
     paths: &DrivePaths,
     path: &Path,
@@ -63,9 +62,6 @@ pub(crate) fn check_not_drive_state(
             "`{shown}` is or contains the AiDEX drive; select a project directory instead"
         )));
     }
-    if !platform::is_within(canonical, &drive_root) {
-        return Ok(());
-    }
     let managed = paths
         .layout()
         .entries()
@@ -73,9 +69,10 @@ pub(crate) fn check_not_drive_state(
         .chain([drive_root.join(".aidex")]);
     for directory in managed {
         let directory = fs::canonicalize(&directory).unwrap_or(directory);
-        if platform::is_within(canonical, &directory) {
+        if platform::is_within(canonical, &directory) || platform::is_within(&directory, canonical)
+        {
             return Err(WorkspaceError::Forbidden(format!(
-                "`{shown}` is inside the AiDEX-managed directory `{}`; use `create_drive` for drive workspaces",
+                "`{shown}` overlaps the AiDEX-managed directory `{}`; use `create_drive` for drive workspaces",
                 platform::display_path(&directory).display()
             )));
         }

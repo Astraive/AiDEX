@@ -508,39 +508,6 @@ impl AuthService {
     pub fn secret_name(provider: &str) -> String {
         format!("oauth.{provider}.access")
     }
-    /// Backend-only stable identity from the authenticated encrypted profile.
-    /// Access-token refresh does not change this binding; missing verified identity fails closed.
-    pub fn account_binding(&self, provider: &str) -> Result<String, AuthError> {
-        use sha2::{Digest, Sha256};
-        storage::validate_provider(provider)?;
-        let lock = self.provider_lock(provider);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let profile = self.profile(provider)?.ok_or(AuthError::NotFound)?;
-        if profile.needs_reauth
-            || profile
-                .tokens
-                .as_ref()
-                .is_none_or(|tokens| tokens.access_token.is_empty())
-        {
-            return Err(AuthError::Reauthorize);
-        }
-        let subject = profile
-            .subject
-            .as_deref()
-            .filter(|v| !v.is_empty())
-            .ok_or(AuthError::IdentityInvalid)?;
-        let issuer = profile
-            .issuer
-            .as_deref()
-            .filter(|v| !v.is_empty())
-            .ok_or(AuthError::IdentityInvalid)?;
-        if profile.client_id.is_empty() {
-            return Err(AuthError::IdentityInvalid);
-        }
-        let identity = serde_json::to_vec(&(provider, issuer, subject, &profile.client_id))
-            .map_err(|_| AuthError::Unavailable)?;
-        Ok(format!("{:x}", Sha256::digest(identity)))
-    }
     /// Designated names never fall back to a stale raw vault token.
     pub fn owns_secret(provider: &str, name: &str) -> bool {
         name == Self::secret_name(provider)
@@ -606,37 +573,12 @@ impl AuthService {
             Err(AuthError::Invalid)
         }
     }
-    /// Fixed command text; exact pending URL travels as environment data.
+    /// Open the exact URL of a pending sign-in flow through
+    /// [`open_in_browser`](crate::open_in_browser): fixed command text, the URL
+    /// as environment data, and this service's network gate.
     pub fn open(&self, url: &str) -> Result<(), AuthError> {
         self.validate_open_url(url)?;
-        oauth::network(&*self.network_allowed)?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let system = std::env::var_os("SystemRoot").ok_or(AuthError::Unavailable)?;
-            let program = std::path::PathBuf::from(system)
-                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-            let status = std::process::Command::new(program)
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "Start-Process -FilePath $env:AIDEX_AUTHORIZATION_URL",
-                ])
-                .env("AIDEX_AUTHORIZATION_URL", url)
-                .creation_flags(0x08000000)
-                .status()
-                .map_err(|_| AuthError::Unavailable)?;
-            if !status.success() {
-                return Err(AuthError::Unavailable);
-            }
-            Ok(())
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = url;
-            Err(AuthError::Unavailable)
-        }
+        crate::browser::open_in_browser(url, &*self.network_allowed)
     }
 }
 fn receive_callback(

@@ -1,7 +1,13 @@
-# Broker approvals
+# Approvals feature
 
-`LiveApprovalsPanel` is the Security approval center. It reads paginated pending requests and saved decisions from `approval.list`, and sends once-only decisions with the exact fingerprint and a command ID to `approval.respond`. Pending counts use the service's filtered total, rather than the loaded page length.
+Human decisions on sensitive operations requested through the execution broker. The Approvals Center renders inside the Security page's Approvals tab.
 
-The conversation displays the same live requests. Truncated arguments or previews cannot be approved; denials remain available. External runtime requests identify their instance and owning run. Request expiration and process loss remain service-owned; the UI never simulates a successful decision or a remembered session grant.
+| File | Shows |
+| --- | --- |
+| `ApprovalsPanel.tsx` | Pill tabs for Pending and History. Pending requests render as cards, with an empty state when none are left; history is a table of decisions. |
+| `ApprovalCard.tsx` | One request: summary, requested command, effect, agent, workspace, risk, request time, "Remember for this session", and Deny / Approve. |
+| `RiskBadge.tsx` | Risk level as text and icon (High, Medium, Low), never color alone. |
+| `useApprovals.ts` | Local queue: deciding moves a request to history with its decision. The Security page owns it so the dashboard and tab count reflect decisions. |
+| `sample.ts` | Sample requests until AiDEX Core exposes the approval service (`crates/approvals`). |
 
-The former sample approval components are not routed by Security.
+Decisions are local UI state only and show a "Preview: …" toast; nothing reaches the broker until Core is connected. Remote approvals (mobile, CLI) will need scoped, authenticated commands.

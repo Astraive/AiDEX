@@ -3,6 +3,7 @@
 
 use super::ServicesError;
 use aidex_auth::AuthService;
+use aidex_broker::{Broker, ModelEgress};
 use aidex_core::EntityId;
 use aidex_drive::DrivePaths;
 use aidex_events::{EventKind, EventScope, EventSink};
@@ -22,6 +23,10 @@ const CREDENTIAL_HANDLE_TTL: Duration = Duration::from_secs(30);
 /// revoked for every request, so a secret is released only to the provider
 /// its policy names. Nothing is cached and nothing is read from the
 /// environment or configuration.
+///
+/// The daemon itself uses `aidex_broker::ModelEgress`, which adds policy
+/// evaluation and audit events; this resolver remains for embedders that run
+/// providers without a broker.
 pub struct VaultCredentials {
     vault: Arc<VaultService>,
     auth: Option<Arc<AuthService>>,
@@ -106,6 +111,36 @@ impl CredentialResolver for VaultCredentials {
         self.vault.revoke_handle(&handle.handle_id);
         let secret = resolved.map_err(|error| credential_error(&error, secret_name))?;
         Ok(SecretBytes::new(secret.expose().to_vec()))
+    }
+}
+
+/// The daemon's provider credentials: account sign-ins owned by
+/// [`AuthService`] (for example a ChatGPT login) resolve through it; every
+/// vault secret goes through the broker's [`ModelEgress`], which evaluates
+/// `secret.use` for `provider:<id>` and records `secret.granted`/`secret.revoked`.
+pub struct BrokeredCredentials {
+    account: VaultCredentials,
+    egress: Arc<ModelEgress>,
+}
+
+impl fmt::Debug for BrokeredCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrokeredCredentials")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CredentialResolver for BrokeredCredentials {
+    fn resolve(
+        &self,
+        provider: &ProviderId,
+        secret_name: &str,
+    ) -> Result<SecretBytes, CredentialError> {
+        if AuthService::owns_secret(provider.as_str(), secret_name) {
+            self.account.resolve(provider, secret_name)
+        } else {
+            self.egress.resolve(provider, secret_name)
+        }
     }
 }
 
@@ -216,10 +251,14 @@ pub struct ModelServices {
 }
 
 impl ModelServices {
-    /// Load the offline switch and configured providers from the drive.
+    /// Load the offline switch and configured providers from the drive. Remote
+    /// provider calls pass the offline switch and then the broker's policy
+    /// (`model.invoke`); credentials are released through broker-issued vault
+    /// handles (`secret.use`, `secret.granted`).
     pub fn open(
         paths: &DrivePaths,
         vault: Arc<VaultService>,
+        broker: Arc<Broker>,
         observer: Arc<dyn ModelObserver>,
     ) -> Result<Self, ServicesError> {
         let offline = Arc::new(
@@ -237,13 +276,18 @@ impl ModelServices {
                     )
                 })?,
         );
-        let registry = ProviderRegistry::load(
-            paths,
-            Arc::new(VaultCredentials::with_auth(vault, auth.clone())),
-            Arc::clone(&offline) as _,
-        )
-        .map_err(|error| ServicesError::new("providers", error.code(), error.to_string()))?
-        .with_observer(Arc::clone(&observer));
+        let egress = Arc::new(
+            ModelEgress::new(broker)
+                .map_err(|error| ServicesError::new("broker", error.code(), error.to_string()))?
+                .with_offline_switch(Arc::clone(&offline) as _),
+        );
+        let credentials = Arc::new(BrokeredCredentials {
+            account: VaultCredentials::with_auth(vault, auth.clone()),
+            egress: Arc::clone(&egress),
+        });
+        let registry = ProviderRegistry::load(paths, credentials, egress as _)
+            .map_err(|error| ServicesError::new("providers", error.code(), error.to_string()))?
+            .with_observer(Arc::clone(&observer));
         Ok(Self {
             auth,
             registry: Arc::new(registry),

@@ -36,26 +36,7 @@
   font-weight: 500;
   color: var(--aidex-color-text);
 }
-.summary {
-  display: block;
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--aidex-color-text-muted);
-}
-.attachment {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  gap: 8px;
-  font-size: 12px;
-}
 @media (max-width: 900px) {
-  .summary {
-    max-width: 150px;
-  }
   .conversation {
     padding: 16px;
   }

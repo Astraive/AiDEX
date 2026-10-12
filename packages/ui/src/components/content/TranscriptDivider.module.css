@@ -1,0 +1,52 @@
+.divider {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-3);
+  min-width: 0;
+  margin: var(--aidex-space-2) 0;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+}
+
+.rule {
+  flex: 1 1 var(--aidex-space-6);
+  height: 1px;
+  background: var(--aidex-color-border-subtle);
+}
+
+.text {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--aidex-space-1) var(--aidex-space-2);
+  min-width: 0;
+  max-width: 80%;
+  margin: 0;
+  text-align: center;
+}
+
+.icon {
+  display: inline-grid;
+  flex: none;
+}
+
+.icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.label {
+  color: var(--aidex-color-text-secondary);
+  font-weight: 500;
+}
+
+.separator {
+  user-select: none;
+}
+
+.detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

@@ -281,6 +281,41 @@ fn events_tail_and_show_replay_over_ipc_from_the_cursor() {
     assert_eq!(code(&down), 3);
 }
 
+#[test]
+fn human_events_show_reports_a_closed_output_pipe_as_failure() {
+    let root = temp_drive();
+    let (daemon, log) = start_daemon(root.path());
+    for index in 0..255 {
+        log.append(
+            scope(),
+            EventKind::SessionFailed {
+                reason: format!("event {index}: {}", "details ".repeat(512)),
+            },
+        )
+        .unwrap();
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aidex"))
+        .args(drive_args(
+            &["events", "show", "--limit", "256"],
+            root.path(),
+        ))
+        .env_remove("AIDEX_DRIVE_ROOT")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let result = child.wait_with_output().unwrap();
+    assert_eq!(
+        code(&result),
+        1,
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    daemon.stop();
+    daemon.wait().unwrap();
+}
+
 /// Lines printed by a running `aidex` child, read on a background thread.
 fn spawn_lines(args: &[&str]) -> (std::process::Child, mpsc::Receiver<String>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_aidex"))

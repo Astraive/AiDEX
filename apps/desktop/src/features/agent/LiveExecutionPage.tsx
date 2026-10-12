@@ -7,9 +7,6 @@ import { useRpc } from "../../hooks/useRpc";
 import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
 import { HistoryMessages } from "../sessions/HistoryMessages";
-import { useSessionUpdates } from "../../hooks/useSessionUpdates";
-import { captureProcessEvent, type ProcessTraces } from "./executionOutput";
-import { ProcessOutputPanel } from "./ProcessOutputPanel";
 export function LiveExecutionPage() {
   const { route, navigate } = useNavigation();
   const session = useRpc(
@@ -19,41 +16,6 @@ export function LiveExecutionPage() {
   );
   const [selected, setSelected] = useState<string>();
   const [error, setError] = useState<string>();
-  const [childText, setChildText] = useState<Record<string, string>>({});
-  const [processes, setProcesses] = useState<ProcessTraces>({});
-  const live = useSessionUpdates(route.id, session.refetch, (envelope) => {
-    if (envelope.event.type.startsWith("process.")) {
-      setProcesses((previous) => captureProcessEvent(previous, envelope));
-      return;
-    }
-    if (envelope.event.type !== "agent.run_delta") return;
-    const { agent_id, text } = envelope.event.data ?? {};
-    if (typeof agent_id !== "string" || typeof text !== "string") return;
-    setChildText((previous) =>
-      Object.fromEntries(
-        [
-          ...Object.entries(previous).filter(([id]) => id !== agent_id),
-          [agent_id, `${previous[agent_id] ?? ""}${text}`.slice(-65536)],
-        ].slice(-16),
-      ),
-    );
-  });
-  useEffect(() => {
-    setChildText({});
-    setProcesses({});
-    setSelected(undefined);
-  }, [route.id]);
-  useEffect(() => {
-    if (!live.active)
-      setProcesses((previous) =>
-        Object.fromEntries(
-          Object.entries(previous).map(([id, process]) => [
-            id,
-            process.ended ? process : { ...process, uncertain: true },
-          ]),
-        ),
-      );
-  }, [live.active]);
   useEffect(() => {
     if (!route.id) return;
     const timer = setInterval(session.refetch, 1000);
@@ -71,11 +33,6 @@ export function LiveExecutionPage() {
         />
         {(session.error || error) && (
           <Notice tone="danger">{error ?? session.error?.message}</Notice>
-        )}
-        {live.reconnecting && (
-          <Notice tone="warning">
-            Reconnecting execution updates. {live.error}
-          </Notice>
         )}
         {!route.id && (
           <Button onClick={() => navigate({ page: "agent" })}>
@@ -99,16 +56,6 @@ export function LiveExecutionPage() {
                 </Text>
               )}
               {run.error && <Notice tone="danger">{run.error}</Notice>}
-              {run.parent_run_id &&
-                ["pending", "running", "waiting_approval"].includes(
-                  run.status,
-                ) &&
-                childText[run.id] && (
-                  <Stack gap={2}>
-                    <Text tone="muted">Live child output · latest excerpt</Text>
-                    <Text>{childText[run.id]}</Text>
-                  </Stack>
-                )}
               <Button variant="outline" onClick={() => setSelected(run.id)}>
                 Inspect tool and model history
               </Button>
@@ -133,17 +80,8 @@ export function LiveExecutionPage() {
         {session.data?.runs_truncated && (
           <Notice>Only the most recent runs appear in this summary.</Notice>
         )}
-        <ProcessOutputPanel traces={processes} />
         {selected && (
-          <HistoryMessages
-            key={selected}
-            scope={{ run_id: selected }}
-            live={session.data?.runs.some(
-              (run) =>
-                run.id === selected &&
-                ["pending", "running", "waiting_approval"].includes(run.status),
-            )}
-          />
+          <HistoryMessages key={selected} scope={{ run_id: selected }} />
         )}
         <Stack direction="row" gap={2}>
           <Button

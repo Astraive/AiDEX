@@ -11,9 +11,6 @@ pub(crate) struct Transport {
     frames: VecDeque<Value>,
     total: u64,
     secrets: Vec<zeroize::Zeroizing<String>>,
-    stderr: zeroize::Zeroizing<Vec<u8>>,
-    stderr_bytes: u64,
-    stderr_truncated: bool,
 }
 impl Transport {
     pub fn new(process: ManagedProcess, secrets: Vec<zeroize::Zeroizing<String>>) -> Self {
@@ -23,9 +20,6 @@ impl Transport {
             frames: VecDeque::new(),
             total: 0,
             secrets,
-            stderr: zeroize::Zeroizing::new(Vec::new()),
-            stderr_bytes: 0,
-            stderr_truncated: false,
         }
     }
     pub fn send(&self, value: Value) -> Result<(), RuntimeError> {
@@ -49,12 +43,6 @@ impl Transport {
                 return Ok(frame);
             }
             let output = self.process.take_output();
-            self.stderr_bytes = output.stderr.total_bytes;
-            self.stderr_truncated |= output.stderr.truncated;
-            let room = (16 * 1024usize).saturating_sub(self.stderr.len());
-            self.stderr
-                .extend_from_slice(&output.stderr.bytes[..room.min(output.stderr.bytes.len())]);
-            self.stderr_truncated |= output.stderr.bytes.len() > room;
             self.total = self.total.saturating_add(output.stdout.bytes.len() as u64);
             if output.stdout.truncated || self.total > 16 * 1024 * 1024 {
                 self.stop();
@@ -96,21 +84,13 @@ impl Transport {
                 continue;
             }
             if !self.process.is_running() {
-                let exit = self.process.try_wait().ok().flatten();
-                let reason = if self.pending.is_empty() {
-                    "Runtime exited before root completion"
-                } else {
-                    "Truncated runtime protocol frame"
-                };
                 return Err(error(
                     "process_closed",
-                    &format!(
-                        "{reason} (exit={:?}; stderr={}; bytes={}; truncated={})",
-                        exit.and_then(|v| v.code),
-                        crate::diagnostics::stderr_category(&self.stderr),
-                        self.stderr_bytes,
-                        self.stderr_truncated
-                    ),
+                    if self.pending.is_empty() {
+                        "Runtime exited before root completion"
+                    } else {
+                        "Truncated runtime protocol frame"
+                    },
                 ));
             }
             thread::sleep(Duration::from_millis(10));
@@ -132,43 +112,9 @@ fn scrub(value: Value, secrets: &[zeroize::Zeroizing<String>]) -> Value {
             Value::String(s)
         }
         Value::Array(v) => Value::Array(v.into_iter().map(|v| scrub(v, secrets)).collect()),
-        Value::Object(v) => Value::Object(
-            v.into_iter()
-                .map(|(k, v)| {
-                    let key = scrub(Value::String(k), secrets)
-                        .as_str()
-                        .unwrap()
-                        .to_owned();
-                    (key, scrub(v, secrets))
-                })
-                .collect(),
-        ),
-        Value::Number(_) | Value::Bool(_) | Value::Null => {
-            let text = value.to_string();
-            if secrets
-                .iter()
-                .any(|s| !s.is_empty() && text.contains(s.as_str()))
-            {
-                Value::String("[REDACTED]".into())
-            } else {
-                value
-            }
+        Value::Object(v) => {
+            Value::Object(v.into_iter().map(|(k, v)| (k, scrub(v, secrets))).collect())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn credential_reflections_are_scrubbed_from_keys_and_non_string_values() {
-        let protected = vec![
-            zeroize::Zeroizing::new("opaque-key-marker".into()),
-            zeroize::Zeroizing::new("48199273".into()),
-        ];
-        let input = serde_json::json!({"opaque-key-marker":{"nested":[48199273,"opaque-key-marker"]},"numeric":48199273});
-        let output = scrub(input, &protected).to_string();
-        assert!(!output.contains("opaque-key-marker"));
-        assert!(!output.contains("48199273"));
+        v => v,
     }
 }

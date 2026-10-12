@@ -82,6 +82,41 @@ fn bit_flips_in_the_header_file_are_detected() {
 }
 
 #[test]
+fn unauthenticated_header_cannot_request_excessive_kdf_work() {
+    let root = tempfile::tempdir().unwrap();
+    let (dir, vault, _) = create_with_secret(root.path());
+    drop(vault);
+    let original = fs::read(header_path(&dir)).unwrap();
+    for (memory, iterations, lanes) in [
+        (1024 * 1024, 64, 16), // Previously permitted attacker-selected maxima.
+        (65_537, 1, 1),
+        (65_536, 4, 1),
+        (65_536, 3, 5),
+    ] {
+        fs::write(header_path(&dir), &original).unwrap();
+        edit_header(&dir, |header| {
+            header["slots"][0]["kdf"]["memory_kib"] = json!(memory);
+            header["slots"][0]["kdf"]["iterations"] = json!(iterations);
+            header["slots"][0]["kdf"]["parallelism"] = json!(lanes);
+        });
+        let before = fs::read(header_path(&dir)).unwrap();
+        // Rejection must happen at parsing, not after an expensive unlock attempt.
+        assert_eq!(
+            Vault::open(&dir).unwrap_err().kind(),
+            VaultErrorKind::Corrupt
+        );
+        assert_eq!(fs::read(header_path(&dir)).unwrap(), before);
+    }
+    fs::write(header_path(&dir), original).unwrap();
+    assert!(
+        Vault::open(&dir)
+            .unwrap()
+            .unlock(&passphrase(PASSPHRASE))
+            .is_ok()
+    );
+}
+
+#[test]
 fn semantic_header_edits_fail_authentication() {
     let root = tempfile::tempdir().unwrap();
     let (dir, vault, _) = create_with_secret(root.path());

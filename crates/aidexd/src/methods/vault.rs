@@ -172,27 +172,6 @@ fn secret_params<T: DeserializeOwned>(
     })
 }
 
-/// System records are owned by their dedicated services, never generic editors.
-fn editable_secret(name: &SecretName) -> Result<(), RpcError> {
-    if matches!(
-        name.as_str(),
-        "native-record-encryption-key" | "external-runtime-encryption-key" | "aidex-preferences"
-    ) || name.as_str().starts_with("oauth.")
-    {
-        return Err(RpcError::new(
-            ErrorCode::PolicyDenied,
-            "This record is managed by AiDEX; use its account or settings controls",
-        ));
-    }
-    Ok(())
-}
-
-fn revoke_credential_users(shared: &Services) {
-    shared.native().cancel_all();
-    shared.extensions().disconnect_all();
-    let _ = shared.runtime().cancel_logins();
-}
-
 pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<(), RouterError> {
     let shared = Arc::clone(services);
     router.register(STATUS, move |_context, params| {
@@ -216,13 +195,8 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                 vault_id: outcome.vault_id.clone(),
             },
         )?;
-        shared.native().reconcile_after_unlock().map_err(|_| {
-            RpcError::new(
-                ErrorCode::Unavailable,
-                "Vault created, but interrupted agent state could not be reconciled",
-            )
-            .with_data(json!({"vault_unlocked":true,"reason":"agent_recovery_failed"}))
-        })?;
+        // Best effort: runtime sessions also load their runtime lazily.
+        let _ = super::runtime::sync_runtimes(&shared);
         to_result(&InitResult {
             state: VaultState::Unlocked,
             vault_id: outcome.vault_id.to_string(),
@@ -260,13 +234,10 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                 },
             )?;
         }
-        shared.native().reconcile_after_unlock().map_err(|_| {
-            RpcError::new(
-                ErrorCode::Unavailable,
-                "Vault unlocked, but interrupted agent state could not be reconciled",
-            )
-            .with_data(json!({"vault_unlocked":true,"reason":"agent_recovery_failed"}))
-        })?;
+        // The runtime configuration is sealed with a vault key, so the native
+        // engine learns the configured runtimes only now. Best effort: runtime
+        // sessions also load their runtime lazily.
+        let _ = super::runtime::sync_runtimes(&shared);
         to_result(&status)
     })?;
 
@@ -274,12 +245,11 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     router.register(LOCK, move |_context, params| {
         expect_no_params(&params)?;
         shared.native().cancel_all();
-        shared.extensions().disconnect_all();
-        let _ = shared.runtime().cancel_logins();
+        // In-flight attachment uploads end with the vault: their partial
+        // sealed files are deleted and later chunks are refused.
+        shared.native().store().abort_all_uploads();
         let vault_id = shared.vault().status().vault_id;
         let outcome = shared.vault().lock();
-        shared.extensions().disconnect_all();
-        let _ = shared.runtime().cancel_logins();
         if let (true, Some(vault_id)) = (outcome.was_unlocked, vault_id) {
             record_event(
                 &shared,
@@ -303,7 +273,6 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         )?;
         let value = SecretBytes::from(params.value);
         let name = SecretName::new(params.name).map_err(|error| vault_error(&error))?;
-        editable_secret(&name)?;
         let kind = match params.kind.as_deref() {
             Some(kind) => SecretKind::parse(kind).map_err(|error| vault_error(&error))?,
             None => SecretKind::Generic,
@@ -319,14 +288,6 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             .vault()
             .put_secret(&name, kind, value, policy)
             .map_err(|error| vault_error(&error))?;
-        revoke_credential_users(&shared);
-        record_event(
-            &shared,
-            EventScope::global(),
-            EventKind::SecretStored {
-                secret_ref: meta.secret_ref.clone(),
-            },
-        )?;
         to_result(&meta)
     })?;
 
@@ -344,19 +305,10 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     router.register(SECRET_DELETE, move |_context, params| {
         let params: DeleteParams = secret_params(SECRET_DELETE, params, "{name: string}")?;
         let name = SecretName::new(params.name).map_err(|error| vault_error(&error))?;
-        editable_secret(&name)?;
         let deleted = shared
             .vault()
             .delete_secret(&name)
             .map_err(|error| vault_error(&error))?;
-        revoke_credential_users(&shared);
-        record_event(
-            &shared,
-            EventScope::global(),
-            EventKind::SecretDeleted {
-                secret_ref: deleted.secret_ref.clone(),
-            },
-        )?;
         to_result(&DeleteResult { deleted })
     })?;
 

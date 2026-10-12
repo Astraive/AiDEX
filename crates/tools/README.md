@@ -2,7 +2,7 @@
 
 Typed, workspace-scoped tools with a two-phase **plan → execute** contract (issue #16; spec §12.2-12.4, §13, §56, §78-79, §91). Every tool validates its input against a closed schema, resolves every path through `aidex_workspace::ConfinedRoot`, reports facts and risk for policy evaluation, previews writes as reviewable diffs, and executes only with a permit bound to the exact plan. Processes (git, shell) run only through a `ProcessLauncher` that the execution broker implements over `aidex-sandbox`.
 
-Depends on `aidex-core`, `aidex-events` (`EventSink`, `redact_text`), `aidex-policy` (`Action`, `ShellCommand`/`classify_shell`, `Intent`), `aidex-sandbox` (launch/exit/output types), and `aidex-workspace` (`ConfinedRoot`). No daemon or CLI wiring yet: the broker (#17) exposes tools.
+Depends on `aidex-core`, `aidex-events` (`EventSink`, `redact_text`), `aidex-policy` (`Action`, `ShellCommand`/`classify_shell`, `Intent`), `aidex-sandbox` (launch/exit/output types), and `aidex-workspace` (`ConfinedRoot`). The execution broker (`aidex-broker`) exposes tools through the daemon (`tool.*`); the native harness (`aidex-harness`) currently holds its own registry.
 
 ## Flow
 
@@ -48,7 +48,7 @@ pub trait ProcessLauncher: Send + Sync {
 | `ToolId` | Dotted lowercase id (`fs.read`), also a valid `EntityId`; `model_name()` maps `.` to `_`. |
 | `ToolDescriptor` | `id`, `version`, `description`, `input_schema`/`output_schema` (draft-7 JSON Schema generated with `schemars` from closed `deny_unknown_fields` structs), `risk: RiskProfile`, `capabilities`. `spec()` gives the `ToolSpec`. |
 | `RiskProfile` | `action: aidex_policy::Action`, `base_risk: RiskLevel`, `reads_workspace`, `writes_workspace`, `spawns_process`, `network`, `destructive`, `remote_write`; `is_read_only()`. |
-| `ToolContext` | `session_id`, `workspace_id`, `call_id`, `root: Arc<ConfinedRoot>`, `events: Arc<dyn EventSink>`, `cancel: CancelToken`, `limits: ToolLimits`, `processes: Option<Arc<dyn ProcessLauncher>>`; `new`, `with_limits`, `with_cancel`, `with_launcher`, `for_call`, `scope`. |
+| `ToolContext` | `session_id`, `workspace_id`, `call_id`, `root: Arc<ConfinedRoot>`, `events: Arc<dyn EventSink>`, `cancel: CancelToken` (re-exported `aidex_core::CancelToken`, shared with providers and the harness; cancellation or an expired deadline stops the call), `limits: ToolLimits`, `processes: Option<Arc<dyn ProcessLauncher>>`; `new`, `with_limits`, `with_cancel`, `with_launcher`, `for_call`, `scope`. |
 | `ToolLimits` | `max_read_bytes` (512 KiB), `max_write_bytes` (4 MiB), `max_search_results` (200), `max_output_bytes` (256 KiB), `max_search_file_bytes` (2 MiB), `max_walk_entries` (20 000), `max_diff_bytes` (128 KiB), `process_timeout` (120 s). |
 | `ToolPlan` | Immutable, single-use: `plan_id`, tool id/version, action, session/workspace/call ids, root, normalized `input`, `facts: PlanFacts`, `risk`, redacted `summary`, `preview: Option<DiffPreview>`, tool `state`, `fingerprint: PlanFingerprint` (SHA-256 over canonical JSON of all of these). `intent()`/`intents()` build `aidex_policy::Intent`s; `verify_integrity()`, `check_context(ctx)`. `ToolPlan::new(ctx, descriptor, PlanParts)` for third-party tools. |
 | `PlanFacts` | `paths: Vec<PlanPath { path, display, access: PathAccess, inside_workspace, exists, kind, size, sha256, sensitive }>`, `command: Option<ShellCommand>`, `network: Option<NetworkFacts { targets, unresolved }>`, `destructive`, `remote_write`, `implied_actions`; `intent_attributes()` (sensitive hint → `PathClass::Sensitive`). |
@@ -93,7 +93,7 @@ pub trait ProcessLauncher: Send + Sync {
 
 ## Limitations
 
-- No broker yet: nothing in the daemon executes tools. Policy evaluation, approvals, path classes (`sensitive`/`protected` beyond the name-based hint), secret handles, and the sandboxed `ProcessLauncher` arrive with #17. `DirectLauncher` is unsandboxed and test-only.
+- Policy evaluation, approvals, `protected` path classes, secret handles, and the sandboxed `ProcessLauncher` live in `aidex-broker`. `DirectLauncher` is unsandboxed and test-only.
 - Confinement is a point-in-time check (TOCTOU): a concurrent process could swap a checked directory for a link between resolution and use. OS-enforced confinement belongs to the sandbox. A concurrent external writer can also race the final hash check and rename.
 - `fs.read` does not redact file content; credential-like files are governed by policy (sensitive path class), and `fs.search` skips them by name only. The hint is not a secret scanner.
 - Ignore rules: `.gitignore` files inside the workspace and `.git/info/exclude`; files above the workspace root and the global excludes file are not read.

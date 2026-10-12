@@ -18,7 +18,7 @@ pub use values::{
 
 use std::fmt;
 
-use aidex_core::{EntityId, SecretRef, Timestamp, WorkspacePath};
+use aidex_core::{EntityId, Timestamp, WorkspacePath};
 use serde::{Deserialize, Serialize};
 
 /// Every event AiDEX emits. See `protocol/events/README.md` for the field table.
@@ -84,15 +84,6 @@ pub enum EventKind {
     /// Live-only incremental output; never stored or replayed.
     #[serde(rename = "agent.delta")]
     AgentDelta { text: String },
-    /// Run-correlated live output, including child runs; never stored.
-    #[serde(rename = "agent.run_delta")]
-    AgentRunDelta { agent_id: EntityId, text: String },
-    #[serde(rename = "agent.child_spawned")]
-    AgentChildSpawned {
-        agent_id: EntityId,
-        parent_agent_id: EntityId,
-        role: String,
-    },
     #[serde(rename = "agent.subagent.created")]
     AgentSubagentCreated {
         child_session_id: EntityId,
@@ -270,10 +261,6 @@ pub enum EventKind {
     VaultUnlocked { vault_id: EntityId },
     #[serde(rename = "vault.locked")]
     VaultLocked { vault_id: EntityId },
-    #[serde(rename = "secret.stored")]
-    SecretStored { secret_ref: SecretRef },
-    #[serde(rename = "secret.deleted")]
-    SecretDeleted { secret_ref: SecretRef },
     #[serde(rename = "secret.granted")]
     SecretGranted {
         handle_id: EntityId,
@@ -328,6 +315,21 @@ pub enum EventKind {
     DaemonStarted { pid: u32, version: String },
     #[serde(rename = "daemon.stopping")]
     DaemonStopping { reason: DaemonStopReason },
+
+    // --- emergency.* (scope: global; spec §48) ---
+    /// An emergency stop froze tool execution, cancelled approvals, terminated
+    /// managed processes, and revoked secret handles.
+    #[serde(rename = "emergency.stopped")]
+    EmergencyStopped {
+        reason: String,
+        cancelled_approvals: u64,
+        revoked_approvals: u64,
+        terminated_processes: u64,
+        revoked_handles: u64,
+    },
+    /// Tool execution resumed after an emergency stop.
+    #[serde(rename = "emergency.resumed")]
+    EmergencyResumed {},
 
     // --- extension.* ---
     #[serde(rename = "extension.enabled")]
@@ -418,8 +420,6 @@ pub const EVENT_NAMES: &[&str] = &[
     "agent.started",
     "agent.message",
     "agent.delta",
-    "agent.run_delta",
-    "agent.child_spawned",
     "agent.subagent.created",
     "agent.error",
     "agent.retry",
@@ -455,8 +455,6 @@ pub const EVENT_NAMES: &[&str] = &[
     "workspace.ephemeral_discarded",
     "vault.unlocked",
     "vault.locked",
-    "secret.stored",
-    "secret.deleted",
     "secret.granted",
     "secret.revoked",
     "sandbox.negotiated",
@@ -471,6 +469,8 @@ pub const EVENT_NAMES: &[&str] = &[
     "remote.disconnected",
     "daemon.started",
     "daemon.stopping",
+    "emergency.stopped",
+    "emergency.resumed",
     "extension.enabled",
     "extension.disabled",
     "update.staged",
@@ -503,8 +503,6 @@ impl EventKind {
             Self::AgentStarted { .. } => "agent.started",
             Self::AgentMessage { .. } => "agent.message",
             Self::AgentDelta { .. } => "agent.delta",
-            Self::AgentRunDelta { .. } => "agent.run_delta",
-            Self::AgentChildSpawned { .. } => "agent.child_spawned",
             Self::AgentSubagentCreated { .. } => "agent.subagent.created",
             Self::AgentError { .. } => "agent.error",
             Self::AgentRetry { .. } => "agent.retry",
@@ -540,8 +538,6 @@ impl EventKind {
             Self::WorkspaceEphemeralDiscarded { .. } => "workspace.ephemeral_discarded",
             Self::VaultUnlocked { .. } => "vault.unlocked",
             Self::VaultLocked { .. } => "vault.locked",
-            Self::SecretStored { .. } => "secret.stored",
-            Self::SecretDeleted { .. } => "secret.deleted",
             Self::SecretGranted { .. } => "secret.granted",
             Self::SecretRevoked { .. } => "secret.revoked",
             Self::SandboxNegotiated { .. } => "sandbox.negotiated",
@@ -556,6 +552,8 @@ impl EventKind {
             Self::RemoteDisconnected { .. } => "remote.disconnected",
             Self::DaemonStarted { .. } => "daemon.started",
             Self::DaemonStopping { .. } => "daemon.stopping",
+            Self::EmergencyStopped { .. } => "emergency.stopped",
+            Self::EmergencyResumed {} => "emergency.resumed",
             Self::ExtensionEnabled { .. } => "extension.enabled",
             Self::ExtensionDisabled { .. } => "extension.disabled",
             Self::UpdateStaged { .. } => "update.staged",
@@ -576,10 +574,7 @@ impl EventKind {
     /// Durable events are stored, get a cursor, and replay. Ephemeral events
     /// (`agent.delta`, `process.output`) are delivered to live subscribers only.
     pub fn is_durable(&self) -> bool {
-        !matches!(
-            self,
-            Self::AgentDelta { .. } | Self::AgentRunDelta { .. } | Self::ProcessOutput { .. }
-        )
+        !matches!(self, Self::AgentDelta { .. } | Self::ProcessOutput { .. })
     }
 }
 

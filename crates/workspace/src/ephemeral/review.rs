@@ -4,7 +4,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::Read,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -83,17 +83,28 @@ pub(crate) fn source_state(
     source: &ConfinedRoot,
     path: &WorkspacePath,
 ) -> Result<SourceState, WorkspaceError> {
+    source_state_with(source, path, |resolved| {
+        let (size, sha256) = fsutil::hash_file(resolved).map_err(|error| {
+            WorkspaceError::io(format!("cannot read source `{}`", path.as_str()), error)
+        })?;
+        Ok(FileState { size, sha256 })
+    })
+}
+
+fn source_state_with(
+    source: &ConfinedRoot,
+    path: &WorkspacePath,
+    read: impl FnOnce(&Path) -> Result<FileState, WorkspaceError>,
+) -> Result<SourceState, WorkspaceError> {
     Ok(match entry(source, path)? {
         Entry::Missing => SourceState::Missing,
         Entry::Link => SourceState::Unsafe,
         Entry::Other => SourceState::Other,
         Entry::File(resolved) => {
-            let (size, sha256) = fsutil::hash_file(&resolved).map_err(|error| {
-                WorkspaceError::io(format!("cannot read source `{}`", path.as_str()), error)
-            })?;
+            let state = read(&resolved)?;
             SourceState::File {
                 path: resolved,
-                state: FileState { size, sha256 },
+                state,
             }
         }
     })
@@ -126,8 +137,6 @@ struct Pending {
     kind: ChangeKind,
     base: Option<FileState>,
     new: Option<FileState>,
-    /// The ephemeral file holding the new content.
-    ephemeral: Option<PathBuf>,
 }
 
 pub(crate) struct ReviewInput<'a> {
@@ -139,19 +148,71 @@ pub(crate) struct ReviewInput<'a> {
     pub limits: &'a EphemeralLimits,
 }
 
-pub(crate) fn review(input: &ReviewInput<'_>) -> Result<EphemeralDiff, WorkspaceError> {
-    let mut walked: BTreeMap<String, (WorkspacePath, PathBuf)> = BTreeMap::new();
-    let mut unsupported: Vec<SkippedEntry> = Vec::new();
+#[derive(Default)]
+struct TreeCount {
+    files: u64,
+    bytes: u64,
+}
+
+impl TreeCount {
+    fn account_file(&mut self, len: u64, limits: &EphemeralLimits) -> Result<(), WorkspaceError> {
+        self.files = self.files.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(len);
+        if self.files > limits.max_files {
+            return Err(WorkspaceError::TooLarge(format!(
+                "the ephemeral tree has more than {} files",
+                limits.max_files
+            )));
+        }
+        if self.bytes > limits.max_bytes {
+            return Err(WorkspaceError::TooLarge(format!(
+                "the ephemeral tree exceeds {} bytes",
+                limits.max_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ScannedTree {
+    walked: BTreeMap<String, WorkspacePath>,
+    unsupported: Vec<SkippedEntry>,
+    count: TreeCount,
+}
+
+fn scan(input: &ReviewInput<'_>) -> Result<ScannedTree, WorkspaceError> {
+    let mut scanned = ScannedTree::default();
     walk::walk(input.tree.root(), Vec::new(), |item| {
         match item {
-            Item::File { path, absolute, .. } => {
-                walked.insert(path.as_str().to_owned(), (path, absolute));
+            Item::File { path, len, .. } => {
+                scanned.count.account_file(len, input.limits)?;
+                scanned.walked.insert(path.as_str().to_owned(), path);
             }
-            Item::Skipped(skipped) => unsupported.push(skipped),
+            Item::Skipped(skipped) => scanned.unsupported.push(skipped),
             Item::Dir { .. } => {}
         }
         Ok(())
     })?;
+    Ok(scanned)
+}
+
+pub(crate) fn review(input: &ReviewInput<'_>) -> Result<EphemeralDiff, WorkspaceError> {
+    review_scanned(input, scan(input)?)
+}
+
+fn review_scanned(
+    input: &ReviewInput<'_>,
+    scanned: ScannedTree,
+) -> Result<EphemeralDiff, WorkspaceError> {
+    let ScannedTree {
+        mut walked,
+        mut unsupported,
+        mut count,
+    } = scanned;
+    // Metadata is only a preflight: files may grow after the walk. Charge the
+    // bytes actually hashed once per file against a separate aggregate budget.
+    let mut tree_bytes = input.limits.max_bytes;
     let mut flagged: BTreeSet<String> =
         unsupported.iter().map(|entry| entry.path.clone()).collect();
     let mut flag =
@@ -168,67 +229,113 @@ pub(crate) fn review(input: &ReviewInput<'_>) -> Result<EphemeralDiff, Workspace
     for (key, base) in &input.baseline.files {
         let path = WorkspacePath::new(key.as_str())
             .map_err(|_| WorkspaceError::Corrupt(format!("baseline path `{key}`")))?;
-        walked.remove(key);
+        let was_walked = walked.remove(key).is_some();
         match entry(input.tree, &path)? {
             Entry::Missing => pending.push(Pending {
                 path,
                 kind: ChangeKind::Deleted,
                 base: Some(base.clone()),
                 new: None,
-                ephemeral: None,
             }),
             Entry::Link => flag(&path, SkipReason::Link, &mut unsupported),
             Entry::Other => flag(&path, SkipReason::NotAFile, &mut unsupported),
             Entry::File(absolute) => {
-                let state = hash(&absolute, &path)?;
+                // Baseline files remain reviewable even when newly ignored;
+                // they must still count toward the review's resource limits.
+                if !was_walked {
+                    let metadata = fs::symlink_metadata(&absolute).map_err(|error| {
+                        WorkspaceError::io(format!("cannot inspect `{key}`"), error)
+                    })?;
+                    count.account_file(metadata.len(), input.limits)?;
+                }
+                let state = hash(
+                    &absolute,
+                    &path,
+                    &mut tree_bytes,
+                    input.limits.max_bytes,
+                    "ephemeral",
+                )?;
                 if state != *base {
                     pending.push(Pending {
                         path,
                         kind: ChangeKind::Modified,
                         base: Some(base.clone()),
                         new: Some(state),
-                        ephemeral: Some(absolute),
                     });
                 }
             }
         }
     }
-    for (_, (path, absolute)) in walked {
+    for (_, path) in walked {
         if walk::is_reserved_path(&path) {
             continue;
         }
-        let state = hash(&absolute, &path)?;
+        // A walked path may since have been replaced by a link or non-file.
+        let absolute = match entry(input.tree, &path)? {
+            Entry::File(absolute) => absolute,
+            Entry::Link => {
+                flag(&path, SkipReason::Link, &mut unsupported);
+                continue;
+            }
+            Entry::Other => {
+                flag(&path, SkipReason::NotAFile, &mut unsupported);
+                continue;
+            }
+            Entry::Missing => continue,
+        };
+        let state = hash(
+            &absolute,
+            &path,
+            &mut tree_bytes,
+            input.limits.max_bytes,
+            "ephemeral",
+        )?;
         pending.push(Pending {
             path,
             kind: ChangeKind::Added,
             base: None,
             new: Some(state),
-            ephemeral: Some(absolute),
         });
     }
     pending.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
     unsupported.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut budget = input.limits.max_total_diff_bytes;
+    // Source conflict checks have their own aggregate cap, so reviewing a tree
+    // at its byte limit does not spend that same allowance a second time.
+    let mut source_bytes = input.limits.max_bytes;
     let mut changes = Vec::with_capacity(pending.len());
     for Pending {
         path,
         kind,
         base,
         new,
-        ephemeral,
     } in pending
     {
-        let source = source_state(input.source, &path)?;
+        let source = source_state_with(input.source, &path, |absolute| {
+            hash(
+                absolute,
+                &path,
+                &mut source_bytes,
+                input.limits.max_bytes,
+                "source",
+            )
+        })?;
         let conflict = conflict(base.as_ref(), new.as_ref(), &source);
         let old_file = match &source {
-            SourceState::File { path, .. } => Some(path.as_path()),
+            SourceState::File { state, .. } => Some(DiffSide {
+                root: input.source,
+                state,
+            }),
             _ => None,
         };
         let text = diff_text(
             &path,
             old_file,
-            ephemeral.as_deref(),
+            new.as_ref().map(|state| DiffSide {
+                root: input.tree,
+                state,
+            }),
             input.limits,
             &mut budget,
         )?;
@@ -258,11 +365,59 @@ pub(crate) fn review(input: &ReviewInput<'_>) -> Result<EphemeralDiff, Workspace
     })
 }
 
-fn hash(absolute: &Path, path: &WorkspacePath) -> Result<FileState, WorkspaceError> {
-    let (size, sha256) = fsutil::hash_file(absolute).map_err(|error| {
-        WorkspaceError::io(format!("cannot read ephemeral `{}`", path.as_str()), error)
-    })?;
-    Ok(FileState { size, sha256 })
+fn hash(
+    absolute: &Path,
+    path: &WorkspacePath,
+    remaining: &mut u64,
+    max_bytes: u64,
+    side: &str,
+) -> Result<FileState, WorkspaceError> {
+    let context = || format!("cannot read {side} `{}`", path.as_str());
+    let file = File::open(absolute).map_err(|error| WorkspaceError::io(context(), error))?;
+    let state = hash_reader(file, *remaining)
+        .map_err(|error| WorkspaceError::io(context(), error))?
+        .ok_or_else(|| {
+            WorkspaceError::TooLarge(format!("reviewed {side} files exceed {max_bytes} bytes"))
+        })?;
+    *remaining -= state.size;
+    Ok(state)
+}
+
+fn hash_reader(input: impl Read, limit: u64) -> io::Result<Option<FileState>> {
+    let mut hasher = Sha256::new();
+    Ok(
+        read_bounded(input, limit, |bytes| hasher.update(bytes))?.map(|size| FileState {
+            size,
+            sha256: fsutil::hex(&hasher.finalize()),
+        }),
+    )
+}
+
+/// Read at most `limit` bytes plus one overflow probe, without trusting metadata
+/// or asking a growable file to allocate its reported size.
+fn read_bounded(
+    mut input: impl Read,
+    limit: u64,
+    mut consume: impl FnMut(&[u8]),
+) -> io::Result<Option<u64>> {
+    let mut buffer = [0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        let available = limit - size;
+        let cap = available.saturating_add(1).min(buffer.len() as u64) as usize;
+        let read = match input.read(&mut buffer[..cap]) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if read == 0 {
+            return Ok(Some(size));
+        }
+        if read as u64 > available {
+            return Ok(None);
+        }
+        consume(&buffer[..read]);
+        size += read as u64;
+    }
 }
 
 /// SHA-256 over the canonical change list; paths cannot contain tabs or newlines.
@@ -291,45 +446,74 @@ struct DiffText {
 
 const SNIFF_BYTES: usize = 8 * 1024;
 
-fn sniff_binary(path: Option<&Path>) -> bool {
-    let Some(path) = path else {
-        return false;
+#[derive(Clone, Copy)]
+struct DiffSide<'a> {
+    root: &'a ConfinedRoot,
+    state: &'a FileState,
+}
+
+fn changed_during_review(path: &WorkspacePath) -> WorkspaceError {
+    WorkspaceError::Conflict(format!(
+        "`{}` changed while being reviewed; review it again",
+        path.as_str()
+    ))
+}
+
+fn open_side(side: DiffSide<'_>, path: &WorkspacePath) -> Result<File, WorkspaceError> {
+    let Entry::File(absolute) = entry(side.root, path)? else {
+        return Err(changed_during_review(path));
     };
-    let mut buffer = vec![0u8; SNIFF_BYTES];
-    let Ok(mut file) = File::open(path) else {
-        return false;
+    File::open(absolute)
+        .map_err(|error| WorkspaceError::io(format!("cannot read `{}`", path.as_str()), error))
+}
+
+fn sniff_binary(side: Option<DiffSide<'_>>, path: &WorkspacePath) -> Result<bool, WorkspaceError> {
+    let Some(side) = side else {
+        return Ok(false);
     };
-    let read = file.read(&mut buffer).unwrap_or(0);
-    buffer[..read].contains(&0)
+    let file = open_side(side, path)?;
+    let mut buffer = Vec::new();
+    file.take(side.state.size.min(SNIFF_BYTES as u64))
+        .read_to_end(&mut buffer)
+        .map_err(|error| WorkspaceError::io(format!("cannot read `{}`", path.as_str()), error))?;
+    Ok(buffer.contains(&0))
 }
 
 fn read_side(
-    path: Option<&Path>,
+    side: Option<DiffSide<'_>>,
     workspace_path: &WorkspacePath,
 ) -> Result<Vec<u8>, WorkspaceError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(path) => fs::read(path).map_err(|error| {
-            WorkspaceError::io(format!("cannot read `{}`", workspace_path.as_str()), error)
-        }),
+    let Some(side) = side else {
+        return Ok(Vec::new());
+    };
+    let file = open_side(side, workspace_path)?;
+    let mut bytes = Vec::new();
+    let size = read_bounded(file, side.state.size, |chunk| {
+        bytes.extend_from_slice(chunk)
+    })
+    .map_err(|error| {
+        WorkspaceError::io(format!("cannot read `{}`", workspace_path.as_str()), error)
+    })?;
+    if size != Some(side.state.size) || fsutil::sha256_hex(&bytes) != side.state.sha256 {
+        return Err(changed_during_review(workspace_path));
     }
+    Ok(bytes)
 }
 
 fn diff_text(
     path: &WorkspacePath,
-    old: Option<&Path>,
-    new: Option<&Path>,
+    old: Option<DiffSide<'_>>,
+    new: Option<DiffSide<'_>>,
     limits: &EphemeralLimits,
     budget: &mut usize,
 ) -> Result<DiffText, WorkspaceError> {
-    let too_large = [old, new].into_iter().flatten().any(|side| {
-        fs::metadata(side).map_or(true, |metadata| {
-            metadata.len() > limits.max_diff_input_bytes
-        })
-    });
+    let too_large = [old, new]
+        .into_iter()
+        .flatten()
+        .any(|side| side.state.size > limits.max_diff_input_bytes);
     if too_large {
         return Ok(DiffText {
-            binary: sniff_binary(old) || sniff_binary(new),
+            binary: sniff_binary(old, path)? || sniff_binary(new, path)?,
             diff: None,
             truncated: true,
         });
@@ -390,4 +574,139 @@ fn diff_text(
         diff: Some(text),
         truncated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    // Appended content becomes readable only after the initial contents have
+    // been read, without relying on thread timing or filesystem sleeps.
+    struct GrowingReader {
+        initial: Cursor<&'static [u8]>,
+        appended: Cursor<&'static [u8]>,
+        consumed: usize,
+    }
+
+    impl Read for GrowingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let mut read = self.initial.read(buffer)?;
+            if read == 0 {
+                read = self.appended.read(buffer)?;
+            }
+            self.consumed += read;
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn growing_hash_input_stops_after_one_overflow_probe() {
+        let mut input = GrowingReader {
+            initial: Cursor::new(b"12"),
+            appended: Cursor::new(b"345678"),
+            consumed: 0,
+        };
+        assert!(hash_reader(&mut input, 4).unwrap().is_none());
+        assert_eq!(input.consumed, 5);
+    }
+
+    #[test]
+    fn hashing_accepts_exact_and_empty_limits_and_refuses_zero_limit_growth() {
+        assert_eq!(
+            hash_reader(Cursor::new(b"abc"), 3).unwrap(),
+            Some(FileState {
+                size: 3,
+                sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+            })
+        );
+        assert_eq!(
+            hash_reader(Cursor::new(b""), 0).unwrap(),
+            Some(FileState {
+                size: 0,
+                sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+            })
+        );
+        let mut input = Cursor::new(b"abc");
+        assert!(hash_reader(&mut input, 0).unwrap().is_none());
+        assert_eq!(input.position(), 1);
+    }
+
+    #[test]
+    fn diff_inputs_changed_after_hashing_are_refused() {
+        let tree_dir = tempfile::tempdir().unwrap();
+        let tree = ConfinedRoot::new(tree_dir.path()).unwrap();
+        let path = WorkspacePath::new("a").unwrap();
+        let state = FileState {
+            size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+        };
+        let limits = EphemeralLimits {
+            max_diff_input_bytes: 3,
+            ..EphemeralLimits::default()
+        };
+        for bytes in [b"abcd".as_slice(), b"ab", b"xyz"] {
+            fs::write(tree.root().join("a"), bytes).unwrap();
+            let mut budget = limits.max_total_diff_bytes;
+            assert!(matches!(
+                diff_text(
+                    &path,
+                    None,
+                    Some(DiffSide {
+                        root: &tree,
+                        state: &state,
+                    }),
+                    &limits,
+                    &mut budget,
+                ),
+                Err(WorkspaceError::Conflict(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn files_growing_after_scan_cannot_exceed_the_aggregate_byte_limit() {
+        for has_baseline in [false, true] {
+            let source_dir = tempfile::tempdir().unwrap();
+            let tree_dir = tempfile::tempdir().unwrap();
+            let mut files = BTreeMap::new();
+            for (path, bytes) in [("a", b"12"), ("b", b"34")] {
+                fs::write(tree_dir.path().join(path), bytes).unwrap();
+                if has_baseline {
+                    fs::write(source_dir.path().join(path), bytes).unwrap();
+                    files.insert(
+                        path.to_owned(),
+                        FileState {
+                            size: 2,
+                            sha256: fsutil::sha256_hex(bytes),
+                        },
+                    );
+                }
+            }
+            let source = ConfinedRoot::new(source_dir.path()).unwrap();
+            let tree = ConfinedRoot::new(tree_dir.path()).unwrap();
+            let workspace_id = EntityId::new("wsp_copy").unwrap();
+            let source_id = EntityId::new("wsp_source").unwrap();
+            let baseline = Baseline::new(workspace_id.clone(), source_id.clone(), files);
+            let limits = EphemeralLimits {
+                max_bytes: 4,
+                ..EphemeralLimits::default()
+            };
+            let input = ReviewInput {
+                workspace_id: &workspace_id,
+                source_id: &source_id,
+                source: &source,
+                tree: &tree,
+                baseline: &baseline,
+                limits: &limits,
+            };
+            let scanned = scan(&input).unwrap();
+            // The real walk recorded four bytes. Each file still fits individually.
+            fs::write(tree.root().join("a"), b"123").unwrap();
+            assert!(matches!(
+                review_scanned(&input, scanned),
+                Err(WorkspaceError::TooLarge(_))
+            ));
+        }
+    }
 }

@@ -1,55 +1,76 @@
 //! One selected-model attempt and at most one user-selected transient fallback.
-use crate::NativeEngine;
+//!
+//! Each attempt gets its own copy of the turn's request, prepared for the
+//! model it goes to: attachments as parts, wrapped text, or placeholders
+//! ([`crate::attachments`]), historical tool calls the request does not offer
+//! flattened to text, and empty assistant placeholders dropped
+//! ([`crate::history`]).
+use crate::{
+    NativeEngine,
+    attachments::TurnAttachments,
+    history::{drop_empty_assistants, flatten_tool_history},
+    untrusted::ensure_preamble,
+};
 use aidex_core::{CancelToken, EntityId};
 use aidex_events::EventKind;
 use aidex_native_sessions::{Mode, Run, SessionConfig};
 use aidex_providers::{
     CapabilitySource, ChatRequest, ChatResponse, ModelDescriptor, ModelProvider, ModelRef,
-    ProviderError, StreamEvent, ToolCallSupport,
+    PDF_PAGE_TOKENS, ProviderError, RegistryError, StreamEvent, ToolCallSupport,
 };
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
+
+/// What every attempt of one turn shares.
+pub(crate) struct Turn {
+    /// Index of the run transcript in the request's messages.
+    pub start: usize,
+    /// The run's delimiter nonce.
+    pub nonce: String,
+    /// History index of the assistant placeholder the reply streams into.
+    pub index: Option<usize>,
+    pub attachments: TurnAttachments,
+}
+
+/// A refusal that may come from attachments (images, PDFs, or text) of
+/// earlier messages: the attempt is repeated once without them.
+fn refused_for_size_or_content(error: &ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::InvalidRequest(_)
+            | ProviderError::ContextOverflow { .. }
+            | ProviderError::Http {
+                status: 400 | 413,
+                ..
+            }
+    )
+}
+
 impl NativeEngine {
-    fn reserve_inference_retry(&self, run: &Run) -> Result<(), String> {
-        self.store.update(&run.session_id, |session| {
-            let maximum = session.configuration.max_steps;
-            let run = session
-                .runs
-                .iter_mut()
-                .find(|r| r.id == run.id)
-                .ok_or("run not found")?;
-            if run.steps >= maximum {
-                return Err("native run step budget exhausted before inference retry".into());
-            }
-            if run.status == aidex_native_sessions::RunStatus::Cancelled {
-                return Err("run cancelled".into());
-            }
-            run.steps += 1;
-            run.inference_retries = run.inference_retries.saturating_add(1);
-            Ok(())
-        })
-    }
     fn validate_model(
         &self,
         target: &ModelRef,
         config: &SessionConfig,
     ) -> Result<(Arc<dyn ModelProvider>, ModelDescriptor), ProviderError> {
+        let absent = || ProviderError::unavailable("configured model provider is absent");
         let provider = self
             .registry
             .provider(&target.provider_id)
-            .ok_or_else(|| ProviderError::unavailable("configured model provider is absent"))?;
-        let listing = self.registry.models();
-        let model = listing
-            .models
-            .iter()
-            .find(|m| m.model == *target)
-            .ok_or_else(|| {
-                ProviderError::InvalidRequest(
-                    "configured model is not in the provider catalog".into(),
-                )
-            })?;
+            .ok_or_else(absent)?;
+        // List only the run's own provider; its listing failure is the error.
+        let models =
+            self.registry
+                .models_for(&target.provider_id)
+                .map_err(|error| match error {
+                    RegistryError::Provider { error, .. } => error,
+                    _ => absent(),
+                })?;
+        let model = models.iter().find(|m| m.model == *target).ok_or_else(|| {
+            ProviderError::InvalidRequest("configured model is not in the provider catalog".into())
+        })?;
         if !model.capabilities.chat || !model.capabilities.streaming {
             return Err(ProviderError::InvalidRequest(
                 "configured model does not support streamed chat".into(),
@@ -69,6 +90,7 @@ impl NativeEngine {
         run: &Run,
         index: Option<usize>,
         cancel: &CancelToken,
+        pdf_page_tokens: u32,
     ) -> Result<ChatResponse, ProviderError> {
         if cancel.is_stopped() {
             return Err(ProviderError::Cancelled);
@@ -81,7 +103,8 @@ impl NativeEngine {
                     .find(|r| r.id == run.id)
                     .ok_or("run not found")?;
                 run.effective_max_tokens = request.max_tokens;
-                run.estimated_input_tokens = Some(request.estimated_input_tokens());
+                run.estimated_input_tokens =
+                    Some(request.estimated_input_tokens_with(pdf_page_tokens));
                 run.model_used = Some(format!("{}/{}", provider.descriptor().id, request.model));
                 Ok(())
             })
@@ -117,20 +140,9 @@ impl NativeEngine {
                 if let StreamEvent::TextDelta { text } = event {
                     partial.push_str(text);
                     if let Some(scope) = &scope {
-                        if let Ok(agent_id) = EntityId::new(&run.id) {
-                            let _ = self.events.emit(
-                                scope.clone(),
-                                EventKind::AgentRunDelta {
-                                    agent_id,
-                                    text: text.clone(),
-                                },
-                            );
-                        }
-                        if run.parent_run_id.is_none() {
-                            let _ = self
-                                .events
-                                .emit(scope.clone(), EventKind::AgentDelta { text: text.clone() });
-                        }
+                        let _ = self
+                            .events
+                            .emit(scope.clone(), EventKind::AgentDelta { text: text.clone() });
                     }
                     if last.elapsed() >= Duration::from_millis(100) || partial.len() - saved >= 4096
                     {
@@ -155,21 +167,97 @@ impl NativeEngine {
             cancel,
         )
     }
+    /// The configured model, checked against its provider's catalog (once per
+    /// turn, before the request is built, so tools match its capabilities).
+    pub(crate) fn primary_model(
+        &self,
+        config: &SessionConfig,
+    ) -> Result<(Arc<dyn ModelProvider>, ModelDescriptor), String> {
+        let target = ModelRef::new(
+            aidex_providers::ProviderId::new(&config.provider_id).map_err(|e| e.to_string())?,
+            aidex_providers::ModelId::new(&config.model_id).map_err(|e| e.to_string())?,
+        );
+        self.validate_model(&target, config)
+            .map_err(|e| e.to_string())
+    }
+    /// `base` prepared for `model`; also whether it carries attachments
+    /// (images, PDFs, or text) of messages before the run's own one.
+    fn prepare(
+        &self,
+        base: &ChatRequest,
+        model: &ModelDescriptor,
+        turn: &Turn,
+        drop_earlier: bool,
+    ) -> (ChatRequest, bool) {
+        let mut request = base.clone();
+        let (earlier, wrapped_text) = self.apply_attachments(
+            &mut request.messages,
+            turn.start,
+            model,
+            &turn.attachments,
+            &turn.nonce,
+            drop_earlier,
+        );
+        let offered: HashSet<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+        let wrapped_results =
+            flatten_tool_history(&mut request.messages, turn.start, &offered, &turn.nonce);
+        drop_empty_assistants(&mut request.messages, turn.start);
+        ensure_preamble(
+            &mut request.messages,
+            &turn.nonce,
+            !turn.attachments.is_empty(),
+            wrapped_text || wrapped_results,
+        );
+        (request, earlier)
+    }
     pub(crate) fn infer(
         &self,
         request: &ChatRequest,
         run: &Run,
         config: &SessionConfig,
-        index: Option<usize>,
         cancel: &CancelToken,
+        primary: (Arc<dyn ModelProvider>, ModelDescriptor),
+        turn: &Turn,
     ) -> Result<ChatResponse, String> {
+        let index = turn.index;
+        // One model's attempt. When the provider refuses a request carrying
+        // attachments of earlier messages, it is repeated once with those as
+        // placeholders, so one unreadable or oversized old file cannot block
+        // the chat. The run remembers that refusal (in memory, per model), so
+        // its later steps do not send the refused request first again.
+        let run_model = |provider: &dyn ModelProvider,
+                         model: &ModelDescriptor,
+                         base: &ChatRequest|
+         -> Result<ChatResponse, ProviderError> {
+            let page_tokens = self
+                .registry
+                .part_limits(model)
+                .map_or(PDF_PAGE_TOKENS, |limits| limits.pdf_page_tokens);
+            let refused = self.refused_earlier(&run.id, model);
+            let (prepared, earlier) = self.prepare(base, model, turn, refused);
+            let first = bound_request(&prepared, model, config, page_tokens).and_then(|bounded| {
+                self.attempt(provider, &bounded, run, index, cancel, page_tokens)
+            });
+            match first {
+                Err(error)
+                    if !refused
+                        && earlier
+                        && refused_for_size_or_content(&error)
+                        && !cancel.is_stopped() =>
+                {
+                    self.remember_refused_earlier(&run.id, model);
+                    let (prepared, _) = self.prepare(base, model, turn, true);
+                    let bounded = bound_request(&prepared, model, config, page_tokens)?;
+                    self.attempt(provider, &bounded, run, index, cancel, page_tokens)
+                }
+                other => other,
+            }
+        };
         let target = ModelRef::new(
             aidex_providers::ProviderId::new(&config.provider_id).map_err(|e| e.to_string())?,
             request.model.clone(),
         );
-        let (provider, model) = self
-            .validate_model(&target, config)
-            .map_err(|e| e.to_string())?;
+        let (provider, model) = primary;
         self.broker.authorize_native(
             &run.session_id,
             config,
@@ -179,53 +267,7 @@ impl NativeEngine {
                 aidex_providers::Locality::Remote => aidex_policy::ModelLocality::Remote,
             }),
         )?;
-        let (bounded, trimmed) =
-            bound_request(request, &model, config).map_err(|e| e.to_string())?;
-        self.store.update(&run.session_id, |session| {
-            let run = session
-                .runs
-                .iter_mut()
-                .find(|r| r.id == run.id)
-                .ok_or("run not found")?;
-            run.context_trimmed_messages = run.context_trimmed_messages.max(trimmed);
-            Ok(())
-        })?;
-        let mut retries = 0;
-        let result = loop {
-            match self.attempt(provider.as_ref(), &bounded, run, index, cancel) {
-                Err(error)
-                    if error.is_retryable()
-                        && !cancel.is_stopped()
-                        && config.fallback_model.is_none()
-                        && retries < 2 =>
-                {
-                    let delay = match &error {
-                        ProviderError::RateLimited {
-                            retry_after: Some(delay),
-                        } if *delay > Duration::from_secs(2) => break Err(error),
-                        ProviderError::RateLimited {
-                            retry_after: Some(delay),
-                        } => (*delay).max(Duration::from_millis(100 * u64::from(retries + 1))),
-                        _ => Duration::from_millis(100 * u64::from(retries + 1)),
-                    };
-                    retries += 1;
-                    self.reserve_inference_retry(run)?;
-                    self.emit(
-                        &run.session_id,
-                        EventKind::AgentRetry {
-                            attempt: retries,
-                            reason: "retryable inference failure; no tool effect retried".into(),
-                        },
-                    );
-                    let deadline = Instant::now() + delay;
-                    while Instant::now() < deadline && !cancel.is_stopped() {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                }
-                result => break result,
-            }
-        };
-        match result {
+        match run_model(provider.as_ref(), &model, request) {
             Ok(response) => Ok(response),
             Err(error) => {
                 if !error.is_retryable() || cancel.is_stopped() {
@@ -247,7 +289,6 @@ impl NativeEngine {
                         aidex_providers::Locality::Remote => aidex_policy::ModelLocality::Remote,
                     }),
                 )?;
-                self.reserve_inference_retry(run)?;
                 // Event references encode provider/model with portable punctuation;
                 // full configured model references remain in encrypted session configuration.
                 self.emit(
@@ -261,24 +302,16 @@ impl NativeEngine {
                 );
                 let mut fallback_request = request.clone();
                 fallback_request.model = target_fallback.model_id;
-                let (fallback_request, trimmed) =
-                    bound_request(&fallback_request, &fallback_model, config)
-                        .map_err(|e| e.to_string())?;
-                self.store.update(&run.session_id, |session| {
-                    let run = session
-                        .runs
-                        .iter_mut()
-                        .find(|r| r.id == run.id)
-                        .ok_or("run not found")?;
-                    run.context_trimmed_messages = run.context_trimmed_messages.max(trimmed);
-                    Ok(())
-                })?;
-                self.attempt(
+                // A fallback without native tool calling answers without tools
+                // (Agent mode already refused such a fallback above).
+                if fallback_model.capabilities.tool_calls != ToolCallSupport::Native {
+                    fallback_request.tools.clear();
+                    fallback_request.tool_choice = aidex_providers::ToolChoice::None;
+                }
+                run_model(
                     fallback_provider.as_ref(),
+                    &fallback_model,
                     &fallback_request,
-                    run,
-                    index,
-                    cancel,
                 )
                 .map_err(|e| e.to_string())
             }
@@ -302,24 +335,29 @@ fn model_event_id(model: &ModelRef) -> Result<EntityId, String> {
     EntityId::new(text).map_err(|e| e.to_string())
 }
 
+/// `request` with its output budget set. PDF pages are estimated at
+/// `pdf_page_tokens` each, the model family's cost
+/// ([`aidex_providers::PartLimits::pdf_page_tokens`]).
 fn bound_request(
     request: &ChatRequest,
     model: &ModelDescriptor,
     configuration: &SessionConfig,
-) -> Result<(ChatRequest, u32), ProviderError> {
+    pdf_page_tokens: u32,
+) -> Result<ChatRequest, ProviderError> {
     let mut bounded = request.clone();
     let mut budget = configuration
         .max_tokens
         .min(model.max_output_tokens.unwrap_or(configuration.max_tokens));
-    let mut trimmed = 0;
-    if model.source != CapabilitySource::Assumed && model.context_window > 0 {
-        let reserve = budget.min((model.context_window / 4).max(1));
-        trimmed = u32::try_from(crate::context::trim_replay(
-            &mut bounded,
-            model.context_window.saturating_sub(reserve),
-        ))
-        .unwrap_or(u32::MAX);
-        let input = bounded.estimated_input_tokens();
+    // Only a declared or reported window is a real ceiling. Catalog windows are
+    // conservative lower bounds and Assumed ones are guesses, so neither may
+    // reject or truncate a request the model would accept; the provider's own
+    // context error covers a real overflow.
+    let exact_window = matches!(
+        model.source,
+        CapabilitySource::Configured | CapabilitySource::Discovered
+    );
+    if exact_window && model.context_window > 0 {
+        let input = request.estimated_input_tokens_with(pdf_page_tokens);
         let remaining = model.context_window.saturating_sub(input);
         if remaining == 0 {
             return Err(ProviderError::ContextOverflow {
@@ -335,5 +373,5 @@ fn bound_request(
         ));
     }
     bounded.max_tokens = Some(budget);
-    Ok((bounded, trimmed))
+    Ok(bounded)
 }

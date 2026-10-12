@@ -1,0 +1,4 @@
+/* The zone only listens for drag events; it adds no box, so the layout it wraps is unchanged. */
+.zone {
+  display: contents;
+}

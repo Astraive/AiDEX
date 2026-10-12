@@ -1,11 +1,15 @@
 //! OpenAI chat-completions wire format: request bodies, responses, and errors.
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    ChatMessage, ChatRequest, ChatResponse, FinishReason, ModelId, ProviderError, ResponseFormat,
-    Role, StreamEvent, ToolCall, ToolChoice, Usage,
+    ASSUMED_CONTEXT_WINDOW, CapabilitySource, ChatMessage, ChatRequest, ChatResponse, ContentPart,
+    CostHint, FinishReason, Locality, ModelCapabilities, ModelConfig, ModelDescriptor, ModelId,
+    ModelRef, ModelRole, ProviderError, ProviderId, ResponseFormat, Role, StreamEvent, ToolCall,
+    ToolCallSupport, ToolChoice, Usage,
 };
 
 /// Most models accepted from one `/models` listing.
@@ -13,6 +17,29 @@ const MAX_LISTED_MODELS: usize = 1000;
 
 /// The JSON body for `POST /chat/completions`.
 pub(crate) fn request_body(request: &ChatRequest, stream: bool) -> Vec<u8> {
+    request_body_with(request, stream, false)
+}
+
+/// Whether `host` is OpenRouter's API, which needs its file-parser plugin
+/// pinned to the model's native PDF reading.
+pub(crate) fn is_openrouter(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "openrouter.ai" || host.ends_with(".openrouter.ai")
+}
+
+/// A PDF filename for OpenAI file inputs, which expect the extension.
+pub(crate) fn pdf_filename(name: &str) -> String {
+    if name.to_ascii_lowercase().ends_with(".pdf") {
+        name.to_owned()
+    } else {
+        format!("{name}.pdf")
+    }
+}
+
+/// [`request_body`]; with `openrouter`, a request carrying PDF parts pins
+/// OpenRouter's `file-parser` plugin to the `native` engine, so the document
+/// is never routed to a third-party parser.
+pub(crate) fn request_body_with(request: &ChatRequest, stream: bool, openrouter: bool) -> Vec<u8> {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model.as_str()));
     body.insert(
@@ -78,6 +105,18 @@ pub(crate) fn request_body(request: &ChatRequest, stream: bool) -> Vec<u8> {
     if !request.stop.is_empty() {
         body.insert("stop".into(), json!(request.stop));
     }
+    if openrouter
+        && request
+            .messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .any(ContentPart::is_pdf)
+    {
+        body.insert(
+            "plugins".into(),
+            json!([{ "id": "file-parser", "pdf": { "engine": "native" } }]),
+        );
+    }
     // Serializing a `Value` cannot fail.
     serde_json::to_vec(&Value::Object(body)).unwrap_or_default()
 }
@@ -115,6 +154,26 @@ fn message(message: &ChatMessage) -> Value {
         Role::Tool => {
             wire.insert("tool_call_id".into(), json!(message.tool_call_id));
             wire.insert("content".into(), json!(message.content));
+        }
+        // Messages without parts keep plain string content: some compatible
+        // servers reject content arrays.
+        Role::User if !message.parts.is_empty() => {
+            let mut content = Vec::with_capacity(message.parts.len() + 1);
+            if !message.content.is_empty() {
+                content.push(json!({ "type": "text", "text": message.content }));
+            }
+            for part in &message.parts {
+                content.push(match part {
+                    ContentPart::Image { .. } => {
+                        json!({ "type": "image_url", "image_url": { "url": part.data_url() } })
+                    }
+                    ContentPart::Pdf { name, .. } => json!({
+                        "type": "file",
+                        "file": { "filename": pdf_filename(name), "file_data": part.data_url() },
+                    }),
+                });
+            }
+            wire.insert("content".into(), Value::Array(content));
         }
         _ => {
             wire.insert("content".into(), json!(message.content));
@@ -250,49 +309,281 @@ pub(crate) fn parse_completion(
     })
 }
 
-/// A model reported by `GET /models`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A model reported by a provider's model listing, with the metadata the
+/// vendor supplied. A field the listing did not report is `None`; the
+/// known-family hint pass (`hints`) may fill such fields later, never the
+/// reported ones.
+#[derive(Clone, Debug, PartialEq)]
 pub struct DiscoveredModel {
     pub id: ModelId,
     /// Context length when the server reports one (`context_length`,
-    /// `max_model_len`, or llama.cpp `meta.n_ctx`/`meta.n_ctx_train`).
+    /// `max_model_len`, `context_window`, `max_context_length`, llama.cpp
+    /// `meta.n_ctx`/`meta.n_ctx_train`, or OpenRouter
+    /// `top_provider.context_length`).
     pub context_window: Option<u32>,
+    /// A human label different from the id (`name` or `display_name`).
+    pub display_name: Option<String>,
+    pub max_output_tokens: Option<u32>,
+    pub tool_calls: Option<ToolCallSupport>,
+    pub json_schema_output: Option<bool>,
+    pub vision: Option<bool>,
+    pub embeddings: Option<bool>,
+    /// Whether the model accepts chat requests, when the listing says so
+    /// (embedding, image, audio, and moderation entries report `false`).
+    pub chat: Option<bool>,
+    /// USD per million tokens (OpenRouter `pricing`).
+    pub cost: Option<CostHint>,
 }
 
-#[derive(Deserialize)]
-struct ModelList {
-    data: Vec<Value>,
+impl DiscoveredModel {
+    pub(crate) fn new(id: ModelId) -> Self {
+        Self {
+            id,
+            context_window: None,
+            display_name: None,
+            max_output_tokens: None,
+            tool_calls: None,
+            json_schema_output: None,
+            vision: None,
+            embeddings: None,
+            chat: None,
+            cost: None,
+        }
+    }
+
+    /// The descriptor this listing entry produces for `provider`.
+    ///
+    /// Limits reported by the listing make the descriptor `Discovered`; limits
+    /// supplied only by the known-family table make it `Catalog`; otherwise it
+    /// is `Assumed` with [`ASSUMED_CONTEXT_WINDOW`].
+    pub(crate) fn into_descriptor(
+        mut self,
+        provider: &ProviderId,
+        locality: Locality,
+    ) -> ModelDescriptor {
+        let reported = self.context_window.is_some();
+        let hinted = crate::hints::apply(&mut self);
+        let source = if reported {
+            CapabilitySource::Discovered
+        } else if hinted {
+            CapabilitySource::Catalog
+        } else {
+            CapabilitySource::Assumed
+        };
+        let embeddings = self.embeddings.unwrap_or(false);
+        let chat = self.chat.unwrap_or(!embeddings);
+        let mut descriptor = ModelDescriptor::new(
+            ModelRef::new(provider.clone(), self.id),
+            locality,
+            self.context_window.unwrap_or(ASSUMED_CONTEXT_WINDOW),
+        )
+        .with_capabilities(ModelCapabilities {
+            chat,
+            streaming: true,
+            tool_calls: self.tool_calls.unwrap_or_default(),
+            json_schema_output: self.json_schema_output.unwrap_or(false),
+            vision: self.vision.unwrap_or(false),
+            embeddings,
+        })
+        .with_roles([if embeddings {
+            ModelRole::Embed
+        } else {
+            ModelRole::General
+        }])
+        .with_source(source);
+        descriptor.max_output_tokens = self.max_output_tokens;
+        descriptor.cost = self.cost;
+        if let Some(name) = self.display_name {
+            descriptor.display_name = name;
+        }
+        descriptor
+    }
 }
 
-/// Parse a `/models` listing; entries with unusable ids are skipped.
+/// Declared models first (they override discoveries with the same id), then
+/// each discovered model once, in listing order.
+pub(crate) fn merge_discovered(
+    provider: &ProviderId,
+    locality: Locality,
+    declared: &[ModelConfig],
+    discovered: Vec<DiscoveredModel>,
+) -> Vec<ModelDescriptor> {
+    let mut seen: HashSet<ModelId> = declared.iter().map(|model| model.id.clone()).collect();
+    let mut models: Vec<ModelDescriptor> = declared
+        .iter()
+        .map(|model| model.descriptor(provider, locality))
+        .collect();
+    for found in discovered {
+        if seen.insert(found.id.clone()) {
+            models.push(found.into_descriptor(provider, locality));
+        }
+    }
+    models
+}
+
+fn malformed_list() -> ProviderError {
+    ProviderError::Protocol("malformed model list".into())
+}
+
+/// Parse a `/models` listing: `{"data": [...]}` or a top-level array.
+/// Entries with unusable ids or `"active": false` are skipped; malformed
+/// optional fields are ignored rather than failing the listing.
 pub(crate) fn parse_models(body: &str) -> Result<Vec<DiscoveredModel>, ProviderError> {
-    let list: ModelList = serde_json::from_str(body)
-        .map_err(|_| ProviderError::Protocol("malformed model list".into()))?;
-    if list.data.len() > MAX_LISTED_MODELS {
+    let value: Value = serde_json::from_str(body).map_err(|_| malformed_list())?;
+    parse_model_list(&value)
+}
+
+/// [`parse_models`] over an already parsed body.
+pub(crate) fn parse_model_list(value: &Value) -> Result<Vec<DiscoveredModel>, ProviderError> {
+    let entries = match value {
+        Value::Array(entries) => entries,
+        Value::Object(object) => object
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(malformed_list)?,
+        _ => return Err(malformed_list()),
+    };
+    check_list_size(entries.len())?;
+    Ok(entries.iter().filter_map(parse_model_entry).collect())
+}
+
+pub(crate) fn check_list_size(len: usize) -> Result<(), ProviderError> {
+    if len > MAX_LISTED_MODELS {
         return Err(ProviderError::Protocol(
             "the model list is larger than 1000 entries".into(),
         ));
     }
-    Ok(list
-        .data
-        .iter()
-        .filter_map(|entry| {
-            let id = ModelId::new(entry.get("id")?.as_str()?).ok()?;
-            let context = |value: Option<&Value>| {
-                value
-                    .and_then(Value::as_u64)
-                    .and_then(|n| u32::try_from(n).ok())
-                    .filter(|n| *n > 0)
-            };
-            let meta = entry.get("meta");
-            let context_window = context(entry.get("context_length"))
-                .or_else(|| context(entry.get("max_model_len")))
-                .or_else(|| context(entry.get("context_window")))
-                .or_else(|| context(meta.and_then(|meta| meta.get("n_ctx"))))
-                .or_else(|| context(meta.and_then(|meta| meta.get("n_ctx_train"))));
-            Some(DiscoveredModel { id, context_window })
+    Ok(())
+}
+
+/// One OpenAI-style listing entry (also used for Anthropic's `data[]`).
+pub(crate) fn parse_model_entry(entry: &Value) -> Option<DiscoveredModel> {
+    if entry.get("active").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let id = ModelId::new(entry.get("id")?.as_str()?).ok()?;
+    let mut model = DiscoveredModel::new(id);
+    model.display_name = model_label(entry.get("name"), &model.id)
+        .or_else(|| model_label(entry.get("display_name"), &model.id));
+    let meta = entry.get("meta");
+    let top = entry.get("top_provider");
+    model.context_window = [
+        entry.get("context_length"),
+        entry.get("max_model_len"),
+        entry.get("context_window"),
+        entry.get("max_context_length"),
+        meta.and_then(|meta| meta.get("n_ctx")),
+        meta.and_then(|meta| meta.get("n_ctx_train")),
+        top.and_then(|top| top.get("context_length")),
+    ]
+    .into_iter()
+    .find_map(positive_u32);
+    model.max_output_tokens = [
+        top.and_then(|top| top.get("max_completion_tokens")),
+        entry.get("max_completion_tokens"),
+        entry.get("max_output_tokens"),
+    ]
+    .into_iter()
+    .find_map(positive_u32);
+
+    let parameters = entry.get("supported_parameters").and_then(Value::as_array);
+    let capabilities = entry.get("capabilities").filter(|value| value.is_object());
+    let capability = |name: &str| {
+        capabilities
+            .and_then(|capabilities| capabilities.get(name))
+            .and_then(Value::as_bool)
+    };
+    model.tool_calls = parameters
+        .map(|parameters| {
+            if contains(parameters, "tools") {
+                ToolCallSupport::Native
+            } else {
+                ToolCallSupport::None
+            }
         })
-        .collect())
+        .or_else(|| {
+            capability("function_calling").map(|supported| {
+                if supported {
+                    ToolCallSupport::Native
+                } else {
+                    ToolCallSupport::None
+                }
+            })
+        });
+    model.json_schema_output = parameters.map(|parameters| {
+        contains(parameters, "structured_outputs") || contains(parameters, "response_format")
+    });
+    let image_input = entry
+        .get("architecture")
+        .and_then(|architecture| architecture.get("input_modalities"))
+        .and_then(Value::as_array)
+        .map(|modalities| contains(modalities, "image"));
+    model.vision = match (image_input, capability("vision")) {
+        (None, None) => None,
+        (image, vision) => Some(image == Some(true) || vision == Some(true)),
+    };
+    let kind = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    if matches!(kind.as_deref(), Some("embedding" | "embeddings"))
+        || model.id.as_str().to_ascii_lowercase().contains("embed")
+    {
+        model.embeddings = Some(true);
+        model.chat = Some(false);
+    } else if matches!(
+        kind.as_deref(),
+        Some("image" | "audio" | "moderation" | "rerank")
+    ) || capability("completion_chat") == Some(false)
+    {
+        model.chat = Some(false);
+    }
+    model.cost = entry.get("pricing").and_then(|pricing| {
+        Some(CostHint {
+            input_per_million: per_million(pricing.get("prompt"))?,
+            output_per_million: per_million(pricing.get("completion"))?,
+        })
+    });
+    Some(model)
+}
+
+/// A positive count that fits `u32`.
+pub(crate) fn positive_u32(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0)
+}
+
+/// A vendor label usable as a display name: 1-128 characters, no control
+/// characters, and different from the model id.
+pub(crate) fn model_label(value: Option<&Value>, id: &ModelId) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|label| {
+            !label.is_empty()
+                && label.chars().count() <= 128
+                && !label.chars().any(char::is_control)
+                && *label != id.as_str()
+        })
+        .map(str::to_owned)
+}
+
+fn contains(values: &[Value], needle: &str) -> bool {
+    values.iter().any(|value| value.as_str() == Some(needle))
+}
+
+/// A per-token USD price (decimal string or number) scaled to per million
+/// tokens; negative, non-finite, or unparsable prices are ignored.
+fn per_million(value: Option<&Value>) -> Option<f64> {
+    let per_token = match value? {
+        Value::String(text) => text.trim().parse::<f64>().ok()?,
+        Value::Number(number) => number.as_f64()?,
+        _ => return None,
+    };
+    let scaled = (per_token * 1_000_000.0 * 1e6).round() / 1e6;
+    (per_token.is_finite() && per_token >= 0.0 && scaled.is_finite()).then_some(scaled)
 }
 
 /// Map a failed HTTP status (and its error body, parsed for machine codes
@@ -484,6 +775,83 @@ mod tests {
     }
 
     #[test]
+    fn user_parts_become_content_arrays_and_openrouter_pins_native_pdfs() {
+        use crate::parts::fixtures::{pdf, png};
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let image = || ContentPart::image("image/png", png(2, 2));
+        let image_url = format!("data:image/png;base64,{}", b64(&png(2, 2)));
+        let request = ChatRequest::new(
+            ModelId::new("m").unwrap(),
+            vec![
+                ChatMessage::system("sys"),
+                ChatMessage::user("look")
+                    .with_parts(vec![image(), ContentPart::pdf("spec", pdf(), 1)]),
+                ChatMessage::assistant(""),
+                ChatMessage::user("").with_parts(vec![image()]),
+                ChatMessage::user("plain"),
+            ],
+        );
+        let body: Value = serde_json::from_slice(&request_body(&request, true)).unwrap();
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "file", "file": {
+                    "filename": "spec.pdf",
+                    "file_data": format!("data:application/pdf;base64,{}", b64(&pdf())),
+                }},
+            ])
+        );
+        // Messages without parts keep today's exact form.
+        assert_eq!(
+            body["messages"][0],
+            json!({"role": "system", "content": "sys"})
+        );
+        assert_eq!(
+            body["messages"][2],
+            json!({"role": "assistant", "content": ""})
+        );
+        assert_eq!(
+            body["messages"][3]["content"],
+            json!([{"type": "image_url", "image_url": {"url": image_url}}])
+        );
+        assert_eq!(
+            body["messages"][4],
+            json!({"role": "user", "content": "plain"})
+        );
+        assert!(body.get("plugins").is_none());
+
+        let routed: Value =
+            serde_json::from_slice(&request_body_with(&request, true, true)).unwrap();
+        assert_eq!(
+            routed["plugins"],
+            json!([{"id": "file-parser", "pdf": {"engine": "native"}}])
+        );
+        let images_only = ChatRequest::new(
+            ModelId::new("m").unwrap(),
+            vec![ChatMessage::user("x").with_parts(vec![image()])],
+        );
+        let routed: Value =
+            serde_json::from_slice(&request_body_with(&images_only, true, true)).unwrap();
+        assert!(routed.get("plugins").is_none());
+        for host in ["openrouter.ai", "OpenRouter.AI", "eu.openrouter.ai"] {
+            assert!(is_openrouter(host), "{host}");
+        }
+        for host in [
+            "openrouter.ai.example.com",
+            "notopenrouter.ai",
+            "api.openai.com",
+            "127.0.0.1",
+        ] {
+            assert!(!is_openrouter(host), "{host}");
+        }
+        assert_eq!(pdf_filename("a.PDF"), "a.PDF");
+        assert_eq!(pdf_filename("notes"), "notes.pdf");
+    }
+
+    #[test]
     fn model_listings_report_known_context_fields() {
         let models = parse_models(
             r#"{"object":"list","data":[
@@ -491,6 +859,7 @@ mod tests {
                 {"id":"meta-llama/Llama-3.1-8B","max_model_len":131072},
                 {"id":"qwen","meta":{"n_ctx_train":32768}},
                 {"id":"bad id with spaces"},
+                {"id":"~x-ai/grok-latest"},
                 {"id":"router/x","context_length":8192}
             ]}"#,
         )

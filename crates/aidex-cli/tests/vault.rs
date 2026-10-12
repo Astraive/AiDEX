@@ -5,21 +5,32 @@ use aidex_vault::KdfParams;
 use aidexd::{Daemon, DaemonHandle};
 use serde_json::Value;
 use std::{
-    io::Write,
+    io::{self, Write},
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
 };
 
 const PASSPHRASE: &str = "correct horse battery staple";
 const VALUE: &str = "PLAINTEXT-MARKER-VALUE-cli-0c3d";
 
 fn aidex(args: &[&str], root: &Path, stdin: Option<&str>) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_aidex"))
+    let mut child = spawn_aidex(args, root, stdin.is_some());
+    let written = if let Some(input) = stdin {
+        let mut pipe = child.stdin.take().expect("stdin pipe");
+        pipe.write_all(input.as_bytes())
+    } else {
+        Ok(())
+    };
+    wait_for_aidex(child, written)
+}
+
+fn spawn_aidex(args: &[&str], root: &Path, piped_stdin: bool) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_aidex"))
         .args(args)
         .args(["--drive", root.to_str().expect("utf-8 temp path")])
         .env_remove("AIDEX_DRIVE_ROOT")
         .env("AIDEX_OMP", "aidex-test-missing-omp-executable")
-        .stdin(if stdin.is_some() {
+        .stdin(if piped_stdin {
             Stdio::piped()
         } else {
             Stdio::null()
@@ -27,12 +38,20 @@ fn aidex(args: &[&str], root: &Path, stdin: Option<&str>) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("run aidex");
-    if let Some(input) = stdin {
-        let mut pipe = child.stdin.take().expect("stdin pipe");
-        pipe.write_all(input.as_bytes()).expect("write stdin");
+        .expect("run aidex")
+}
+
+fn wait_for_aidex(child: Child, written: io::Result<()>) -> Output {
+    let output = child.wait_with_output().expect("wait for aidex");
+    if let Err(error) = written {
+        // Rejection can close stdin before our write. Successful commands must
+        // consume the complete input; every other write failure remains an error.
+        assert!(
+            error.kind() == io::ErrorKind::BrokenPipe && !output.status.success(),
+            "write stdin: {error}"
+        );
     }
-    child.wait_with_output().expect("wait for aidex")
+    output
 }
 
 fn temp_drive() -> tempfile::TempDir {
@@ -153,7 +172,9 @@ fn vault_commands_manage_secrets_through_the_daemon() {
 
     let listed = aidex(&["--json", "vault", "list"], drive, None);
     assert_quiet(&listed, &[VALUE]);
-    assert_eq!(json(&listed)["secrets"][0]["name"], "openai");
+    let secrets = json(&listed)["secrets"].as_array().unwrap().clone();
+    assert_eq!(secrets.len(), 1);
+    assert_eq!(secrets[0]["name"], "openai");
     let human = aidex(&["vault", "list"], drive, None);
     assert_eq!(code(&human), 0);
     assert!(
@@ -244,6 +265,45 @@ fn vault_commands_manage_secrets_through_the_daemon() {
 }
 
 #[test]
+fn fast_argument_rejection_closes_stdin_without_persisting_the_secret() {
+    let root = temp_drive();
+    let handle = daemon(root.path());
+    json(&aidex(
+        &["--json", "vault", "init", "--passphrase-stdin"],
+        root.path(),
+        Some(&format!("{PASSPHRASE}\n")),
+    ));
+
+    // A missing consumer is rejected by argument parsing before stdin is read.
+    // Keep our pipe across wait() so the write deterministically happens after exit.
+    let mut child = spawn_aidex(
+        &["vault", "set", "denied", "--from-stdin"],
+        root.path(),
+        true,
+    );
+    let mut pipe = child.stdin.take().expect("stdin pipe");
+    assert_eq!(
+        child.wait().expect("wait for argument rejection").code(),
+        Some(2)
+    );
+    let written = pipe.write_all(VALUE.as_bytes());
+    drop(pipe);
+    assert_eq!(
+        written.as_ref().unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+
+    let output = wait_for_aidex(child, written);
+    assert_eq!(code(&output), 2, "{}", text(&output));
+    assert_quiet(&output, &[PASSPHRASE, VALUE]);
+    let listed = json(&aidex(&["--json", "vault", "list"], root.path(), None));
+    assert_eq!(listed["secrets"], serde_json::json!([]));
+
+    handle.stop();
+    handle.wait().unwrap();
+}
+
+#[test]
 fn secrets_are_never_read_from_argv_or_without_an_explicit_stdin_flag() {
     // No daemon is running: input rules are checked before connecting.
     let root = temp_drive();
@@ -256,6 +316,7 @@ fn secrets_are_never_read_from_argv_or_without_an_explicit_stdin_flag() {
     ] {
         let output = aidex(args, root.path(), None);
         assert_eq!(code(&output), 2, "{args:?}: {}", text(&output));
+        assert_quiet(&output, &[PASSPHRASE, VALUE]);
         assert!(
             text(&output).contains("stdin"),
             "{args:?}: {}",
@@ -278,6 +339,7 @@ fn secrets_are_never_read_from_argv_or_without_an_explicit_stdin_flag() {
     ] {
         let output = aidex(args, root.path(), None);
         assert_eq!(code(&output), 2, "{args:?}: {}", text(&output));
+        assert_quiet(&output, &[PASSPHRASE, VALUE]);
     }
     // With the flag but no daemon, the failure is "daemon unavailable", not a prompt.
     let output = aidex(
@@ -286,4 +348,5 @@ fn secrets_are_never_read_from_argv_or_without_an_explicit_stdin_flag() {
         Some(PASSPHRASE),
     );
     assert_eq!(code(&output), 3, "{}", text(&output));
+    assert_quiet(&output, &[PASSPHRASE]);
 }

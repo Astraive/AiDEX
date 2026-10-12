@@ -1,5 +1,5 @@
 export { Avatar, type AvatarProps } from "./Avatar";
-export { Badge, type BadgeProps } from "./Badge";
+export { Badge, type BadgeProps, type BadgeTone } from "./Badge";
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from "./Button";
 export { Card, type CardProps } from "./Card";
 export { Checkbox, type CheckboxProps } from "./Checkbox";
@@ -12,6 +12,7 @@ export { IconBadge, type IconBadgeProps } from "./IconBadge";
 export { IconButton, type IconButtonProps, type IconButtonSize, type IconButtonVariant } from "./IconButton";
 export { Kbd, type KbdProps } from "./Kbd";
 export { PasswordField, type PasswordFieldProps } from "./PasswordField";
+export { Popover, type PopoverPlacement, type PopoverProps } from "./Popover";
 export { ProgressBar, type ProgressBarProps } from "./ProgressBar";
 export { SearchField, type SearchFieldProps } from "./SearchField";
 export {
@@ -22,6 +23,7 @@ export {
 export { Select, type SelectOption, type SelectProps } from "./Select";
 export { Split, type SplitProps } from "./Split";
 export { Stack, type SpaceStep, type StackProps } from "./Stack";
+export { StatusDot, type StatusDotProps, type StatusDotTone } from "./StatusDot";
 export { StatusIndicator, type StatusIndicatorProps } from "./StatusIndicator";
 export { SwatchPicker, type Swatch, type SwatchPickerProps } from "./SwatchPicker";
 export { Switch, type SwitchProps } from "./Switch";

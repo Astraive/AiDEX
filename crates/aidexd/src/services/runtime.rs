@@ -12,19 +12,12 @@ pub fn open_runtime(
     models: &ModelServices,
 ) -> Result<Arc<RuntimeManager>, ServicesError> {
     let offline = models.offline().clone();
-    let gate_vault = vault.clone();
-    let private = paths
-        .ensure_dir(&paths.config().join("external-runtimes"))
-        .map_err(|e| ServicesError::new("runtime", e.code(), e.to_string()))?;
-    RuntimeManager::open_with_private(
+    RuntimeManager::open(
         paths.root().to_path_buf(),
-        private,
         vault,
         models.auth().clone(),
         Sandbox::locate(),
-        Arc::new(move || {
-            !offline.is_offline() && gate_vault.status().state == aidex_vault::VaultState::Unlocked
-        }),
+        Arc::new(move || !offline.is_offline()),
     )
     .map(Arc::new)
     .map_err(|e| ServicesError::new("runtime", ServiceErrorCode::Unavailable, e.to_string()))

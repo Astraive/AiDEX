@@ -2,7 +2,7 @@
 
 mod common;
 
-use aidex_vault::{SecretBytes, SecretKind, Vault, VaultErrorKind};
+use aidex_vault::{MAX_SECRETS, SecretBytes, SecretKind, Vault, VaultErrorKind};
 use common::*;
 use std::fs;
 
@@ -112,4 +112,34 @@ fn damaged_backups_are_detected_on_restore_or_unlock() {
         unlocked.verify().is_err(),
         "verify authenticates every record"
     );
+}
+
+#[test]
+fn restore_bounds_record_count_before_copying_any_files() {
+    let root = tempfile::tempdir().unwrap();
+    let (_dir, vault, _) = create_with_secret(root.path());
+    let backup = root.path().join("backup");
+    vault.backup_to(&backup).unwrap();
+    drop(vault);
+    let original_header = fs::read(header_path(&backup)).unwrap();
+    let records = backup.join("records");
+    // Include the one real record: exactly MAX_SECRETS files remain acceptable.
+    for id in 0..MAX_SECRETS - 1 {
+        fs::write(records.join(format!("{id:032x}.json")), b"orphan").unwrap();
+    }
+    let allowed = root.path().join("allowed");
+    Vault::restore_from(&backup, &allowed).unwrap();
+    assert_eq!(record_files(&allowed).len(), MAX_SECRETS);
+    assert_eq!(fs::read(header_path(&allowed)).unwrap(), original_header);
+
+    fs::write(records.join(format!("{:032x}.json", MAX_SECRETS)), b"extra").unwrap();
+    let rejected = root.path().join("rejected");
+    assert_eq!(
+        Vault::restore_from(&backup, &rejected).unwrap_err().kind(),
+        VaultErrorKind::LimitExceeded
+    );
+    assert!(!Vault::exists(&rejected));
+    assert!(files(&rejected).is_empty());
+    assert_eq!(fs::read(header_path(&backup)).unwrap(), original_header);
+    assert_eq!(record_files(&backup).len(), MAX_SECRETS + 1);
 }

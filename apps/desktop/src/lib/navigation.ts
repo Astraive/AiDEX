@@ -13,7 +13,7 @@ import {
   type IconProps,
 } from "@aidex/ui/icons";
 import type { ComponentType } from "react";
-import type { Route } from "./routes";
+import { tabOf, type Route } from "./routes";
 
 export const railItems = [
   { id: "home", label: "Home", Icon: HomeIcon, route: { page: "home" } },
@@ -24,7 +24,7 @@ export const railItems = [
   { id: "extensions", label: "Plugins", Icon: GridIcon, route: { page: "extensions" } },
   { id: "agents", label: "Agents", Icon: UsersIcon, route: { page: "agents" } },
   { id: "models", label: "Local models", Icon: BoxIcon, route: { page: "models", tab: "local" } },
-  { id: "providers", label: "Provider accounts", Icon: CloudIcon, route: { page: "models", tab: "providers" } },
+  { id: "providers", label: "Providers", Icon: CloudIcon, route: { page: "models", tab: "providers" } },
   { id: "security", label: "Security", Icon: ShieldIcon, route: { page: "security" } },
   { id: "settings", label: "Settings", Icon: SettingsIcon, route: { page: "settings" } },
 ] as const satisfies readonly { id: string; label: string; Icon: ComponentType<IconProps>; route: Route }[];
@@ -47,7 +47,7 @@ export function railIdFor(route: Route): RailId {
     case "model":
       return "models";
     case "models":
-      return route.tab === "providers" ? "providers" : "models";
+      return tabOf(route, "models") === "providers" ? "providers" : "models";
     default:
       return route.page;
   }

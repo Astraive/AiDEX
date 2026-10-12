@@ -1,9 +1,12 @@
 import { useRef, useState } from "react";
-import { Composer } from "@aidex/ui/components";
+import { AttachmentTray, Composer, Notice } from "@aidex/ui/components";
 import { CodeIcon, FileTextIcon, LightbulbIcon, MessageSquareIcon } from "@aidex/ui/icons";
 import { Button, Container, Heading, SegmentedControl, Stack, Text } from "@aidex/ui/primitives";
 import { useNavigation } from "../../app/providers/navigation";
 import { usePreferences } from "../../app/providers/preferences";
+import { useToast } from "../../app/providers/toast";
+import { attachmentSendBlock } from "../chat/attachments/attachmentFiles";
+import { trayItemOf, useDraftAttachments } from "../chat/attachments/useConversationAttachments";
 import { SystemOverview } from "./SystemOverview";
 
 type Mode = "chat" | "agent";
@@ -32,12 +35,33 @@ export function HomePage({ autoFocus = false }: Props) {
   const [draft, setDraft] = useState("");
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const { navigate } = useNavigation();
-  const { setPendingPrompt } = usePreferences();
+  const { setPendingPrompt, setPendingAttachments } = usePreferences();
+  const notify = useToast();
+  // Attachments are prepared here and uploaded by the new chat once its conversation exists.
+  const attachments = useDraftAttachments();
+  const [problem, setProblem] = useState<string>();
+  const attachmentBlock = attachmentSendBlock({ items: attachments.items, external: false });
 
-  // The chat or agent screen picks the prompt up on arrival.
+  // The chat or agent screen picks the prompt and attachments up on arrival.
   const submit = (prompt: string) => {
+    if (attachmentBlock) return;
     setPendingPrompt(prompt.trim());
+    setPendingAttachments(attachments.items.length ? attachments.draft.takeItems() : null);
     navigate({ page: mode === "agent" ? "agent" : "chat" });
+  };
+
+  const addFiles = (files: File[]) => {
+    setProblem(undefined);
+    void attachments.draft.add(files).then((problems) => {
+      if (problems.length) setProblem(problems.join(" "));
+    });
+  };
+
+  const foldPaste = (text: string) => {
+    setProblem(undefined);
+    const result = attachments.draft.addPaste(text);
+    if ("problem" in result) setProblem(result.problem);
+    else notify(`Large paste attached as ${result.name}`);
   };
 
   // Frames whatever is already typed instead of discarding it.
@@ -62,12 +86,29 @@ export function HomePage({ autoFocus = false }: Props) {
             </Text>
           </Stack>
           <Stack gap={7}>
+            {problem && (
+              <Notice tone="danger" role="alert">
+                {problem}
+              </Notice>
+            )}
             <Composer
               label="Message"
               placeholder={placeholderByMode[mode]}
               value={draft}
               onValueChange={setDraft}
               onSubmit={submit}
+              onFiles={addFiles}
+              onLargePaste={foldPaste}
+              canSubmitEmpty={attachments.items.length > 0}
+              submitBlockedReason={attachmentBlock}
+              attachments={
+                attachments.items.length > 0 ? (
+                  <AttachmentTray
+                    items={attachments.items.map(trayItemOf)}
+                    onRemove={(key) => attachments.draft.remove(key)}
+                  />
+                ) : undefined
+              }
               textareaRef={composerRef}
               autoFocus={autoFocus}
             />

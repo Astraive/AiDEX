@@ -35,7 +35,7 @@ pub const EPHEMERAL_DIR: &str = "ephemeral";
 /// Durable registry of host, drive, and ephemeral workspaces for one drive.
 ///
 /// Thread-safe (`Send + Sync`): database access is serialized internally, and
-/// ephemeral apply/discard operations are serialized against each other.
+/// ephemeral creation/apply/discard and data deletion are serialized against each other.
 pub struct WorkspaceRegistry {
     paths: DrivePaths,
     database: PathBuf,
@@ -384,13 +384,10 @@ impl WorkspaceRegistry {
         if !location.is_absolute() {
             return unavailable("the root was added on a different operating system");
         }
-        let metadata = match &record.root {
-            WorkspaceRoot::Host(_) => fs::metadata(&location),
-            WorkspaceRoot::Drive(_) => fs::symlink_metadata(&location),
-        };
+        let metadata = fs::symlink_metadata(&location);
         match metadata {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                unavailable("the drive workspace directory was replaced by a link")
+                unavailable("the workspace root directory was replaced by a link")
             }
             Ok(metadata) if metadata.is_dir() => WorkspaceAvailability::Available,
             Ok(_) => unavailable("the root is not a directory"),

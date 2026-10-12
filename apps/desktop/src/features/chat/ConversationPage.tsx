@@ -1,10 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { CodeBlock, Composer, Dialog, Notice } from "@aidex/ui/components";
+import {
+  AttachmentTray,
+  CodeBlock,
+  Composer,
+  Dialog,
+  FileDropZone,
+  Notice,
+  TranscriptDivider,
+} from "@aidex/ui/components";
 import { DockLayout } from "@aidex/ui/desktop";
 import {
+  ArrowRightLeftIcon,
+  BotIcon,
   BoxIcon,
   ChatIcon,
   FolderIcon,
+  GitBranchIcon,
   LayersIcon,
   StopIcon,
 } from "@aidex/ui/icons";
@@ -15,8 +26,6 @@ import {
   Select,
   Stack,
   Text,
-  TextArea,
-  TextField,
 } from "@aidex/ui/primitives";
 import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
@@ -27,19 +36,79 @@ import type {
 } from "@aidex/client/dto/sessions";
 import { useNavigation } from "../../app/providers/navigation";
 import { usePreferences } from "../../app/providers/preferences";
+import { useToast } from "../../app/providers/toast";
 import { useRpc } from "../../hooks/useRpc";
-import { useInferenceStatus } from "../../hooks/useInferenceStatus";
-import { useSessionUpdates } from "../../hooks/useSessionUpdates";
-import { LocalInferenceNotice } from "../model-manager/LocalInferenceNotice";
-import { HistoryMessages, MessageContent } from "../sessions/HistoryMessages";
-import { SkillSelection } from "../extensions/SkillSelection";
-import { approvalDecision } from "../approvals/approvalDecision";
-import { skillSelectionReason } from "../extensions/skillEligibility";
+import { useShell } from "../../layouts/shell";
+import { useProviderCatalog } from "../model-manager/catalog/ProviderCatalog";
 import {
-  permissionOptions,
-  supportsSelection,
-} from "../agent-center/runtimeSelection";
+  isExternalRuntime,
+  modelTargetOf,
+  parseModelKey,
+  type ModelTarget,
+} from "../model-manager/catalog/modelKeys";
+import { LOCAL_PROVIDER_ID } from "../model-manager/catalog/providerAccounts";
+import { LocalInferenceNotice } from "../model-manager/LocalInferenceNotice";
+import { HistoryMessages } from "../sessions/HistoryMessages";
+import { ArtifactsDialog } from "./artifacts/ArtifactsDialog";
+import { useArtifactDownload } from "./artifacts/useArtifactDownload";
+import { attachmentSendBlock, reasonOf } from "./attachments/attachmentFiles";
+import { ProjectFileDialog } from "./attachments/ProjectFileDialog";
+import {
+  trayItemOf,
+  useConversationAttachments,
+} from "./attachments/useConversationAttachments";
+import { invokedSkillIds, invokedSkillsProblem } from "./composer/composerText";
+import {
+  agentModelOptions,
+  carriedAttachments,
+  draftWithInstruction,
+  forkTitle,
+  type AgentContinuation,
+} from "./continuation/agentContinuation";
+import { ContinueAsAgentDialog } from "./continuation/ContinueAsAgentDialog";
+import { useShellNeedsFullAccess } from "./continuation/engineCapabilities";
+import { PERMISSION_LABELS, permissionDescription } from "./continuation/permissions";
+import { transcriptDividers } from "./continuation/transcriptDividers";
+import type { SlashCommandId } from "./composer/slashCommands";
+import { useComposerMenu, type SlashCommandState } from "./composer/useComposerMenu";
+import { useWebSearchToggle } from "./composer/useWebSearchToggle";
+import { WebSearchToggle } from "./composer/WebSearchToggle";
+import { Transcript, type TranscriptMarker } from "./transcript/Transcript";
+import {
+  TranscriptProvider,
+  type ArtifactRef,
+  type TranscriptEnvironment,
+} from "./transcript/TranscriptContext";
+import { useOpenLink } from "./transcript/useOpenLink";
+import { useConversationExtensions } from "./useConversationExtensions";
+import { ConversationModelPicker } from "./ConversationModelPicker";
+import { describeCurrentModel } from "./currentModel";
+import { ModelStateNotice } from "./ModelStateNotice";
+import {
+  resolveConversationModel,
+  type ResolvedConversationModel,
+} from "./resolveConversationModel";
+import {
+  buildSessionConfig,
+  configurationChanged,
+  sessionTargetOf,
+} from "./sessionConfig";
 import styles from "./ConversationPage.module.css";
+const permissionOptions = (
+  ["supervised", "auto_accept_edits", "auto", "full_access"] as const
+).map((value) => ({ value, label: PERMISSION_LABELS[value] }));
+const modeLabels: Record<ConversationMode, string> = {
+  chat: "Chat",
+  plan: "Plan",
+  agent: "Agent",
+};
+/** Why external runtimes cannot take attachments (the attach button's tooltip and drop overlay). */
+const EXTERNAL_ATTACH_REASON = "Attachments work with AiDEX native models";
+const loadingSession: ResolvedConversationModel = {
+  key: null,
+  state: "none",
+  origin: "session",
+};
 export function ConversationPage({
   initialMode,
 }: {
@@ -47,117 +116,106 @@ export function ConversationPage({
 }) {
   const { route, replace, navigate } = useNavigation();
   const preferences = usePreferences();
-  const models = useRpc("model.list");
-  const inference = useInferenceStatus(models.refetch);
-  const localCatalog = useRpc("inference.catalog", undefined, {
-    enabled: inference.data?.state === "stopped",
-  });
+  const catalog = useProviderCatalog();
+  const notify = useToast();
+  const inference = catalog.inference;
   const workspaces = useRpc("workspace.list");
-  const skills = useRpc("extensions.skills.list");
-  const runtimes = useRpc("runtime.list");
-  const execution = useRpc("execution.status");
   const session = useRpc(
     "conversation.get",
     { id: route.id ?? "" },
     { enabled: !!route.id },
   );
-  const live = useSessionUpdates(route.id, session.refetch);
   const [draft, setDraft] = useState(() => preferences.pendingPrompt ?? "");
   const [mode, setMode] = useState(initialMode);
-  const [runtimeId, setRuntimeId] = useState<string>(
-    initialMode === "agent" ? (preferences.settings.runtime_id ?? "") : "",
-  );
-  const [runtimeModelId, setRuntimeModelId] = useState(
-    preferences.settings.runtime_model_id ?? "",
-  );
-  const runtimeTouched = useRef(false);
-  const external = !!runtimeId && runtimeId !== "native";
-  const runtime = runtimes.data?.runtimes.find((item) => item.id === runtimeId);
-  const descriptor = execution.data?.runtime_descriptors.find(
-    (item) => item.id === runtimeId,
-  );
-  const runtimeModels = useRpc(
-    "runtime.models",
-    { id: runtimeId },
-    { enabled: external && !!runtime?.enabled },
-  );
   const [workspaceId, setWorkspaceId] = useState(
     () => preferences.pendingWorkspaceId ?? "",
   );
   const [permission, setPermission] = useState<PermissionMode>(
     preferences.settings.permission_mode ?? "supervised",
   );
-  const [instructions, setInstructions] = useState(
-    preferences.settings.instructions,
-  );
-  const [fallbackModel, setFallbackModel] = useState(
-    preferences.settings.fallback_model ?? "",
-  );
-  const [maxSteps, setMaxSteps] = useState(preferences.settings.max_steps);
-  const [maxTokens, setMaxTokens] = useState(preferences.settings.max_tokens);
-  const [selectedSkillIds, setSelectedSkillIds] = useState(
-    preferences.settings.skill_ids ?? [],
-  );
-  const settingsTouched = useRef(false);
+  // A new chat's own model choice; existing conversations use their configuration.
+  const [draftKey, setDraftKey] = useState<string | null>(null);
   const [popup, setPopup] = useState<
-    "mode" | "model" | "project" | "attach" | "skills" | null
+    "mode" | "project" | "attach" | "continue" | null
   >(null);
-  const [attachmentPath, setAttachmentPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const createdId = useRef<string | undefined>(undefined);
+  // What `conversation.create` saved, so a retry after a failed first send can re-apply changes.
+  const createdConfig = useRef<SessionConfig | null>(null);
   const contextTouched = useRef(!!preferences.pendingWorkspaceId);
   const permissionTouched = useRef(false);
-  const pendingCommand = useRef<{ content: string; id: string } | null>(null);
+  // A retried send reuses its command id only when content, skills, web search, and attachments are
+  // unchanged.
+  const pendingCommand = useRef<{ request: string; id: string } | null>(null);
+  // Continue as Agent: a retried fork or first instruction reuses its command id while unchanged.
+  const continuationCommand = useRef<{ request: string; id: string } | null>(
+    null,
+  );
   const autoSent = useRef(false);
+  // False once this page is gone (the user opened another screen): a send still finishing then must
+  // not take over the route or touch the page's state.
+  const mounted = useRef(true);
+  // Where focus goes once "Continue here" closes its dialog (the header action that opened it goes
+  // away when the conversation becomes an agent).
+  const focusAfterContinue = useRef<"composer" | "heading" | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const [arrivalPrompt] = useState(() => preferences.pendingPrompt);
-  const availableModels =
-    models.data?.models.filter((m) => m.capabilities.chat) ?? [];
-  const nativeSession =
-    session.data &&
-    (!session.data.runtime_id || session.data.runtime_id === "native")
-      ? session.data
-      : undefined;
-  const currentRef = nativeSession
-    ? `${nativeSession.provider_id}/${nativeSession.model_id}`
-    : preferences.modelId;
-  const selectedModel = availableModels.find(
-    (m) => `${m.model.provider_id}/${m.model.model_id}` === currentRef,
+  const [arrivalAttachments] = useState(
+    () => (preferences.pendingAttachments?.length ?? 0) > 0,
   );
-  const preferredLocal =
-    currentRef?.startsWith("local-llama/") ||
-    (!currentRef && models.data?.default_model?.provider_id === "local-llama");
+  const shell = useShell();
+  const composerRef = useRef<HTMLFormElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const webSearch = useWebSearchToggle(route.id);
+  const attachments = useConversationAttachments(
+    route.id,
+    preferences.pendingAttachments,
+  );
+  const [artifactDialog, setArtifactDialog] = useState<{ artifact: ArtifactRef | null } | null>(null);
+  const openLink = useOpenLink();
+  const downloadArtifact = useArtifactDownload();
+
+  const resolved =
+    route.id && !session.data
+      ? loadingSession
+      : resolveConversationModel({
+          session: session.data,
+          draftKey,
+          preferenceKey: preferences.modelId,
+          registryDefault: catalog.registryDefault,
+          models: catalog.chatModels,
+          inference,
+          runtimes: catalog.runtimes,
+        });
+  const current = describeCurrentModel(resolved, catalog);
+  const modelName = current.name;
+  const target = parseModelKey(resolved.key);
+  // Installed local models, to name the conversation's own local model while it is not running.
+  const localCatalog = useRpc("inference.catalog", undefined, {
+    enabled:
+      inference?.state === "stopped" || resolved.state === "local-stopped",
+  });
+  const ownLocalModelId =
+    target?.kind === "native" && target.providerId === LOCAL_PROVIDER_ID
+      ? target.modelId
+      : null;
+  const ownLocalName = ownLocalModelId
+    ? (localCatalog.data?.models.find((item) => item.id === ownLocalModelId)
+        ?.name ?? modelName)
+    : undefined;
+  const runtimeDriver =
+    resolved.runtime &&
+    catalog.runtimeDrivers.find(
+      (driver) => driver.driver === resolved.runtime?.driver,
+    );
   const installedModel =
     localCatalog.data?.models.find(
       (item) =>
-        item.id ===
-        (inference.data?.model_id ?? localCatalog.data?.settings?.model_id),
+        item.id === (inference?.model_id ?? localCatalog.data?.settings?.model_id),
     ) ?? localCatalog.data?.models[0];
-  const chosenModel = preferredLocal
-    ? inference.data?.state === "ready"
-      ? (selectedModel ??
-        (!nativeSession
-          ? availableModels.find(
-              (item) => item.model.provider_id === "local-llama",
-            )
-          : undefined))
-      : undefined
-    : nativeSession
-      ? selectedModel
-      : (selectedModel ??
-        availableModels.find(
-          (m) =>
-            m.model.provider_id === models.data?.default_model?.provider_id &&
-            m.model.model_id === models.data?.default_model?.model_id,
-        ) ??
-        availableModels[0]);
-  const model =
-    chosenModel?.model.provider_id === "local-llama" &&
-    inference.data?.state !== "ready"
-      ? undefined
-      : chosenModel;
   const project = workspaces.data?.workspaces.find((w) => w.id === workspaceId);
   const latestRun = session.data?.runs
     .filter((run) => !run.parent_run_id)
@@ -165,15 +223,80 @@ export function ConversationPage({
   const running =
     !!latestRun &&
     ["pending", "running", "waiting_approval"].includes(latestRun.status);
-  const modelName = external
-    ? (runtimeModels.data?.models.find((item) => item.id === runtimeModelId)
-        ?.name ??
-      (runtimeModelId || "Choose a runtime model"))
-    : (model?.display_name ??
-      inference.data?.model_name ??
-      installedModel?.name ??
-      "Choose a model");
   const lastMessage = session.data?.messages.at(-1);
+  const external = target?.kind === "runtime";
+  const attachmentBlock = attachmentSendBlock({
+    items: attachments.items,
+    external,
+    model: resolved.model
+      ? {
+          name: modelName,
+          input: resolved.model.input,
+          vision: resolved.model.capabilities.vision,
+        }
+      : undefined,
+  });
+  const extensions = useConversationExtensions({
+    sessionId: route.id,
+    workspaceId: project?.id,
+    messages: session.data?.messages,
+  });
+  // "Continue as Agent" (header action, `/agent`, and Agent in the mode dialog) for a Chat or Plan
+  // conversation with history on a native model.
+  const continueAvailable =
+    !!route.id &&
+    !!session.data &&
+    session.data.total_messages > 0 &&
+    session.data.mode !== "agent" &&
+    !external;
+  const continuing = popup === "continue";
+  const shellNeedsFullAccess = useShellNeedsFullAccess(
+    continuing || popup === "mode",
+  );
+  // Sent attachments of the whole conversation (the transcript may show only its tail).
+  const sessionAttachments = useRpc(
+    "attachment.list",
+    { session_id: route.id ?? "", limit: 200 },
+    { enabled: continuing && !!route.id },
+  );
+  const agentModels = continuing
+    ? agentModelOptions({
+        models: catalog.models,
+        findModel: catalog.findModel,
+        providerName: (key) => catalog.providerFor(key)?.name,
+        current: { key: resolved.key, name: modelName, descriptor: resolved.model },
+      })
+    : [];
+  const forkedFrom = session.data?.forked_from;
+  const conversations = useRpc("conversation.list", undefined, {
+    enabled: !!forkedFrom,
+  });
+  const projectName = (id: string) =>
+    workspaces.data?.workspaces.find((w) => w.id === id || w.name === id)?.name;
+  const markers: TranscriptMarker[] = session.data
+    ? transcriptDividers({
+        runs: session.data.runs,
+        session: session.data,
+        projectName,
+        sourceTitle: forkedFrom
+          ? conversations.data?.sessions.find(
+              (item) => item.id === forkedFrom.session_id,
+            )?.title
+          : undefined,
+      }).map((divider) => ({
+        key: divider.key,
+        index: divider.index,
+        node: (
+          <TranscriptDivider
+            label={divider.label}
+            details={divider.details}
+            icon={
+              divider.kind === "fork" ? <GitBranchIcon /> : <ArrowRightLeftIcon />
+            }
+          />
+        ),
+      }))
+    : [];
   useEffect(() => {
     const container = endRef.current?.closest("main");
     if (!container) return;
@@ -193,46 +316,40 @@ export function ConversationPage({
   useEffect(() => {
     preferences.setPendingPrompt(null);
     preferences.setPendingWorkspaceId(null);
+    preferences.setPendingAttachments(null);
   }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    const target = focusAfterContinue.current;
+    if (continuing || !target) return;
+    focusAfterContinue.current = null;
+    // After the dialog has handed focus back to its opener, which may be gone or disabled.
+    const frame = requestAnimationFrame(() => {
+      const field = textareaRef.current;
+      const composerReady = target === "composer" && !!field && !field.disabled;
+      // Without scrolling: a heading focus would jump to the top and stop following the run.
+      (composerReady ? field : headingRef.current)?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [continuing]);
   useEffect(() => {
     if (!route.id && preferences.loaded && !permissionTouched.current) {
       setPermission(preferences.settings.permission_mode ?? "supervised");
     }
   }, [route.id, preferences.loaded, preferences.settings.permission_mode]);
+  // External runtimes run only as agents with full access, whether a new chat's model came from the
+  // picker, the saved default, or a Home handoff. Declared after the permission sync so it wins.
   useEffect(() => {
-    if (
-      !route.id &&
-      preferences.loaded &&
-      !runtimeTouched.current &&
-      initialMode === "agent"
-    ) {
-      setRuntimeId(preferences.settings.runtime_id ?? "");
-      setRuntimeModelId(preferences.settings.runtime_model_id ?? "");
-    }
-  }, [
-    route.id,
-    preferences.loaded,
-    preferences.settings.runtime_id,
-    preferences.settings.runtime_model_id,
-    initialMode,
-  ]);
-  useEffect(() => {
-    if (!route.id && preferences.loaded && !settingsTouched.current) {
-      setInstructions(preferences.settings.instructions);
-      setSelectedSkillIds(preferences.settings.skill_ids ?? []);
-      setFallbackModel(preferences.settings.fallback_model ?? "");
-      setMaxSteps(preferences.settings.max_steps);
-      setMaxTokens(preferences.settings.max_tokens);
-    }
-  }, [
-    route.id,
-    preferences.loaded,
-    preferences.settings.instructions,
-    preferences.settings.skill_ids,
-    preferences.settings.fallback_model,
-    preferences.settings.max_steps,
-    preferences.settings.max_tokens,
-  ]);
+    if (route.id || target?.kind !== "runtime") return;
+    setMode("agent");
+    permissionTouched.current = true;
+    setPermission("full_access");
+  }, [route.id, resolved.key]);
   useEffect(() => {
     if (!route.id) return;
     const timer = setInterval(session.refetch, running ? 250 : 1500);
@@ -242,19 +359,7 @@ export function ConversationPage({
     if (!workspaces.data) return;
     if (session.data) {
       setMode(session.data.mode);
-      setRuntimeId(
-        session.data.runtime_id === "native"
-          ? ""
-          : (session.data.runtime_id ?? ""),
-      );
-      if (session.data.runtime_id && session.data.runtime_id !== "native")
-        setRuntimeModelId(session.data.model_id);
       setPermission(session.data.permission_mode);
-      setInstructions(session.data.instructions ?? "");
-      setSelectedSkillIds(session.data.skill_ids ?? []);
-      setFallbackModel(session.data.fallback_model ?? "");
-      setMaxSteps(session.data.max_steps ?? 16);
-      setMaxTokens(session.data.max_tokens ?? 4096);
       const selected = workspaces.data.workspaces.find(
         (w) =>
           w.id === session.data!.workspace_id ||
@@ -274,13 +379,6 @@ export function ConversationPage({
     session.data?.workspace_id,
     session.data?.mode,
     session.data?.permission_mode,
-    session.data?.runtime_id,
-    session.data?.model_id,
-    session.data?.instructions,
-    JSON.stringify(session.data?.skill_ids ?? []),
-    session.data?.fallback_model,
-    session.data?.max_steps,
-    session.data?.max_tokens,
     workspaces.data,
     preferences.workspaceId,
     initialMode,
@@ -298,69 +396,45 @@ export function ConversationPage({
     )
       preferences.setWorkspaceId("");
   }, [preferences.loaded, preferences.workspaceId, workspaces.data]);
+
+  /** The model a configuration write uses: the conversation's own, else the new chat's choice. */
+  const currentTarget = (): ModelTarget => {
+    if (session.data) return sessionTargetOf(session.data);
+    if (resolved.state === "ready" && target) return modelTargetOf(target);
+    throw new Error(
+      resolved.state === "none"
+        ? "Choose a model first."
+        : `${modelName} is not available right now. Choose another model.`,
+    );
+  };
   const configuration = (
-    nextMode = mode,
-    context = workspaceId,
-    target = model,
+    changes: {
+      mode?: ConversationMode;
+      workspaceId?: string;
+      target?: ModelTarget;
+      permission?: PermissionMode;
+    } = {},
   ): SessionConfig => {
     if (route.id && !session.data)
       throw new Error("The conversation is still loading.");
-    if (!external && !target)
-      throw new Error("Connect a provider or start a local model first.");
-    if (external && (!runtime?.enabled || !descriptor))
-      throw new Error("Select an enabled runtime instance in Agents first.");
-    if (external && !supportsSelection(descriptor, nextMode, permission))
-      throw new Error(
-        "The selected runtime does not support this mode or permission scope. Choose a supported mode and permission explicitly.",
-      );
-    if (external && !runtimeModelId.trim())
-      throw new Error("Choose or enter an exact model ID for this runtime.");
-    if (
-      !Number.isInteger(maxSteps) ||
-      maxSteps < 1 ||
-      maxSteps > 128 ||
-      !Number.isInteger(maxTokens) ||
-      maxTokens < 1 ||
-      maxTokens > 32768
-    )
-      throw new Error("Use 1–128 steps and 1–32768 output tokens.");
-    if (nextMode !== "chat" && !context)
-      throw new Error("Choose a project before starting Plan or Agent mode.");
-    if (context && !workspaces.data?.workspaces.some((w) => w.id === context))
-      throw new Error("Choose a registered project or No project context.");
-    if (context && selectedSkillIds.length) {
-      if (!skills.data)
-        throw new Error(
-          "Wait for the installed skill catalog before sending selected skills.",
-        );
-      for (const id of selectedSkillIds) {
-        const skill = skills.data.find((item) => item.id === id);
-        const reason = skill
-          ? skillSelectionReason(skill, {
-              workspaceId: context,
-              profile: permission,
-            })
-          : "Skill is not installed";
-        if (reason)
-          throw new Error(
-            `Selected skill ${id}: ${reason}. Remove it or select a granted context.`,
-          );
-      }
-    }
-    return {
-      title: session.data?.title ?? draft.trim().slice(0, 72),
-      workspace_id: context || null,
-      mode: nextMode,
-      provider_id: external ? "runtime" : target!.model.provider_id,
-      model_id: external ? runtimeModelId.trim() : target!.model.model_id,
-      permission_mode: permission,
-      runtime_id: external ? runtimeId : null,
-      instructions,
-      skill_ids: context ? selectedSkillIds : [],
-      fallback_model: external ? null : fallbackModel || null,
-      max_steps: maxSteps,
-      max_tokens: maxTokens,
-    };
+    const nextTarget = changes.target ?? currentTarget();
+    // Every external runtime accepts only agent mode with full access, so no write can carry
+    // another combination (the engine would refuse it on the next run).
+    const external = isExternalRuntime(nextTarget.runtime_id);
+    return buildSessionConfig({
+      session: session.data,
+      defaults: preferences.settings,
+      // A message of attachments only is titled by their names.
+      title: (
+        draft.trim() || attachments.items.map((item) => item.name).join(", ")
+      ).slice(0, 72),
+      mode: external ? "agent" : (changes.mode ?? mode),
+      workspaceId: changes.workspaceId ?? workspaceId,
+      isRegisteredWorkspace: (id) =>
+        !!workspaces.data?.workspaces.some((w) => w.id === id),
+      target: nextTarget,
+      permission: external ? "full_access" : (changes.permission ?? permission),
+    });
   };
   const act = async (operation: () => Promise<unknown>) => {
     setBusy(true);
@@ -374,43 +448,257 @@ export function ConversationPage({
       setBusy(false);
     }
   };
-  const submit = async (text: string) => {
-    if (busy || running || !text.trim()) return;
+  /** Adds picked, pasted, or dropped files; refusals show in the conversation's notice. */
+  const addFiles = (files: File[]) => {
+    void attachments.draft.add(files).then((problems) => {
+      if (problems.length) setError(problems.join(" "));
+    });
+  };
+  /** A paste of 32 KiB or more becomes `pasted-text.txt` (Ctrl/Cmd+Shift+V keeps it inline). */
+  const foldPaste = (text: string) => {
+    const result = attachments.draft.addPaste(text);
+    if ("problem" in result) setError(result.problem);
+    else notify(`Large paste attached as ${result.name}`);
+  };
+  /**
+   * Sends `text`. A composer send also carries the attachments and the `$skill` mentions, and clears
+   * the draft; `mode` switches the conversation first (Implement switches a plan to Agent).
+   */
+  const submit = async (
+    text: string,
+    { composer = true, mode: nextMode }: { composer?: boolean; mode?: ConversationMode } = {},
+  ) => {
+    const attaching = composer && attachments.items.length > 0;
+    // `sending`: a send this page started before it was remounted is still in flight.
+    if (busy || running || attachments.sending || (!text.trim() && !attaching)) return;
     setBusy(true);
     setError(undefined);
     try {
-      const config = configuration();
-      let content = text.trim();
-      if (attachmentPath.trim()) {
-        if (!workspaceId)
-          throw new Error("Choose a project before attaching a project file.");
-        content += `\n\nAttached project file ${attachmentPath.trim()}:\n${await readAttachment(workspaceId, attachmentPath.trim())}`;
-      }
+      if (resolved.state !== "ready")
+        throw new Error(
+          resolved.state === "none"
+            ? "Choose a model first."
+            : resolved.state === "loading-local"
+              ? `${modelName} is still loading. Send when it is ready.`
+              : `${modelName} is not available right now. Choose another model.`,
+        );
+      if (attaching && attachmentBlock) throw new Error(attachmentBlock);
+      const config = configuration(nextMode ? { mode: nextMode } : {});
+      const native = !isExternalRuntime(config.runtime_id);
+      if (attaching && !native)
+        throw new Error(`${EXTERNAL_ATTACH_REASON}. Remove them to send.`);
+      const content = text.trim();
+      // External runtimes find their own skills and tools; they get the text unchanged.
+      const skills =
+        composer && native ? invokedSkillIds(content, extensions.skills, composerMenu.picked) : [];
+      const skillsProblem = invokedSkillsProblem(skills);
+      if (skillsProblem) throw new Error(skillsProblem);
+      const searchWeb =
+        native && config.mode === "chat" && webSearch.on && extensions.web.available;
       let id = route.id ?? createdId.current;
       if (!id) {
         const created = await call("conversation.create", config);
         id = created.id;
         createdId.current = id;
-      } else if (session.data) {
+        createdConfig.current = config;
+        webSearch.adopt(id);
+        attachments.adopt(id);
+      } else if (!route.id) {
+        // Created earlier, but the first send failed: apply any model, mode, or project change since.
+        if (
+          !createdConfig.current ||
+          configurationChanged(createdConfig.current, config)
+        ) {
+          await call("agent.configuration.set", {
+            session_id: id,
+            configuration: config,
+          });
+          createdConfig.current = config;
+        }
+      } else if (
+        session.data &&
+        (session.data.workspace_id !== config.workspace_id ||
+          session.data.mode !== config.mode)
+      ) {
         await call("agent.configuration.set", {
           session_id: id,
           configuration: config,
         });
       }
+      // Uploads anything not yet uploaded (a new chat's attachments wait for its conversation).
+      const attachmentIds = attaching
+        ? await attachments.draft.uploadAll(id)
+        : [];
+      const request = JSON.stringify({
+        content,
+        skills,
+        searchWeb,
+        attachments: attachmentIds,
+      });
       const command =
-        pendingCommand.current?.content === content
+        pendingCommand.current?.request === request
           ? pendingCommand.current
-          : { content, id: crypto.randomUUID() };
+          : { request, id: crypto.randomUUID() };
       pendingCommand.current = command;
-      await call(mode === "agent" ? "agent.start" : "message.send", {
+      await call(config.mode === "agent" ? "agent.start" : "message.send", {
         session_id: id,
         content,
         command_id: command.id,
+        ...(skills.length ? { skills } : {}),
+        ...(searchWeb ? { web_search: true } : {}),
+        ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
       });
       pendingCommand.current = null;
-      setDraft("");
-      setAttachmentPath("");
-      replace({ page: mode === "agent" ? "agent" : "chat", id });
+      // The draft outlives this page (it is kept per conversation), so it is cleared either way.
+      if (composer) attachments.draft.markSent(attachmentIds);
+      if (!mounted.current) {
+        // The user moved on while the attachments uploaded: say so rather than pull them back.
+        notify(config.title ? `Message sent to '${config.title}'.` : "Message sent.");
+        return;
+      }
+      if (nextMode) setMode(nextMode);
+      if (composer) {
+        setDraft("");
+        composerMenu.clearPicked();
+      }
+      replace({ page: config.mode === "agent" ? "agent" : "chat", id });
+      session.refetch();
+    } catch (caught) {
+      // The attachments this send carried can be removed again (the page may be gone by now).
+      if (attaching) attachments.draft.release();
+      const failure = toAidexError(caught);
+      // Staged copies are deleted after a day: upload those again instead of failing for good.
+      const problem =
+        attaching &&
+        reasonOf(failure.data) === "attachment_unavailable" &&
+        (await attachments.draft.revalidate())
+          ? "Some attachments had expired and are uploading again. Send again once they are ready."
+          : failure.message;
+      if (mounted.current) setError(problem);
+      else notify(`The message was not sent: ${problem}`, "danger");
+    } finally {
+      setBusy(false);
+    }
+  };
+  // A prompt (and attachments) handed over from Home sends itself once an explicit or default model
+  // is ready; it never falls through to an arbitrary listed model. Attachments the model cannot take
+  // stay in the composer, which says why.
+  useEffect(() => {
+    if (
+      (!arrivalPrompt && !arrivalAttachments) ||
+      autoSent.current ||
+      route.id ||
+      !preferences.loaded ||
+      resolved.state !== "ready" ||
+      (workspaceId && !project) ||
+      // A runtime target is an agent even before its mode sync has rendered.
+      ((mode !== "chat" || target?.kind === "runtime") && !workspaceId)
+    )
+      return;
+    autoSent.current = true;
+    if (arrivalAttachments && attachmentBlock) return;
+    void submit(arrivalPrompt ?? "");
+  }, [
+    arrivalPrompt,
+    arrivalAttachments,
+    attachmentBlock,
+    route.id,
+    preferences.loaded,
+    resolved.key,
+    resolved.state,
+    workspaceId,
+    project,
+  ]);
+  const selectModel = async (key: string) => {
+    const parsed = parseModelKey(key);
+    if (!parsed) return;
+    // Re-picking the same runtime still repairs a mode or permission it cannot run with.
+    if (
+      key === resolved.key &&
+      !(
+        parsed.kind === "runtime" &&
+        (mode !== "agent" || permission !== "full_access")
+      )
+    )
+      return;
+    const nextTarget = modelTargetOf(parsed);
+    const descriptor = catalog.findModel(key);
+    const name =
+      catalog.models.find((model) => model.key === key)?.name ??
+      descriptor?.display_name ??
+      parsed.modelId;
+    let nextMode = mode;
+    let nextPermission = permission;
+    let switchedToChat = false;
+    if (parsed.kind === "runtime") {
+      // External runtimes run as agents with full access inside a project.
+      if (!workspaceId) {
+        setError("Choose a project before starting Plan or Agent mode.");
+        return;
+      }
+      nextMode = "agent";
+      nextPermission = "full_access";
+    } else {
+      if (target?.kind === "runtime")
+        nextPermission = preferences.settings.permission_mode ?? "supervised";
+      if (mode === "agent" && descriptor?.capabilities.tool_calls !== "native") {
+        nextMode = "chat";
+        switchedToChat = true;
+      }
+    }
+    setError(undefined);
+    if (route.id) {
+      // A per-conversation choice; the default for new chats stays as it is.
+      setBusy(true);
+      try {
+        await call("agent.configuration.set", {
+          session_id: route.id,
+          configuration: configuration({
+            mode: nextMode,
+            target: nextTarget,
+            permission: nextPermission,
+          }),
+        });
+        setMode(nextMode);
+        setPermission(nextPermission);
+        session.refetch();
+      } catch (caught) {
+        setError(toAidexError(caught).message);
+        return;
+      } finally {
+        setBusy(false);
+      }
+    } else {
+      // A new chat keeps the choice as its draft and as the default for the next new chat.
+      setDraftKey(key);
+      preferences.setModelId(key);
+      setMode(nextMode);
+      if (nextPermission !== permission) {
+        permissionTouched.current = true;
+        setPermission(nextPermission);
+      }
+    }
+    if (switchedToChat)
+      notify(`Switched to Chat: ${name} cannot use agent tools.`);
+  };
+  const changeMode = async (value: ConversationMode) => {
+    // A conversation with history continues as an agent through the dialog (project, permission,
+    // tool-capable model).
+    if (value === "agent" && continueAvailable) {
+      setPopup("continue");
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    try {
+      const config = configuration({ mode: value });
+      if (route.id)
+        await call("agent.configuration.set", {
+          session_id: route.id,
+          configuration: config,
+        });
+      setMode(value);
+      setPopup(null);
       session.refetch();
     } catch (caught) {
       setError(toAidexError(caught).message);
@@ -418,99 +706,280 @@ export function ConversationPage({
       setBusy(false);
     }
   };
-  useEffect(() => {
-    if (
-      !arrivalPrompt ||
-      !preferences.loaded ||
-      (!runtimeTouched.current &&
-        initialMode === "agent" &&
-        runtimeId !== (preferences.settings.runtime_id ?? "")) ||
-      (!settingsTouched.current &&
-        JSON.stringify(selectedSkillIds) !==
-          JSON.stringify(preferences.settings.skill_ids ?? [])) ||
-      (workspaceId && selectedSkillIds.length > 0 && !skills.data) ||
-      autoSent.current ||
-      route.id ||
-      (!external && !model) ||
-      (external &&
-        (!runtimeModelId.trim() ||
-          !supportsSelection(descriptor, mode, permission))) ||
-      (workspaceId && !project) ||
-      (mode !== "chat" && !workspaceId)
-    )
-      return;
-    autoSent.current = true;
-    void submit(arrivalPrompt);
-  }, [
-    arrivalPrompt,
-    preferences.loaded,
-    preferences.settings.runtime_id,
-    preferences.settings.skill_ids,
-    route.id,
-    model?.model.provider_id,
-    model?.model.model_id,
-    runtimeId,
-    runtimeModelId,
-    descriptor,
-    skills.data,
-    permission,
-    workspaceId,
-    project,
-  ]);
-  const changeMode = async (value: ConversationMode) => {
-    setError(undefined);
-    setMode(value);
-  };
   const chooseProject = (value: string) => {
     contextTouched.current = true;
     if (route.id)
       void act(async () => {
         await call("agent.configuration.set", {
           session_id: route.id!,
-          configuration: configuration(mode, value),
+          configuration: configuration({ workspaceId: value }),
         });
         setWorkspaceId(value);
-        setAttachmentPath("");
       });
-    else {
-      setWorkspaceId(value);
-      setAttachmentPath("");
+    else setWorkspaceId(value);
+  };
+  /** The command id of a continuation step: reused while the same request is retried. */
+  const continuationCommandId = (request: string) => {
+    const command =
+      continuationCommand.current?.request === request
+        ? continuationCommand.current
+        : { request, id: crypto.randomUUID() };
+    continuationCommand.current = command;
+    return command.id;
+  };
+  /** The full Agent configuration a "Continue as Agent" choice describes. */
+  const agentConfiguration = (choice: AgentContinuation): SessionConfig => {
+    const parsed = parseModelKey(choice.modelKey);
+    if (parsed?.kind !== "native")
+      throw new Error("Choose a model that can use agent tools.");
+    return configuration({
+      mode: "agent",
+      workspaceId: choice.workspaceId,
+      permission: choice.permission,
+      target: modelTargetOf(parsed),
+    });
+  };
+  /**
+   * "Continue here": one `agent.configuration.set` (Agent, project, permission, model), then
+   * `agent.start` with the instruction when there is one. Throws for the dialog to show when the
+   * switch fails. When only the start fails, the switch stands (the dialog is not offered again), so
+   * the dialog closes and the instruction waits in the composer.
+   */
+  const continueHere = async (choice: AgentContinuation) => {
+    const id = route.id;
+    if (!id) return;
+    setBusy(true);
+    try {
+      await call("agent.configuration.set", {
+        session_id: id,
+        configuration: agentConfiguration(choice),
+      });
+      contextTouched.current = true;
+      permissionTouched.current = true;
+      setMode("agent");
+      setPermission(choice.permission);
+      setWorkspaceId(choice.workspaceId);
+      session.refetch();
+      const instruction = choice.instruction.trim();
+      if (instruction) {
+        try {
+          await call("agent.start", {
+            session_id: id,
+            content: instruction,
+            command_id: continuationCommandId(
+              JSON.stringify({ start: id, instruction }),
+            ),
+          });
+        } catch (caught) {
+          setDraft((current) => draftWithInstruction(current, instruction));
+          notify(
+            `Switched to Agent, but the first instruction was not sent (${toAidexError(caught).message}). It is in the composer.`,
+            "danger",
+          );
+          focusAfterContinue.current = "composer";
+          setPopup(null);
+          return;
+        }
+        continuationCommand.current = null;
+        session.refetch();
+      }
+      // A started run keeps the composer disabled, so focus goes to the conversation instead.
+      focusAfterContinue.current = instruction ? "heading" : "composer";
+      setPopup(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+  /**
+   * "Continue in a new Agent chat": `conversation.fork` copies the history and sent attachments into
+   * a new Agent conversation, which opens; the instruction starts there. This conversation stays as
+   * it is. Throws for the dialog to show when the fork fails.
+   */
+  const continueInNewChat = async (choice: AgentContinuation) => {
+    const id = route.id;
+    if (!id || !session.data) return;
+    setBusy(true);
+    try {
+      const config = agentConfiguration(choice);
+      const title = forkTitle(session.data.title);
+      const fork = await call("conversation.fork", {
+        source_id: id,
+        configuration: config,
+        title,
+        command_id: continuationCommandId(
+          JSON.stringify({ fork: id, config, title }),
+        ),
+      });
+      continuationCommand.current = null;
+      const instruction = choice.instruction.trim();
+      if (instruction) {
+        try {
+          await call("agent.start", {
+            session_id: fork.id,
+            content: instruction,
+            command_id: crypto.randomUUID(),
+          });
+        } catch (caught) {
+          // The new chat exists; its composer gets the instruction to send again.
+          preferences.setPendingPrompt(instruction);
+          notify(
+            `The new Agent chat is open, but its first instruction was not sent: ${toAidexError(caught).message}`,
+            "danger",
+          );
+        }
+      }
+      setPopup(null);
+      navigate({ page: "agent", id: fork.id });
+    } finally {
+      setBusy(false);
     }
   };
   const pendingApprovals =
     session.data?.approvals.filter((a) => a.status === "pending") ?? [];
+  const runtimeModes = runtimeDriver?.modes ?? ["agent"];
+  // The conversation's own model cannot run as an agent (it has no native tool calling).
+  const agentUnavailable =
+    target?.kind === "runtime"
+      ? !runtimeModes.includes("agent")
+      : resolved.model?.capabilities.tool_calls !== "native";
+  const modeOptions = [
+    {
+      value: "chat",
+      label: "Chat · no agent tools",
+      disabled: target?.kind === "runtime" && !runtimeModes.includes("chat"),
+    },
+    {
+      value: "plan",
+      label: "Plan · project context",
+      disabled: target?.kind === "runtime" && !runtimeModes.includes("plan"),
+    },
+    {
+      value: "agent",
+      label: "Agent · coding tools",
+      // The Continue as Agent dialog offers a model that can.
+      disabled: agentUnavailable && !continueAvailable,
+    },
+  ];
+  const modeDisabled = (value: ConversationMode) =>
+    !!modeOptions.find((option) => option.value === value)?.disabled;
+  const slashCommandStates: SlashCommandState[] = [
+    { id: "chat", disabled: modeDisabled("chat") },
+    { id: "plan", disabled: modeDisabled("plan") },
+    {
+      id: "agent",
+      disabled: modeDisabled("agent"),
+      description: continueAvailable
+        ? "Continue as Agent: choose a project, permissions, and a model"
+        : undefined,
+    },
+    {
+      id: "web",
+      disabled: external || !extensions.web.available || mode !== "chat",
+      description: external
+        ? "This agent runtime uses its own tools"
+        : !extensions.web.available
+          ? (extensions.web.reason ?? "Set up web search in Extensions → Web")
+          : mode !== "chat"
+            ? "Plan and Agent modes search the web while it is on in Extensions → Web"
+            : webSearch.on
+              ? "Turn web search off for this conversation"
+              : "Turn web search on for this conversation",
+    },
+    { id: "new" },
+  ];
+  const runSlashCommand = (id: SlashCommandId) => {
+    if (id === "new") shell.startNewSession();
+    else if (id === "web") webSearch.set(!webSearch.on);
+    else if (id === "agent" && continueAvailable) setPopup("continue");
+    else if (id !== mode) void changeMode(id);
+  };
+  const composerMenu = useComposerMenu({
+    draft,
+    setDraft,
+    textareaRef,
+    anchorRef: composerRef,
+    skills: extensions.skills,
+    skillsLoading: extensions.skillsLoading,
+    skillsEnabled: !external,
+    commands: slashCommandStates,
+    onCommand: runSlashCommand,
+    onManageSkills: () => navigate({ page: "extensions", tab: "skills" }),
+    onOpen: (kind) => {
+      extensions.refetchSkills();
+      if (kind === "command") extensions.refetchWeb();
+    },
+    disabled: busy || running,
+  });
+  /** Plan card "Implement": switch this conversation to Agent and send the plan. */
+  const implementPlan = (markdown: string) => {
+    if (!workspaceId) {
+      setError("Choose a project before starting Agent mode.");
+      return;
+    }
+    if (agentUnavailable) {
+      setError(`${modelName} cannot use agent tools. Choose a model with tool calling to implement the plan.`);
+      return;
+    }
+    void submit(`Implement this plan:\n\n${markdown}`, { composer: false, mode: "agent" });
+  };
+  /** Plan card "Implement in a new chat": a new Agent chat in this project sends the plan on arrival. */
+  const implementPlanInNewChat = (markdown: string) => {
+    preferences.setPendingPrompt(`Implement this plan:\n\n${markdown}`);
+    preferences.setPendingWorkspaceId(workspaceId || null);
+    navigate({ page: "agent" });
+  };
+  const transcript: TranscriptEnvironment = {
+    scope: { session_id: session.data?.id ?? route.id },
+    openLink,
+    openArtifact: (artifact) => setArtifactDialog({ artifact }),
+    downloadArtifact,
+    planStatus: extensions.planStatus,
+    planActions: {
+      implement: implementPlan,
+      implementInNewChat: implementPlanInNewChat,
+      disabled: busy || running,
+    },
+    skill: extensions.skill,
+  };
   const dock = (
     <Composer
+      ref={composerRef}
+      textareaRef={textareaRef}
       size="compact"
       autoFocus
       label="Message"
       value={draft}
       onValueChange={setDraft}
+      onSelectionChange={composerMenu.onSelectionChange}
+      onKeyDown={composerMenu.onKeyDown}
+      suggestions={composerMenu.suggestions}
+      menu={composerMenu.menu}
       onSubmit={
-        external
-          ? runtimeModelId.trim() &&
-            supportsSelection(descriptor, mode, permission) &&
-            workspaceId
-            ? (text) => void submit(text)
-            : undefined
-          : model
-            ? (text) => void submit(text)
-            : undefined
+        resolved.state === "ready" ? (text) => void submit(text) : undefined
       }
-      disabled={busy || running}
-      onAttach={() => setPopup("attach")}
+      disabled={busy || running || attachments.sending}
+      onFiles={addFiles}
+      onLargePaste={external ? undefined : foldPaste}
+      attachActions={[
+        {
+          id: "project",
+          label: "From project…",
+          icon: <FolderIcon />,
+          onSelect: () => setPopup("attach"),
+        },
+      ]}
+      attachDisabledReason={external ? EXTERNAL_ATTACH_REASON : undefined}
+      canSubmitEmpty={attachments.items.length > 0}
+      submitBlockedReason={attachmentBlock}
       placeholder={mode === "chat" ? "Message AiDEX…" : "Describe the task…"}
       attachments={
-        attachmentPath ? (
-          <span className={styles.attachment}>
-            {attachmentPath}
-            <IconButton
-              size="sm"
-              label="Remove attachment"
-              icon={<StopIcon />}
-              onClick={() => setAttachmentPath("")}
-            />
-          </span>
+        attachments.items.length > 0 ? (
+          <AttachmentTray
+            items={attachments.items.map(trayItemOf)}
+            onRemove={(key) => attachments.draft.remove(key)}
+            onRetry={(key) => attachments.draft.retry(key)}
+            disabled={busy || running || attachments.sending}
+          />
         ) : undefined
       }
       toolbarStart={
@@ -522,12 +991,11 @@ export function ConversationPage({
             disabled={busy || running}
             onClick={() => setPopup("mode")}
           />
-          <IconButton
-            size="sm"
-            label={`Model: ${modelName}`}
-            icon={<BoxIcon />}
-            disabled={busy || running}
-            onClick={() => setPopup("model")}
+          <ConversationModelPicker
+            value={resolved.key}
+            current={current}
+            onSelect={(key) => void selectModel(key)}
+            disabled={busy || running || (!!route.id && !session.data)}
           />
           <IconButton
             size="sm"
@@ -537,22 +1005,19 @@ export function ConversationPage({
             disabled={busy || running}
             onClick={() => setPopup("project")}
           />
-          <IconButton
-            size="sm"
-            label={`Selected skills: ${project ? selectedSkillIds.length : 0}`}
-            icon={<LayersIcon />}
-            selected={!!project && selectedSkillIds.length > 0}
-            disabled={busy || running || !workspaceId}
-            onClick={() => setPopup("skills")}
-          />
-          <span className={styles.summary}>
-            {mode[0].toUpperCase() + mode.slice(1)} · {modelName}
-            {external ? ` · ${runtimeId}` : ""}
+          {!external && (
+            <WebSearchToggle
+              availability={extensions.web}
+              mode={mode}
+              on={webSearch.on}
+              onChange={webSearch.set}
+              disabled={busy || running}
+            />
+          )}
+          <Text as="span" tone="muted">
+            {modeLabels[mode]}
             {project ? ` · ${project.name}` : ""}
-            {project && selectedSkillIds.length
-              ? ` · ${selectedSkillIds.length} skills`
-              : ""}
-          </span>
+          </Text>
         </>
       }
       toolbarEnd={
@@ -569,556 +1034,288 @@ export function ConversationPage({
       }
     />
   );
+  // `LocalInferenceNotice` explains a starting or failed local model; it does not cover a
+  // conversation bound to a different local model, which still needs its own notice.
+  const localNoticeShown =
+    (inference?.state === "starting" || inference?.state === "failed") &&
+    (!ownLocalModelId ||
+      !inference.model_id ||
+      inference.model_id === ownLocalModelId);
   return (
-    <DockLayout width="prose" dock={dock}>
-      <div className={styles.conversation}>
-        <header className={styles.header}>
-          <h1 tabIndex={-1}>{session.data?.title || "New chat"}</h1>
-          {route.id && (
-            <IconButton
-              size="sm"
-              label="Execution details"
-              icon={<BoxIcon />}
-              onClick={() => navigate({ page: "execution", id: route.id })}
-            />
-          )}
-        </header>
-        {live.reconnecting && (
-          <Notice tone="warning">
-            Reconnecting live updates. Saved conversation history remains
-            available.{live.error ? ` ${live.error}` : ""}
-          </Notice>
-        )}
-        {(error ||
-          session.error ||
-          (external
-            ? runtimes.error || execution.error
-            : models.error || inference.error || localCatalog.error)) && (
-          <Notice tone="danger" role="alert">
-            {error ??
-              session.error?.message ??
-              (external
-                ? (runtimes.error?.message ?? execution.error?.message)
-                : (models.error?.message ??
-                  inference.error?.message ??
-                  localCatalog.error?.message))}
-          </Notice>
-        )}
-        {!external && (
-          <LocalInferenceNotice
-            status={inference.data}
-            onRefresh={inference.refetch}
-          />
-        )}
-        {external && !supportsSelection(descriptor, mode, permission) && (
-          <Notice tone="warning">
-            Choose a supported runtime permission in Conversation mode. Full
-            access allows this external agent to act as your current user.
-          </Notice>
-        )}
-        {external && !runtimeModelId.trim() && (
-          <Notice>
-            Choose a runtime model from the model picker before sending a task.
-          </Notice>
-        )}
-        {!external &&
-          !inference.data &&
-          !inference.error &&
-          !availableModels.length && (
-            <Notice role="status">
-              Checking the local model on this drive…
-            </Notice>
-          )}
-        {!external &&
-          !models.loading &&
-          !availableModels.length &&
-          !!inference.data &&
-          !localCatalog.loading &&
-          (inference.data.state !== "stopped" || !!localCatalog.data) &&
-          inference.data?.state !== "starting" &&
-          inference.data?.state !== "failed" && (
-            <Notice>
-              <Text>
-                {installedModel
-                  ? `${installedModel.name} is installed on this drive. Start it in Models and accounts to use local chat.`
-                  : "Choose a model to start chatting."}
-              </Text>
-              <Button
-                variant="outline"
-                onClick={() => navigate({ page: "models" })}
-              >
-                Models and accounts
-              </Button>
-            </Notice>
-          )}
-        {!session.data?.messages.length && !route.id && (
-          <div className={styles.empty}>
-            <ChatIcon size={28} />
-            <h2>What would you like to talk about?</h2>
-            <Text tone="muted">
-              Chat about anything. Add a project only when you need its context.
-            </Text>
-          </div>
-        )}
-        <Stack gap={5} role="log" aria-label="Conversation">
-          {session.data?.messages
-            .filter(
-              (m) =>
-                m.role !== "system" &&
-                (m.role !== "assistant" ||
-                  !!m.content ||
-                  !!m.tool_calls.length),
-            )
-            .map((message) => (
-              <MessageContent
-                key={message.original_index}
-                message={message}
-                scope={{ session_id: session.data!.id }}
-              />
-            ))}
-        </Stack>
-        {session.data?.messages_truncated && (
-          <details>
-            <summary>Earlier messages</summary>
-            <HistoryMessages scope={{ session_id: session.data.id }} />
-          </details>
-        )}
-        {latestRun?.error && (!session.data?.workspace_id || project) && (
-          <Notice tone="danger">{latestRun.error}</Notice>
-        )}
-        {latestRun &&
-          latestRun.status === "interrupted" &&
-          (!external ||
-            (descriptor?.supports_resume && latestRun.has_runtime_ref)) && (
-            <Button
-              variant="ghost"
-              disabled={busy}
-              onClick={() =>
-                void act(() => call("run.resume", { id: latestRun.id }))
-              }
-            >
-              Resume task
-            </Button>
-          )}
-        {pendingApprovals.map((approval) => (
-          <Card key={approval.id} padding="md">
-            <Stack gap={3}>
-              <Text>Approval: {approval.tool_name}</Text>
-              <CodeBlock
-                language="json"
-                code={JSON.stringify(approval.arguments, null, 2)}
-              />
-              {approval.preview != null && (
-                <CodeBlock
-                  title="Change preview"
-                  language="json"
-                  code={JSON.stringify(approval.preview, null, 2)}
+    <FileDropZone
+      onFiles={addFiles}
+      disabled={busy || running}
+      disabledReason={external ? EXTERNAL_ATTACH_REASON : undefined}
+    >
+      <DockLayout width="prose" dock={dock}>
+        <div className={styles.conversation}>
+          <header className={styles.header}>
+            <h1 ref={headingRef} tabIndex={-1}>
+              {session.data?.title || "New chat"}
+            </h1>
+            {route.id && (
+              <Stack direction="row" gap={1}>
+                {continueAvailable && (
+                  <IconButton
+                    size="sm"
+                    label="Continue as Agent"
+                    icon={<BotIcon />}
+                    aria-haspopup="dialog"
+                    disabled={busy || running}
+                    onClick={() => setPopup("continue")}
+                  />
+                )}
+                <IconButton
+                  size="sm"
+                  label="Artifacts"
+                  icon={<LayersIcon />}
+                  aria-haspopup="dialog"
+                  onClick={() => setArtifactDialog({ artifact: null })}
                 />
-              )}
-              {(approval.arguments_truncated || approval.preview_truncated) && (
-                <Notice tone="warning">
-                  Request a smaller action to review it completely.
-                </Notice>
-              )}
-              <Stack direction="row" gap={2}>
-                {[true, false].map((approved) => (
-                  <Button
-                    key={String(approved)}
-                    variant={approved ? "primary" : "outline"}
-                    disabled={
-                      busy ||
-                      (approved &&
-                        (approval.arguments_truncated ||
-                          approval.preview_truncated))
-                    }
-                    onClick={() =>
-                      void act(() =>
-                        call(
-                          "approval.respond",
-                          approvalDecision(
-                            approval,
-                            approved,
-                            crypto.randomUUID(),
-                          ),
-                        ),
-                      )
-                    }
-                  >
-                    {approved ? "Approve once" : "Deny"}
-                  </Button>
-                ))}
+                <IconButton
+                  size="sm"
+                  label="Execution details"
+                  icon={<BoxIcon />}
+                  onClick={() => navigate({ page: "execution", id: route.id })}
+                />
               </Stack>
-            </Stack>
-          </Card>
-        ))}
-        {session.data?.approvals_truncated && (
-          <Notice>
-            Conversation approval history is bounded.{" "}
-            <Button
-              variant="ghost"
-              onClick={() => navigate({ page: "security", tab: "approvals" })}
-            >
-              Open all pending broker requests
-            </Button>
-          </Notice>
-        )}
-        <div ref={endRef} />
-      </div>
-      <Dialog
-        open={popup === "mode"}
-        title="Conversation mode"
-        onClose={() => setPopup(null)}
-      >
-        {error && <Notice tone="danger">{error}</Notice>}
-        <Select
-          label="Mode"
-          disabled={busy || running}
-          value={mode}
-          options={[
-            {
-              value: "chat",
-              label: "Chat · no agent tools",
-              disabled: external && !descriptor?.modes.includes("chat"),
-            },
-            {
-              value: "plan",
-              label: "Plan · project context",
-              disabled: external && !descriptor?.modes.includes("plan"),
-            },
-            {
-              value: "agent",
-              label: "Agent · coding tools",
-              disabled: external
-                ? !descriptor?.modes.includes("agent")
-                : model?.capabilities.tool_calls !== "native",
-            },
-          ]}
-          onChange={(event) =>
-            void changeMode(event.target.value as ConversationMode)
-          }
-        />
-        {mode === "agent" && (
-          <Select
-            label="Agent runtime"
-            disabled={busy || running}
-            value={runtimeId}
-            options={[
-              { value: "", label: "AiDEX Native · connected provider model" },
-              ...(runtimes.data?.runtimes ?? []).map((item) => ({
-                value: item.id,
-                label: `${item.id} · ${item.driver}`,
-                disabled: !item.enabled,
-              })),
-            ]}
-            onChange={(event) => {
-              runtimeTouched.current = true;
-              const id = event.target.value;
-              setRuntimeId(id);
-              setRuntimeModelId(
-                id === session.data?.runtime_id
-                  ? session.data.model_id
-                  : id === preferences.settings.runtime_id
-                    ? (preferences.settings.runtime_model_id ?? "")
-                    : "",
-              );
-            }}
-          />
-        )}
-        {mode !== "chat" && (
-          <Select
-            label="Permissions"
-            disabled={busy || running}
-            value={permission}
-            options={permissionOptions.map((option) => ({
-              ...option,
-              disabled:
-                external &&
-                !descriptor?.permission_modes.includes(
-                  option.value === "auto" ? "supervised" : option.value,
-                ),
-            }))}
-            onChange={(event) => {
-              const value = event.target.value as PermissionMode;
-              permissionTouched.current = true;
-              setPermission(value);
-            }}
-          />
-        )}
-        <Text tone="muted">
-          Plan and Agent require a project. These selections apply to the next
-          message.
-        </Text>
-        <TextArea
-          label="Instructions for this conversation"
-          rows={4}
-          maxLength={32768}
-          value={instructions}
-          onChange={(event) => {
-            settingsTouched.current = true;
-            setInstructions(event.target.value);
-          }}
-        />
-        {!external && (
-          <Select
-            label="Fallback provider model"
-            value={fallbackModel}
-            options={[
-              { value: "", label: "No fallback" },
-              ...availableModels.map((item) => ({
-                value: `${item.model.provider_id}/${item.model.model_id}`,
-                label: item.display_name,
-              })),
-            ]}
-            onChange={(event) => {
-              settingsTouched.current = true;
-              setFallbackModel(event.target.value);
-            }}
-          />
-        )}
-        <TextField
-          label="Maximum steps"
-          type="number"
-          min={1}
-          max={128}
-          value={maxSteps}
-          onChange={(event) => {
-            settingsTouched.current = true;
-            setMaxSteps(Number(event.target.value));
-          }}
-        />
-        <TextField
-          label="Maximum output tokens"
-          type="number"
-          min={1}
-          max={32768}
-          value={maxTokens}
-          onChange={(event) => {
-            settingsTouched.current = true;
-            setMaxTokens(Number(event.target.value));
-          }}
-        />
-        <Button
-          variant="outline"
-          disabled={busy || running}
-          onClick={() => {
-            if (route.id)
-              void act(async () => {
-                await call("agent.configuration.set", {
-                  session_id: route.id!,
-                  configuration: configuration(),
-                });
-                setPopup(null);
-              });
-            else setPopup(null);
-          }}
-        >
-          Apply task settings
-        </Button>
-        <Button variant="ghost" onClick={() => navigate({ page: "agents" })}>
-          Manage agent runtimes and defaults
-        </Button>
-      </Dialog>
-      <Dialog
-        open={popup === "model"}
-        title="Choose a model"
-        onClose={() => setPopup(null)}
-      >
-        {error && <Notice tone="danger">{error}</Notice>}
-        {!external && (
+            )}
+          </header>
+          {(error || session.error || catalog.error || localCatalog.error) && (
+            <Notice tone="danger" role="alert">
+              {error ??
+                session.error?.message ??
+                catalog.error ??
+                localCatalog.error?.message}
+            </Notice>
+          )}
           <LocalInferenceNotice
-            status={inference.data}
-            onRefresh={inference.refetch}
+            status={inference}
+            onRefresh={catalog.refreshInference}
           />
-        )}
-        {external ? (
-          <Stack gap={3}>
-            <Text>
-              {runtimeId} owns this model selection and its credentials.
-            </Text>
-            {runtimeModels.loading && (
-              <Text tone="muted">Checking runtime model catalog…</Text>
-            )}
-            {runtimeModels.error && (
-              <Notice>
-                {runtimeModels.error.message} Enter an exact documented model ID
-                if discovery is unavailable.
-              </Notice>
-            )}
-            {!!runtimeModels.data?.models.length && (
-              <Select
-                label="Runtime model"
-                disabled={busy || running}
-                value={runtimeModelId}
-                options={[
-                  { value: "", label: "Choose a model" },
-                  ...runtimeModels.data.models.map((item) => ({
-                    value: item.id,
-                    label: item.name,
-                  })),
-                ]}
-                onChange={(event) => setRuntimeModelId(event.target.value)}
+          {(!route.id || session.data) && (
+            <ModelStateNotice
+              state={resolved.state}
+              name={modelName}
+              installedLocalName={installedModel?.name}
+              localName={ownLocalName}
+              hasModels={catalog.models.length > 0}
+              loading={
+                catalog.loading ||
+                (target?.kind === "runtime" && catalog.runtimesLoading)
+              }
+              localNoticeShown={localNoticeShown}
+            />
+          )}
+          {!session.data?.messages.length && !route.id && (
+            <div className={styles.empty}>
+              <ChatIcon size={28} />
+              <h2>What would you like to talk about?</h2>
+              <Text tone="muted">
+                Chat about anything. Add a project only when you need its context.
+              </Text>
+            </div>
+          )}
+          <TranscriptProvider value={transcript}>
+            <Stack gap={5} role="log" aria-label="Conversation">
+              <Transcript
+                messages={session.data?.messages ?? []}
+                options={{ running, complete: true }}
+                markers={markers}
               />
+            </Stack>
+          </TranscriptProvider>
+          {session.data?.messages_truncated && (
+            <details>
+              <summary>Earlier messages</summary>
+              <HistoryMessages scope={{ session_id: session.data.id }} />
+            </details>
+          )}
+          {latestRun?.error && (!session.data?.workspace_id || project) && (
+            <Notice tone="danger">{latestRun.error}</Notice>
+          )}
+          {latestRun &&
+            ["interrupted", "cancelled"].includes(latestRun.status) && (
+              <Button
+                variant="ghost"
+                disabled={busy}
+                onClick={() =>
+                  void act(() => call("run.resume", { id: latestRun.id }))
+                }
+              >
+                Resume task
+              </Button>
             )}
-            <TextField
-              label="Exact runtime model ID"
-              disabled={busy || running}
-              value={runtimeModelId}
-              onChange={(event) => setRuntimeModelId(event.target.value)}
-              hint="Pi and OMP use provider/model. Provider model defaults remain separate."
-            />
-            <Button onClick={() => setPopup(null)}>
-              Use this model for the task
-            </Button>
-          </Stack>
-        ) : (
+          {pendingApprovals.map((approval) => (
+            <Card key={approval.id} padding="md">
+              <Stack gap={3}>
+                <Text>Approval: {approval.tool_name}</Text>
+                <CodeBlock
+                  language="json"
+                  code={JSON.stringify(approval.arguments, null, 2)}
+                />
+                {approval.preview != null && (
+                  <CodeBlock
+                    title="Change preview"
+                    language="json"
+                    code={JSON.stringify(approval.preview, null, 2)}
+                  />
+                )}
+                {(approval.arguments_truncated || approval.preview_truncated) && (
+                  <Notice tone="warning">
+                    Request a smaller action to review it completely.
+                  </Notice>
+                )}
+                <Stack direction="row" gap={2}>
+                  {[true, false].map((approved) => (
+                    <Button
+                      key={String(approved)}
+                      variant={approved ? "primary" : "outline"}
+                      disabled={
+                        busy ||
+                        (approved &&
+                          (approval.arguments_truncated ||
+                            approval.preview_truncated))
+                      }
+                      onClick={() =>
+                        void act(() =>
+                          call("approval.respond", {
+                            id: approval.id,
+                            fingerprint: approval.fingerprint,
+                            approved,
+                            command_id: crypto.randomUUID(),
+                          }),
+                        )
+                      }
+                    >
+                      {approved ? "Approve once" : "Deny"}
+                    </Button>
+                  ))}
+                </Stack>
+              </Stack>
+            </Card>
+          ))}
+          <div ref={endRef} />
+        </div>
+        <Dialog
+          open={popup === "mode"}
+          title="Conversation mode"
+          onClose={() => setPopup(null)}
+        >
+          {error && <Notice tone="danger">{error}</Notice>}
           <Select
-            label="Model"
+            label="Mode"
             disabled={busy || running}
-            value={
-              model ? `${model.model.provider_id}/${model.model.model_id}` : ""
+            value={mode}
+            options={modeOptions}
+            onChange={(event) =>
+              void changeMode(event.target.value as ConversationMode)
             }
-            options={availableModels.map((m) => ({
-              value: `${m.model.provider_id}/${m.model.model_id}`,
-              label: m.display_name,
-            }))}
-            onChange={(event) => {
-              const selected = availableModels.find(
-                (m) =>
-                  `${m.model.provider_id}/${m.model.model_id}` ===
-                  event.target.value,
-              );
-              if (!selected) return;
-              preferences.setModelId(event.target.value);
-              if (route.id)
-                void act(() =>
-                  call("agent.configuration.set", {
-                    session_id: route.id!,
-                    configuration: configuration(mode, workspaceId, selected),
-                  }),
-                );
-              setPopup(null);
-            }}
           />
-        )}
-        <Button
-          variant="ghost"
-          onClick={() => navigate({ page: external ? "agents" : "models" })}
-        >
-          {external
-            ? "Manage runtime configuration"
-            : "Manage models and accounts"}
-        </Button>
-      </Dialog>
-      <Dialog
-        open={popup === "skills"}
-        title="Skills for this conversation"
-        onClose={() => setPopup(null)}
-      >
-        <SkillSelection
-          skills={skills.data ?? []}
-          selectedIds={selectedSkillIds}
-          onChange={(ids) => {
-            settingsTouched.current = true;
-            setSelectedSkillIds(ids);
-          }}
-          scope={{ workspaceId, profile: permission }}
-          disabled={busy || running}
-          loading={skills.loading}
-          error={skills.error?.message}
-        />
-        <Button
-          variant="outline"
-          disabled={busy || running}
-          onClick={() => {
-            if (route.id)
-              void act(async () => {
-                await call("agent.configuration.set", {
-                  session_id: route.id!,
-                  configuration: configuration(),
-                });
-                setPopup(null);
-              });
-            else setPopup(null);
-          }}
-        >
-          Apply selected skills
-        </Button>
-        <Button
-          variant="ghost"
-          onClick={() => navigate({ page: "extensions", tab: "skills" })}
-        >
-          Manage installed skills
-        </Button>
-      </Dialog>
-      <Dialog
-        open={popup === "project" || popup === "attach"}
-        title={popup === "attach" ? "Attach project file" : "Project context"}
-        onClose={() => setPopup(null)}
-      >
-        {error && <Notice tone="danger">{error}</Notice>}
-        <Select
-          label="Project"
-          disabled={busy || running}
-          value={workspaceId}
-          options={[
-            { value: "", label: "No project context" },
-            ...(workspaces.data?.workspaces ?? []).map((w) => ({
-              value: w.id,
-              label: w.name,
-              disabled: w.availability.state !== "available",
-            })),
-          ]}
-          onChange={(event) => chooseProject(event.target.value)}
-        />
-        {popup === "attach" ? (
-          <>
-            <TextField
-              label="Relative file path"
-              value={attachmentPath}
-              onChange={(event) => setAttachmentPath(event.target.value)}
-              disabled={!workspaceId}
+          {mode !== "chat" && (
+            <Select
+              label="Permissions"
+              disabled={busy || running || target?.kind === "runtime"}
+              hint={
+                target?.kind === "runtime"
+                  ? "External runtimes run with full access."
+                  : permissionDescription(permission, { shellNeedsFullAccess })
+              }
+              value={permission}
+              options={permissionOptions}
+              onChange={(event) => {
+                const value = event.target.value as PermissionMode;
+                permissionTouched.current = true;
+                if (route.id)
+                  void act(async () => {
+                    await call("agent.configuration.set", {
+                      session_id: route.id!,
+                      configuration: configuration({ permission: value }),
+                    });
+                    setPermission(value);
+                  });
+                else setPermission(value);
+              }}
             />
-            <Button
-              disabled={!workspaceId || !attachmentPath.trim()}
-              onClick={() => setPopup(null)}
-            >
-              Attach file
-            </Button>
-          </>
-        ) : (
+          )}
+          <Text tone="muted">
+            Plan and Agent require a project. Chat works independently.
+          </Text>
+        </Dialog>
+        <Dialog
+          open={popup === "project"}
+          title="Project context"
+          onClose={() => setPopup(null)}
+        >
+          {error && <Notice tone="danger">{error}</Notice>}
+          <Select
+            label="Project"
+            disabled={busy || running}
+            value={workspaceId}
+            options={[
+              { value: "", label: "No project context" },
+              ...(workspaces.data?.workspaces ?? []).map((w) => ({
+                value: w.id,
+                label: w.name,
+                disabled: w.availability.state !== "available",
+              })),
+            ]}
+            onChange={(event) => chooseProject(event.target.value)}
+          />
           <Text tone="muted">
             Ordinary chats don't need a project. Choose one to include project
             context.
           </Text>
+          <Button
+            variant="ghost"
+            onClick={() => navigate({ page: "workspace-create" })}
+          >
+            Add a workspace
+          </Button>
+        </Dialog>
+        <ContinueAsAgentDialog
+          open={continuing}
+          onClose={() => setPopup(null)}
+          workspaces={workspaces.data?.workspaces ?? []}
+          workspaceIds={[session.data?.workspace_id, preferences.workspaceId]}
+          models={agentModels}
+          modelKeys={[resolved.key]}
+          currentModelName={modelName}
+          currentModelState={resolved.state}
+          carried={carriedAttachments(
+            sessionAttachments.data?.attachments ??
+              (session.data?.messages ?? []).flatMap(
+                (message) => message.attachments ?? [],
+              ),
+          )}
+          composerAttachments={attachments.items.length}
+          shellNeedsFullAccess={shellNeedsFullAccess}
+          onAddWorkspace={() => navigate({ page: "workspace-create" })}
+          onContinueHere={continueHere}
+          onContinueInNewChat={continueInNewChat}
+        />
+        <ProjectFileDialog
+          open={popup === "attach"}
+          onClose={() => setPopup(null)}
+          workspaces={workspaces.data?.workspaces ?? []}
+          defaultWorkspaceId={workspaceId}
+          onAttach={(id, path, name) => {
+            const problem = attachments.draft.addProjectFile(id, path, name);
+            if (problem) setError(problem);
+          }}
+          onAddWorkspace={() => navigate({ page: "workspace-create" })}
+        />
+        {route.id && (
+          <ArtifactsDialog
+            open={artifactDialog !== null}
+            sessionId={route.id}
+            artifact={artifactDialog?.artifact ?? null}
+            onClose={() => setArtifactDialog(null)}
+            onOpenLink={openLink}
+            onDownload={downloadArtifact}
+          />
         )}
-        <Button
-          variant="ghost"
-          onClick={() => navigate({ page: "workspace-create" })}
-        >
-          Add a workspace
-        </Button>
-      </Dialog>
-    </DockLayout>
+      </DockLayout>
+    </FileDropZone>
   );
-}
-async function readAttachment(
-  workspace_id: string,
-  path: string,
-): Promise<string> {
-  const { callUntyped } = await import("@aidex/client/rpc");
-  const file = (await callUntyped("workspace.files.read", {
-    workspace_id,
-    path,
-  })) as {
-    content: string | null;
-    binary: boolean;
-    truncated: boolean;
-    lossy_utf8: boolean;
-  };
-  if (file.binary || file.content === null)
-    throw new Error("Choose a text file.");
-  if (file.truncated) throw new Error("Choose a smaller file or excerpt.");
-  if (file.lossy_utf8)
-    throw new Error("Convert the file to UTF-8 before attaching.");
-  return file.content;
 }

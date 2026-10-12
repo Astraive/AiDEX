@@ -13,6 +13,13 @@
   user-select: none;
 }
 
+.sm {
+  gap: var(--aidex-space-1);
+  min-height: 20px;
+  padding: 0 var(--aidex-space-2);
+  font-size: var(--aidex-text-xs);
+}
+
 .icon {
   display: inline-flex;
 }
@@ -20,6 +27,11 @@
 .icon svg {
   width: 18px;
   height: 18px;
+}
+
+.sm .icon svg {
+  width: 12px;
+  height: 12px;
 }
 
 .accent {
@@ -32,6 +44,18 @@
   border-color: color-mix(in srgb, var(--aidex-color-success) 35%, transparent);
   background: color-mix(in srgb, var(--aidex-color-success) 10%, transparent);
   color: var(--aidex-color-success);
+}
+
+.warning {
+  border-color: color-mix(in srgb, var(--aidex-color-warning) 40%, transparent);
+  background: color-mix(in srgb, var(--aidex-color-warning) 12%, transparent);
+  color: var(--aidex-color-warning);
+}
+
+.danger {
+  border-color: color-mix(in srgb, var(--aidex-color-danger) 40%, transparent);
+  background: color-mix(in srgb, var(--aidex-color-danger) 12%, transparent);
+  color: var(--aidex-color-danger);
 }
 
 .neutral {

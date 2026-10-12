@@ -1,14 +1,47 @@
-use crate::broker::{Broker, Prepared};
+use crate::{
+    attachments::{CONTEXT_TOO_LARGE_FOR_RUNTIME, Prefetched, unsupported},
+    broker::{Broker, Prepared},
+    extensions::{Extensions, NoExtensions},
+    native_tools::{ExtensionPlan, McpTarget},
+};
 use aidex_core::{CancelToken, EntityId, WorkspacePath};
 use aidex_events::{EventKind, EventScope, EventSink};
 use aidex_native_sessions::*;
-use aidex_providers::ProviderRegistry;
+use aidex_providers::{ModelDescriptor, ProviderRegistry};
 use aidex_workspace::WorkspaceRegistry;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
+/// The error of a run whose thread panicked.
+const RUN_CRASHED: &str = "native run crashed unexpectedly";
+/// Lock one of the engine's mutexes even when a panicking thread poisoned it.
+/// Each critical section is a single lookup, insert, or remove (`operations`
+/// guards no data at all), so the contents stay consistent across a panic,
+/// and one crashed run must not refuse every later one.
+pub(crate) fn relock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+/// A call waiting for the user's approval: a workspace tool plan or a
+/// harness-level (web, MCP) plan.
+pub(crate) enum PendingPlan {
+    Tool(Box<Prepared>),
+    Extension(Box<ExtensionPlan>),
+}
+impl PendingPlan {
+    fn call_id(&self) -> &EntityId {
+        match self {
+            Self::Tool(prepared) => prepared.plan.call_id(),
+            Self::Extension(plan) => &plan.call_id,
+        }
+    }
+}
+/// Per-request options of [`NativeEngine::start_with`].
+pub use aidex_native_sessions::RunOptions;
+/// Most skills one message may invoke.
+pub const MAX_INVOKED_SKILLS: usize = 8;
 pub(crate) struct LiveRun {
     pub provider: CancelToken,
     pub tool: aidex_tools::CancelToken,
@@ -21,14 +54,23 @@ pub struct NativeEngine {
     pub(crate) broker: Broker,
     pub(crate) events: Arc<dyn EventSink>,
     pub(crate) live: Mutex<HashMap<String, LiveRun>>,
-    pub(crate) pending: Mutex<HashMap<String, Prepared>>,
+    pub(crate) pending: Mutex<HashMap<String, PendingPlan>>,
     pub(crate) runtimes: Mutex<HashMap<String, Arc<dyn RuntimeExecutor>>>,
     pub(crate) operations: Mutex<()>,
-    pub(crate) prompt_context: Arc<dyn crate::PromptContext>,
-    pub(crate) bridge_server: Mutex<Option<Arc<aidex_runtime_bridge::BridgeServer>>>,
-    pub(crate) bridge_leases: Mutex<HashMap<String, aidex_runtime_bridge::BridgeLease>>,
-    pub(crate) bridge_calls: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    pub(crate) bridge_approvals: crate::bridge_approval::BridgeApprovals,
+    pub(crate) extensions: Arc<dyn Extensions>,
+    /// Random per-engine key for untrusted-data delimiter nonces.
+    pub(crate) nonce_key: String,
+    /// The MCP tools each run's latest turn offered, which its calls resolve
+    /// against (names shift when other servers come or go).
+    pub(crate) offered_mcp: Mutex<HashMap<String, Vec<McpTarget>>>,
+    /// Attachment bytes read for each running run, by attachment id. Kept
+    /// while the run's thread works and dropped when it stops.
+    pub(crate) attachment_cache: Mutex<HashMap<String, Prefetched>>,
+    /// For each running run, the models (`provider/model`) that refused a
+    /// request carrying attachments of earlier messages: the run's later
+    /// steps go to them without those. In memory only, kept and dropped
+    /// with the run's attachment bytes.
+    pub(crate) refused_earlier: Mutex<HashMap<String, HashSet<String>>>,
 }
 impl NativeEngine {
     pub fn new(
@@ -38,40 +80,48 @@ impl NativeEngine {
         events: Arc<dyn EventSink>,
         scratch: PathBuf,
     ) -> Arc<Self> {
-        Self::with_tools(
+        Self::with_extensions(
             store,
             registry,
             workspaces,
             events,
             scratch,
-            aidex_tools::ToolRegistry::with_builtin_tools(),
-            Arc::new(crate::EmptyPromptContext),
+            Arc::new(NoExtensions),
         )
     }
-    pub fn with_tools(
+    /// [`new`](Self::new) with skills, web, and MCP services from the embedder.
+    pub fn with_extensions(
         store: Arc<SessionStore>,
         registry: Arc<ProviderRegistry>,
         workspaces: Arc<WorkspaceRegistry>,
         events: Arc<dyn EventSink>,
         scratch: PathBuf,
-        tools: aidex_tools::ToolRegistry,
-        prompt_context: Arc<dyn crate::PromptContext>,
+        extensions: Arc<dyn Extensions>,
     ) -> Arc<Self> {
+        // The nonce key only needs to be unpredictable to content authors; a
+        // generated id carries 80 random bits.
+        let nonce_key = EntityId::generate("nonce")
+            .map(|id| id.to_string())
+            .unwrap_or_else(|_| format!("{:?}", std::time::SystemTime::now()));
         Arc::new(Self {
             store,
             registry,
-            broker: Broker::new(workspaces, scratch, tools, events.clone()),
+            broker: Broker::new(workspaces, scratch, Arc::clone(&extensions)),
             events,
             live: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             runtimes: Mutex::new(HashMap::new()),
             operations: Mutex::new(()),
-            prompt_context,
-            bridge_server: Mutex::new(None),
-            bridge_leases: Mutex::new(HashMap::new()),
-            bridge_calls: Mutex::new(HashMap::new()),
-            bridge_approvals: Default::default(),
+            extensions,
+            nonce_key,
+            offered_mcp: Mutex::new(HashMap::new()),
+            attachment_cache: Mutex::new(HashMap::new()),
+            refused_earlier: Mutex::new(HashMap::new()),
         })
+    }
+    /// The skills, web, and MCP services this engine was built with.
+    pub fn extensions(&self) -> &Arc<dyn Extensions> {
+        &self.extensions
     }
     pub fn store(&self) -> &Arc<SessionStore> {
         &self.store
@@ -92,11 +142,56 @@ impl NativeEngine {
         command: &str,
         parent: Option<String>,
     ) -> Result<Run, String> {
-        let _guard = self
-            .operations
-            .lock()
-            .map_err(|_| "native operations poisoned")?;
-        let s = self.store.get(session)?;
+        self.start_with(session, content, command, parent, RunOptions::default())
+    }
+    /// [`start`](Self::start) with invoked skills, the per-request web
+    /// switch, and staged attachments. Refusals start with a reason
+    /// ([`crate::start_refusal`] splits them): `skill_unavailable:`,
+    /// `web_unavailable:`, `attachments_unsupported:` (an external runtime,
+    /// or a kind, part, or size the session's model cannot take),
+    /// `context_too_large_for_runtime:`, and the store's attachment reasons
+    /// (`attachment_unavailable:` for unknown, foreign, sent, or duplicated
+    /// ids and for attachments on a child run, `too_large:`). Nothing is
+    /// stored when a check fails. A command id the session already records
+    /// skips the checks and returns its original run (or a fingerprint
+    /// conflict). External runtimes receive the text unchanged and ignore
+    /// skills and web search.
+    pub fn start_with(
+        self: &Arc<Self>,
+        session: &str,
+        content: &str,
+        command: &str,
+        parent: Option<String>,
+        options: RunOptions,
+    ) -> Result<Run, String> {
+        // A new native message with attachments is checked against the
+        // session's model, whose catalog lookup may list the provider over
+        // the network. It runs without the engine-wide lock, which is then
+        // taken again; the session must still name the model that was
+        // checked.
+        let mut resolved: Option<(ModelKey, Result<ModelDescriptor, String>)> = None;
+        let mut lookups = 0;
+        let (_guard, s, model) = loop {
+            let guard = relock(&self.operations);
+            let s = self.store.get(session)?;
+            let Some(key) = attachment_model_key(&s, command, parent.is_some(), &options) else {
+                break (guard, s, None);
+            };
+            if let Some((_, model)) = resolved.take_if(|(checked, _)| *checked == key) {
+                break (guard, s, Some(model));
+            }
+            if lookups == MAX_MODEL_LOOKUPS {
+                return Err(
+                    "the conversation's model changed while the message was being sent; send it \
+                     again"
+                        .into(),
+                );
+            }
+            drop(guard);
+            lookups += 1;
+            let model = self.primary_model(&s.configuration).map(|(_, model)| model);
+            resolved = Some((key, model));
+        };
         if s.configuration.mode == Mode::Agent && s.configuration.workspace_id.is_none() {
             return Err("agent mode requires a selected workspace".into());
         }
@@ -105,20 +200,25 @@ impl NativeEngine {
             .runtime_id
             .as_deref()
             .is_some_and(|id| id != "native");
-        let operation = if external && parent.is_none() && s.runtime_ref.is_some() {
-            if !self
-                .runtime_for(&s.configuration)?
-                .descriptor()
-                .supports_resume
-            {
-                return Err("selected runtime cannot resume saved conversation; choose an explicit new session or context handoff".into());
+        // A retried command returns its run from `begin_with`: its ids are
+        // already sent and the conversation already holds its message.
+        let retry = s.commands.contains_key(command);
+        if !retry && !options.attachments.is_empty() {
+            if parent.is_some() {
+                return Err(AttachmentReason::AttachmentUnavailable
+                    .error("attachments can only be sent with a conversation message"));
             }
-            RuntimeOperation::Resume
-        } else {
-            RuntimeOperation::Start
-        };
+            if external {
+                return Err(unsupported(
+                    "Attachments work with AiDEX native models; this runtime cannot receive files yet.",
+                ));
+            }
+        }
         if external {
-            self.runtime_for(&s.configuration)?;
+            let runtime = self.runtime_for(&s.configuration)?;
+            if !retry {
+                self.check_runtime_context(&s, &runtime.descriptor(), content, parent.is_some())?;
+            }
         } else {
             let provider = aidex_providers::ProviderId::new(&s.configuration.provider_id)
                 .map_err(|e| e.to_string())?;
@@ -127,6 +227,19 @@ impl NativeEngine {
             }
         }
         aidex_providers::ModelId::new(&s.configuration.model_id).map_err(|e| e.to_string())?;
+        let options = if external || parent.is_some() {
+            RunOptions::default()
+        } else {
+            self.check_options(&s.configuration, options)?
+        };
+        // `model` is set exactly for a new native root message with
+        // attachments (child and external ones were refused above).
+        let prefetched = match model {
+            Some(model) => {
+                Some(self.check_attachments(&s, content, &options.attachments, &model?)?)
+            }
+            None => None,
+        };
         if let Some(parent) = &parent {
             self.broker.authorize_native(
                 session,
@@ -159,38 +272,133 @@ impl NativeEngine {
                 return Err("child depth limit reached".into());
             }
         }
-        let r = self.store.begin(session, content, command, parent)?;
+        let r = self
+            .store
+            .begin_with(session, content, command, parent, &options)?;
+        if let Some(bytes) = prefetched
+            && r.status == RunStatus::Pending
+        {
+            self.remember_attachments(&r.id, bytes);
+        }
         if external && r.status == RunStatus::Pending {
-            let request = match self.runtime_request(&r, operation) {
-                Ok(request) => request,
-                Err(error) => {
-                    self.transition(
-                        &r.id,
-                        RunStatus::Failed,
-                        Some(aidex_events::redact_text(&error).into_owned()),
-                    )?;
-                    return Err(error);
-                }
-            };
+            let request = self.runtime_request(&r, RuntimeOperation::Start)?;
             if let Err(error) = self.runtime_for(&s.configuration)?.validate(&request) {
                 self.transition(&r.id, RunStatus::Failed, Some(error.to_string()))?;
                 return Err(error.to_string());
             }
         }
-        if r.status == RunStatus::Pending {
-            if let Some(parent) = &r.parent_run_id {
-                self.emit(
-                    session,
-                    EventKind::AgentChildSpawned {
-                        agent_id: EntityId::new(&r.id).map_err(|e| e.to_string())?,
-                        parent_agent_id: EntityId::new(parent).map_err(|e| e.to_string())?,
-                        role: "delegated task".into(),
-                    },
-                );
-            }
-            self.launch_operation(&r, operation)?;
+        if r.status == RunStatus::Pending
+            && let Err(error) = self.launch(&r)
+        {
+            self.forget_attachments(&r.id);
+            return Err(error);
         }
         Ok(r)
+    }
+    /// Refuse an external-runtime run before anything is stored when the
+    /// conversation it would receive exceeds the runtime's bounds: more than
+    /// 1 MiB of message text, a prompt frame over 1 MiB, or, for runtimes
+    /// that take the prompt as one command-line argument (Claude Code,
+    /// Cursor), more than this platform allows in one argument
+    /// ([`argv_limit_exceeded`]).
+    fn check_runtime_context(
+        &self,
+        s: &SessionDetail,
+        runtime: &RuntimeDescriptor,
+        content: &str,
+        child: bool,
+    ) -> Result<(), String> {
+        let mut messages = if child {
+            Vec::new()
+        } else {
+            s.messages.clone()
+        };
+        messages.push(aidex_providers::ChatMessage::user(content));
+        if !child {
+            let mut turn = crate::attachments::TurnAttachments {
+                own: Some(messages.len() - 1),
+                ..Default::default()
+            };
+            turn.by_position = self.store.message_attachments(&s.id)?;
+            turn.by_position.retain(|index, _| {
+                messages
+                    .get(*index)
+                    .is_some_and(|m| m.role == aidex_providers::Role::User)
+            });
+            crate::attachments::placeholders_only(&mut messages, &turn, &runtime.name);
+        }
+        let refuse = |detail: String| Err(format!("{CONTEXT_TOO_LARGE_FOR_RUNTIME}: {detail}"));
+        let text: usize = messages.iter().map(|m| m.content.len()).sum();
+        if text > RUNTIME_TEXT_BYTES {
+            return refuse(format!(
+                "This conversation is too long for {} (at most 1 MiB of messages). Continue in a \
+                 new conversation or with an AiDEX native model.",
+                runtime.name
+            ));
+        }
+        let prompt = runtime_prompt(&s.configuration.instructions, &messages);
+        let frame = serde_json::to_string(&prompt).map_or(usize::MAX, |json| json.len());
+        if frame.saturating_add(RUNTIME_FRAME_RESERVE) > RUNTIME_FRAME_BYTES {
+            return refuse(format!(
+                "This conversation is too long for {} (its request would exceed 1 MiB). Continue \
+                 in a new conversation or with an AiDEX native model.",
+                runtime.name
+            ));
+        }
+        if ARGV_RUNTIMES.contains(&runtime.name.as_str())
+            && let Some(limit) = argv_limit_exceeded(ArgvPlatform::HOST, &prompt)
+        {
+            return refuse(format!(
+                "This conversation is too long for {}, which receives it as one command-line \
+                 argument (at most {limit} on this system). Continue in a new conversation or \
+                 with an AiDEX native model.",
+                runtime.name
+            ));
+        }
+        Ok(())
+    }
+    /// Deduplicate and validate invoked skills and the web switch.
+    fn check_options(
+        &self,
+        config: &SessionConfig,
+        options: RunOptions,
+    ) -> Result<RunOptions, String> {
+        let mut skills: Vec<String> = Vec::new();
+        for id in options.skills {
+            let id = id.trim().to_owned();
+            if !id.is_empty() && !skills.contains(&id) {
+                skills.push(id);
+            }
+        }
+        if skills.len() > MAX_INVOKED_SKILLS {
+            return Err(format!(
+                "skill_unavailable: at most {MAX_INVOKED_SKILLS} skills can be invoked at once"
+            ));
+        }
+        if !skills.is_empty() {
+            self.extensions
+                .invoked_skills(config.workspace_id.as_deref(), &skills)
+                .map_err(|error| match error {
+                    crate::extensions::ExtensionError::SkillUnavailable(message) => {
+                        format!("skill_unavailable: {message}")
+                    }
+                    other => format!("skill_unavailable: {other}"),
+                })?;
+        }
+        if options.web_search && config.mode == Mode::Chat {
+            let web = self.extensions.web();
+            if !web.search_ready() {
+                return Err(match web.problem {
+                    Some(problem) if web.enabled => format!("web_unavailable: {problem}"),
+                    _ => "web_unavailable: web search is turned off in settings".into(),
+                });
+            }
+        }
+        Ok(RunOptions {
+            skills,
+            web_search: options.web_search,
+            attachments: options.attachments,
+        })
     }
     pub(crate) fn launch(self: &Arc<Self>, run: &Run) -> Result<(), String> {
         self.launch_with(run, None, RuntimeOperation::Start)
@@ -206,19 +414,13 @@ impl NativeEngine {
         self: &Arc<Self>,
         run: &Run,
         prelude: Option<(
-            Prepared,
+            PendingPlan,
             aidex_providers::ToolCall,
             aidex_tools::PermitIssuer,
         )>,
         operation: RuntimeOperation,
     ) -> Result<(), String> {
-        if !self.store.run(&run.id)?.status.active() {
-            return Err("cannot launch a terminal run; explicit continuation is required".into());
-        }
-        let mut live = self
-            .live
-            .lock()
-            .map_err(|_| "native run registry poisoned")?;
+        let mut live = relock(&self.live);
         if live.get(&run.id).is_some_and(|r| r.executing) {
             return Ok(());
         }
@@ -226,10 +428,10 @@ impl NativeEngine {
             .get(&run.id)
             .map(|r| r.provider.clone())
             .unwrap_or_default();
-        let tool = prelude
-            .as_ref()
-            .map(|(prepared, _, _)| prepared.context.cancel.clone())
-            .unwrap_or_default();
+        let tool = match &prelude {
+            Some((PendingPlan::Tool(prepared), _, _)) => prepared.context.cancel.clone(),
+            _ => Default::default(),
+        };
         let generation = aidex_native_sessions::id("worker")?;
         live.insert(
             run.id.clone(),
@@ -246,9 +448,18 @@ impl NativeEngine {
         std::thread::Builder::new()
             .name("aidex-native-run".into())
             .spawn(move || {
-                let result = (|| {
-                    if let Some((prepared, call, issuer)) = prelude {
-                        engine.execute(&run.id, &call, &prepared, issuer)?;
+                // Last resort: a panic anywhere in the run (a provider, an
+                // extension, a runtime) fails the run instead of unwinding
+                // past the bookkeeping below and leaving it running forever.
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    match prelude {
+                        Some((PendingPlan::Tool(prepared), call, issuer)) => {
+                            engine.execute(&run.id, &call, &prepared, issuer)?;
+                        }
+                        Some((PendingPlan::Extension(plan), call, _)) => {
+                            engine.execute_extension(&run.id, &call, &plan, &tool)?;
+                        }
+                        None => {}
                     }
                     let session = engine.store.get(&run.session_id)?;
                     if session
@@ -261,20 +472,27 @@ impl NativeEngine {
                     } else {
                         engine.pump(&run.id, &token, &tool)
                     }
-                })();
+                }))
+                .unwrap_or_else(|_| Err(RUN_CRASHED.into()));
+                // Attachment bytes live only while a thread works on the run.
+                engine.forget_attachments(&run.id);
                 if let Err(error) = result {
                     let status = if token.is_cancelled() {
                         RunStatus::Cancelled
                     } else {
                         RunStatus::Failed
                     };
-                    let _ = engine.transition(
-                        &run.id,
-                        status,
-                        Some(aidex_events::redact_text(&error).into_owned()),
-                    );
+                    // Settling (the store, the event sink) must not skip the
+                    // registry cleanup either.
+                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                        engine.transition(
+                            &run.id,
+                            status,
+                            Some(aidex_events::redact_text(&error).into_owned()),
+                        )
+                    }));
                 }
-                let mut live = engine.live.lock().unwrap_or_else(|p| p.into_inner());
+                let mut live = relock(&engine.live);
                 if live
                     .get(&run.id)
                     .is_some_and(|r| r.generation == generation)
@@ -323,31 +541,19 @@ impl NativeEngine {
         error: Option<String>,
     ) -> Result<Run, String> {
         let r = self.store.run(id)?;
-        if status == RunStatus::Failed {
-            let children = self
-                .store
-                .get(&r.session_id)?
-                .runs
-                .into_iter()
-                .filter(|child| child.parent_run_id.as_deref() == Some(id) && child.status.active())
-                .collect::<Vec<_>>();
-            for child in children {
-                self.cancel(&child.id)?;
-            }
-        }
         let result = self.store.update(&r.session_id, |s| {
             let r = s
                 .runs
                 .iter_mut()
                 .find(|r| r.id == id)
                 .ok_or("run not found")?;
-            if !r.status.active() && status != r.status {
+            if r.status == RunStatus::Cancelled && status != RunStatus::Cancelled {
                 return Ok(r.clone());
             }
             r.status = status;
             r.error = error;
             r.updated_at = now();
-            if matches!(status,RunStatus::Failed|RunStatus::Cancelled|RunStatus::Interrupted){
+            if matches!(status,RunStatus::Failed|RunStatus::Cancelled){
                 for approval in &mut s.approvals{if approval.run_id==id&&approval.status=="pending"{approval.status="expired".into();}}
                 for call in r.pending_calls.drain(..){
                     let message=aidex_providers::ChatMessage::tool_result(&call.id,"Tool execution did not complete successfully. Inspect the workspace before retrying; effects may be unknown after interruption.");
@@ -357,6 +563,9 @@ impl NativeEngine {
             }
             Ok(r.clone())
         })?;
+        if !result.status.active() {
+            self.forget_offer(id);
+        }
         let task_id = EntityId::new(id).map_err(|e| e.to_string())?;
         let event = match result.status {
             RunStatus::Running => Some(EventKind::TaskStarted { task_id }),
@@ -370,35 +579,6 @@ impl NativeEngine {
         };
         if let Some(e) = event {
             self.emit(&r.session_id, e);
-        }
-        if !result.status.active() {
-            self.revoke_bridge(&r.session_id, id);
-        }
-        if result.status == RunStatus::Running {
-            self.emit(
-                &r.session_id,
-                EventKind::AgentStarted {
-                    agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
-                    model: None,
-                },
-            );
-        }
-        if result.status != r.status {
-            let outcome = match result.status {
-                RunStatus::Completed => Some(aidex_events::Outcome::Succeeded),
-                RunStatus::Failed => Some(aidex_events::Outcome::Failed),
-                RunStatus::Cancelled => Some(aidex_events::Outcome::Cancelled),
-                _ => None,
-            };
-            if let Some(outcome) = outcome {
-                self.emit(
-                    &r.session_id,
-                    EventKind::AgentFinished {
-                        agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
-                        outcome,
-                    },
-                );
-            }
         }
         Ok(result)
     }
@@ -428,10 +608,7 @@ impl NativeEngine {
         if command.is_empty() || command.len() > 128 {
             return Err("approval command id is required".into());
         }
-        let guard = self
-            .operations
-            .lock()
-            .map_err(|_| "native operations poisoned")?;
+        let guard = relock(&self.operations);
         let approval = self
             .approvals(None)?
             .into_iter()
@@ -455,13 +632,7 @@ impl NativeEngine {
         if approval.runtime_id.is_some() {
             return self.respond_runtime(&approval, approved);
         }
-        if approval.bridge_call_id.is_some() {
-            return self.bridge_approvals.respond(self, &approval, approved);
-        }
-        let prepared = self
-            .pending
-            .lock()
-            .map_err(|_| "pending plans poisoned")?
+        let prepared = relock(&self.pending)
             .remove(id)
             .ok_or("approval interrupted by daemon restart; explicitly resume run to replan")?;
         let call = run
@@ -470,24 +641,17 @@ impl NativeEngine {
             .cloned()
             .ok_or("approval has no pending call")?;
         self.store.update(&run.session_id, |s| {
-            let active = s
-                .runs
-                .iter_mut()
-                .find(|r| r.id == run.id)
-                .ok_or("run not found")?;
-            if active.status != RunStatus::WaitingApproval {
-                return Err("approval no longer has a waiting run".into());
-            }
             let a = s
                 .approvals
                 .iter_mut()
                 .find(|a| a.id == id)
                 .ok_or("approval not found")?;
-            if a.status != "pending" || a.fingerprint != fingerprint {
-                return Err("approval changed or expired".into());
-            }
             a.status = if approved { "approved" } else { "denied" }.into();
-            active.status = RunStatus::Running;
+            s.runs
+                .iter_mut()
+                .find(|r| r.id == run.id)
+                .ok_or("run not found")?
+                .status = RunStatus::Running;
             Ok(())
         })?;
         if approved {
@@ -521,7 +685,7 @@ impl NativeEngine {
             self.emit(
                 &run.session_id,
                 EventKind::ToolDenied {
-                    call_id: prepared.plan.call_id().clone(),
+                    call_id: prepared.call_id().clone(),
                     reason: "user denied native tool".into(),
                 },
             );
@@ -537,12 +701,7 @@ impl NativeEngine {
         if !r.status.active() {
             return Ok(r);
         }
-        if let Some(live) = self
-            .live
-            .lock()
-            .map_err(|_| "native run registry poisoned")?
-            .get(id)
-        {
+        if let Some(live) = relock(&self.live).get(id) {
             live.provider.cancel();
             live.tool.cancel();
         }
@@ -559,10 +718,7 @@ impl NativeEngine {
         self.transition(id, RunStatus::Cancelled, None)
     }
     pub fn resume(self: &Arc<Self>, id: &str) -> Result<Run, String> {
-        let guard = self
-            .operations
-            .lock()
-            .map_err(|_| "native operations poisoned")?;
+        let guard = relock(&self.operations);
         let r = self.store.run(id)?;
         let configuration = self.store.get(&r.session_id)?.configuration;
         let external = configuration
@@ -584,13 +740,7 @@ impl NativeEngine {
         ) {
             return Err("only an interrupted run can resume".into());
         }
-        if self
-            .live
-            .lock()
-            .map_err(|_| "native run registry poisoned")?
-            .get(id)
-            .is_some_and(|r| r.executing)
-        {
+        if relock(&self.live).get(id).is_some_and(|r| r.executing) {
             return Err("run is still executing".into());
         }
         self.store.update(&r.session_id, |s| {
@@ -731,12 +881,8 @@ impl NativeEngine {
         Ok(())
     }
     pub fn shutdown(&self) {
-        if let Ok(server) = self.bridge_server.lock()
-            && let Some(server) = server.as_ref()
-        {
-            server.shutdown();
-        }
-        for r in self.live.lock().unwrap_or_else(|p| p.into_inner()).values() {
+        self.forget_all_attachments();
+        for r in relock(&self.live).values() {
             r.provider.cancel();
             r.tool.cancel();
         }
@@ -747,22 +893,7 @@ impl NativeEngine {
             .shutdown(aidex_sandbox::StopReason::DaemonShutdown);
     }
     pub fn cancel_all(&self) {
-        if let Ok(pending) = self.pending.lock() {
-            for prepared in pending.values() {
-                prepared.context.cancel.cancel();
-            }
-        }
-        if let Ok(mut slot) = self.bridge_server.lock()
-            && let Some(server) = slot.take()
-        {
-            server.shutdown();
-        }
-        if let Ok(mut leases) = self.bridge_leases.lock() {
-            leases.clear();
-        }
-        if let Ok(mut gates) = self.bridge_calls.lock() {
-            gates.clear();
-        }
+        self.forget_all_attachments();
         if let Ok(runs) = self.store.run_summaries() {
             for run in runs {
                 if run.status.active() {
@@ -770,7 +901,7 @@ impl NativeEngine {
                 }
             }
         }
-        for r in self.live.lock().unwrap_or_else(|p| p.into_inner()).values() {
+        for r in relock(&self.live).values() {
             r.provider.cancel();
             r.tool.cancel();
         }
@@ -779,54 +910,177 @@ impl NativeEngine {
             .sandbox
             .registry()
             .terminate_all(aidex_sandbox::StopReason::Cancelled);
+        self.forget_all_attachments();
     }
-    /// A vault lock can prevent private terminal-state commits. Reconcile after
-    /// unlock without reviving stopped actors or executable approval plans.
-    pub fn reconcile_after_unlock(&self) -> Result<(), String> {
-        for summary in self.store.run_summaries()? {
-            if !summary.status.active() {
-                continue;
+}
+
+/// The session configuration a model check of attachments was made for:
+/// provider id, model id, and mode.
+type ModelKey = (String, String, Mode);
+
+/// How often [`NativeEngine::start_with`] looks the model up again when the
+/// session's model changes while it checks attachments.
+const MAX_MODEL_LOOKUPS: usize = 3;
+
+/// The configuration a new message's attachments must be checked against:
+/// `None` without attachments, for a retried command, a child run, or an
+/// external runtime (those are refused or skip the check).
+fn attachment_model_key(
+    s: &SessionDetail,
+    command: &str,
+    child: bool,
+    options: &RunOptions,
+) -> Option<ModelKey> {
+    let external = s
+        .configuration
+        .runtime_id
+        .as_deref()
+        .is_some_and(|id| id != "native");
+    let checked =
+        !options.attachments.is_empty() && !child && !external && !s.commands.contains_key(command);
+    checked.then(|| {
+        (
+            s.configuration.provider_id.clone(),
+            s.configuration.model_id.clone(),
+            s.configuration.mode,
+        )
+    })
+}
+
+/// External runtimes refuse more message text than this (1 MiB).
+const RUNTIME_TEXT_BYTES: usize = 1024 * 1024;
+/// Largest JSON frame a runtime protocol carries (1 MiB).
+const RUNTIME_FRAME_BYTES: usize = 1024 * 1024;
+/// Room in a frame for everything besides the prompt.
+const RUNTIME_FRAME_RESERVE: usize = 16 * 1024;
+/// Runtimes (by descriptor name) that receive the prompt as one argument.
+const ARGV_RUNTIMES: [&str; 2] = ["Claude Code", "Cursor"];
+/// Most UTF-16 units of a quoted prompt argument on Windows (32,767 for the
+/// whole command line; the rest is left for the executable and flags).
+pub(crate) const ARGV_PROMPT_UNITS: usize = 30_000;
+/// Most bytes of one argument on Linux, its terminating NUL included
+/// (`MAX_ARG_STRLEN`).
+const LINUX_ARGUMENT_BYTES: usize = 128 * 1024;
+
+/// Where a runtime's command line is built, for its one-argument limit.
+#[derive(Clone, Copy, Debug)]
+enum ArgvPlatform {
+    Windows,
+    Linux,
+    /// macOS and the rest: their limit is on the whole command line (about
+    /// 1 MiB on macOS), which the 1 MiB text and frame bounds keep below.
+    Other,
+}
+
+impl ArgvPlatform {
+    const HOST: Self = if cfg!(windows) {
+        Self::Windows
+    } else if cfg!(target_os = "linux") {
+        Self::Linux
+    } else {
+        Self::Other
+    };
+}
+
+/// The one-argument limit `prompt` exceeds on `platform`, as the refusal
+/// names it, or `None` when it fits.
+fn argv_limit_exceeded(platform: ArgvPlatform, prompt: &str) -> Option<String> {
+    match platform {
+        ArgvPlatform::Windows => (windows_argument_units(prompt) > ARGV_PROMPT_UNITS)
+            .then(|| format!("{ARGV_PROMPT_UNITS} characters")),
+        ArgvPlatform::Linux => (prompt.len().saturating_add(1) > LINUX_ARGUMENT_BYTES)
+            .then(|| format!("{} KiB", LINUX_ARGUMENT_BYTES / 1024)),
+        ArgvPlatform::Other => None,
+    }
+}
+
+/// The prompt external runtimes build for a new run: the instructions, then
+/// one `role: content` line per message.
+pub(crate) fn runtime_prompt(
+    instructions: &str,
+    messages: &[aidex_providers::ChatMessage],
+) -> String {
+    let history = messages
+        .iter()
+        .map(|m| format!("{}: {}", m.role.as_str(), m.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{instructions}\n{history}")
+}
+
+/// UTF-16 units of `argument` once quoted for a Windows command line: wrapped
+/// in quotes when it has spaces or tabs (or is empty), every `"` escaped, and
+/// backslashes before a quote (or the closing quote) doubled.
+pub(crate) fn windows_argument_units(argument: &str) -> usize {
+    let quoted = argument.is_empty() || argument.contains([' ', '\t']);
+    let mut units = if quoted { 2 } else { 0 };
+    let mut backslashes = 0;
+    for c in argument.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                units += backslashes + 1;
+                backslashes = 0;
             }
-            let run = self.store.run(&summary.id)?;
-            let stopped = match self
-                .live
-                .lock()
-                .map_err(|_| "native run registry poisoned")?
-                .get(&run.id)
-            {
-                Some(live) => live.provider.is_stopped() || live.tool.is_cancelled(),
-                None => {
-                    let session = self.store.get(&run.session_id)?;
-                    let pending = self.pending.lock().map_err(|_| "pending plans poisoned")?;
-                    !session
-                        .approvals
-                        .iter()
-                        .filter(|approval| {
-                            approval.run_id == run.id && approval.status == "pending"
-                        })
-                        .any(|approval| {
-                            pending
-                                .get(&approval.id)
-                                .is_some_and(|prepared| !prepared.context.cancel.is_cancelled())
-                        })
-                }
-            };
-            if stopped {
-                let approvals = self
-                    .store
-                    .get(&run.session_id)?
-                    .approvals
-                    .into_iter()
-                    .filter(|approval| approval.run_id == run.id)
-                    .map(|approval| approval.id)
-                    .collect::<std::collections::HashSet<_>>();
-                self.transition(&run.id,RunStatus::Interrupted,Some("Execution stopped while private records were locked; explicit continuation is required".into()))?;
-                if let Ok(mut pending) = self.pending.lock() {
-                    pending.retain(|id, _| !approvals.contains(id));
-                }
-                self.revoke_bridge(&run.session_id, &run.id);
-            }
+            _ => backslashes = 0,
         }
-        Ok(())
+        units += c.len_utf16();
+    }
+    if quoted {
+        units += backslashes;
+    }
+    units
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_quoting_counts_escapes_and_utf16_units() {
+        assert_eq!(windows_argument_units("abc"), 3);
+        assert_eq!(windows_argument_units(""), 2);
+        assert_eq!(windows_argument_units("a b"), 5);
+        // `a"b` becomes `a\"b`.
+        assert_eq!(windows_argument_units("a\"b"), 4);
+        // `a\\"` becomes `a\\\\\"`: both backslashes doubled plus the escape.
+        assert_eq!(windows_argument_units("a\\\\\""), 7);
+        // A trailing backslash inside quotes is doubled.
+        assert_eq!(windows_argument_units("a b\\"), 7);
+        // Characters outside the BMP take two units.
+        assert_eq!(windows_argument_units("\u{1F600}"), 2);
+        assert_eq!(
+            runtime_prompt("rules", &[aidex_providers::ChatMessage::user("hi")]),
+            "rules\nuser: hi"
+        );
+    }
+
+    #[test]
+    fn the_one_argument_limit_depends_on_the_platform() {
+        use ArgvPlatform::{Linux, Other, Windows};
+        let units = |n: usize| "x".repeat(n);
+        // Windows counts quoted UTF-16 units.
+        assert_eq!(
+            argv_limit_exceeded(Windows, &units(ARGV_PROMPT_UNITS)),
+            None
+        );
+        assert_eq!(
+            argv_limit_exceeded(Windows, &units(ARGV_PROMPT_UNITS + 1)).as_deref(),
+            Some("30000 characters")
+        );
+        assert!(argv_limit_exceeded(Windows, &"\"".repeat(ARGV_PROMPT_UNITS / 2 + 1)).is_some());
+        // Linux counts bytes, the terminating NUL included.
+        assert_eq!(argv_limit_exceeded(Linux, &units(40_000)), None);
+        assert_eq!(
+            argv_limit_exceeded(Linux, &units(LINUX_ARGUMENT_BYTES - 1)),
+            None
+        );
+        assert_eq!(
+            argv_limit_exceeded(Linux, &units(LINUX_ARGUMENT_BYTES)).as_deref(),
+            Some("128 KiB")
+        );
+        assert!(argv_limit_exceeded(Linux, &"é".repeat(LINUX_ARGUMENT_BYTES / 2)).is_some());
+        // Elsewhere only the 1 MiB text and frame bounds apply.
+        assert_eq!(argv_limit_exceeded(Other, &units(1024 * 1024)), None);
     }
 }

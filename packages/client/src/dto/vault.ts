@@ -23,39 +23,13 @@ export type VaultStatus = {
 export type VaultInitParams = { passphrase: string; recovery?: boolean };
 
 /** Result of `vault.init`. `recovery_key` is returned exactly once when requested; the daemon keeps no copy. */
-export type VaultInitResult = {
-  state: VaultState;
-  vault_id: string;
-  recovery_key?: string;
-};
+export type VaultInitResult = { state: VaultState; vault_id: string; recovery_key?: string };
 
 /** Params of `vault.unlock`: exactly one of the two. */
-export type VaultUnlockParams =
-  { passphrase: string } | { recovery_key: string };
+export type VaultUnlockParams = { passphrase: string } | { recovery_key: string };
 
 /** Result of `vault.lock`. */
-export type VaultLockResult = {
-  state: VaultState;
-  was_unlocked: boolean;
-  revoked_handles: number;
-};
+export type VaultLockResult = { state: VaultState; was_unlocked: boolean; revoked_handles: number };
 
 /** `aidex_vault::MIN_PASSPHRASE_CHARS`. */
 export const MIN_PASSPHRASE_CHARS = 8;
-/** Value-free aidex-vault::SecretMeta; no secret-read or handle-resolution API exists. */
-export type SecretKind =
-  "api_key" | "token" | "password" | "ssh_key" | "private_key" | "generic";
-export type SecretMeta = {
-  secret_ref: { vault_id: string; secret_id: string };
-  name: string;
-  kind: SecretKind;
-  created_at: string;
-  updated_at: string;
-  policy: { allowed_consumers: string[] };
-};
-export type SecretSetParams = {
-  name: string;
-  value: string;
-  consumers: string[];
-  kind?: SecretKind;
-};

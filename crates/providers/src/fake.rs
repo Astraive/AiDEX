@@ -124,9 +124,12 @@ struct State {
 
 /// A scripted [`ModelProvider`].
 ///
-/// Requests are validated, checked against the model list and context window,
-/// and recorded for assertions. An exhausted script fails with a protocol
-/// error (never a retryable one, so a test bug is not hidden by fallback).
+/// Requests are validated, checked against the model list, recorded for
+/// assertions (image and PDF parts included), and then checked against the
+/// model's context window and input capabilities: a part the model cannot
+/// read ([`crate::accepts_part`]) fails as an invalid request, as a vendor
+/// would. An exhausted script fails with a protocol error (never a
+/// retryable one, so a test bug is not hidden by fallback).
 pub struct FakeProvider {
     descriptor: ProviderDescriptor,
     models: Vec<ModelDescriptor>,
@@ -152,6 +155,15 @@ impl FakeProvider {
                 calls: 0,
             }),
         }
+    }
+
+    /// Report `kind` in the descriptor, so input-capability decisions
+    /// ([`crate::accepts_part`] and friends) follow that protocol family's
+    /// rules. Requests are still answered by the script.
+    #[must_use]
+    pub fn with_kind(mut self, kind: ProviderKind) -> Self {
+        self.descriptor.kind = kind;
+        self
     }
 
     /// Add a model; its reference and locality are rewritten to this provider.
@@ -254,7 +266,11 @@ impl ModelProvider for FakeProvider {
             .ok_or_else(|| ProviderError::ModelNotFound {
                 model: request.model.to_string(),
             })?;
-        let requested = request.estimated_input_tokens();
+        // PDF pages cost what the account's family charges (Gemini's are
+        // cheaper), as the harness estimates them.
+        let requested = request.estimated_input_tokens_with(
+            crate::part_limits(&self.descriptor, None, model).pdf_page_tokens,
+        );
         let (turn, call_number) = {
             let mut state = self.lock();
             state.requests.push(request.clone());
@@ -264,6 +280,16 @@ impl ModelProvider for FakeProvider {
                     limit: Some(model.context_window),
                     requested: Some(requested),
                 });
+            }
+            if request
+                .messages
+                .iter()
+                .flat_map(|message| &message.parts)
+                .any(|part| !crate::accepts_part(&self.descriptor, None, model, part))
+            {
+                return Err(ProviderError::InvalidRequest(
+                    "the model cannot read an attached image or PDF".into(),
+                ));
             }
             (state.script.pop_front(), state.calls)
         };
@@ -334,7 +360,7 @@ impl ModelProvider for FakeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ModelId, ToolCallSupport};
+    use crate::{ContentPart, ModelCapabilities, ModelId, ToolCallSupport};
 
     fn provider(script: FakeScript) -> FakeProvider {
         let id = ProviderId::new("fake").unwrap();
@@ -435,5 +461,68 @@ mod tests {
             fake.chat(&unknown, &mut |_| {}, &CancelToken::new()),
             Err(ProviderError::ModelNotFound { .. })
         ));
+    }
+
+    #[test]
+    fn parts_are_recorded_and_checked_against_the_model() {
+        use crate::parts::fixtures::{gif, pdf, png};
+        let id = ProviderId::new("fake").unwrap();
+        let model = |name: &str, vision: bool| {
+            ModelDescriptor::new(
+                ModelRef::new(id.clone(), ModelId::new(name).unwrap()),
+                Locality::Local,
+                100_000,
+            )
+            .with_capabilities(ModelCapabilities {
+                vision,
+                ..ModelCapabilities::default()
+            })
+        };
+        let fake = FakeProvider::new(id.clone(), Locality::Local)
+            .with_model(model("eyes", true))
+            .with_model(model("blind", false))
+            .with_script(FakeScript::new().then(FakeTurn::text("ok")));
+        let parts = vec![
+            ContentPart::image("image/png", png(2, 2)),
+            ContentPart::pdf("a.pdf", pdf(), 1),
+        ];
+        let request = |name: &str, parts: Vec<ContentPart>| {
+            ChatRequest::new(
+                ModelId::new(name).unwrap(),
+                vec![ChatMessage::user("see").with_parts(parts)],
+            )
+        };
+        let cancel = CancelToken::new();
+        fake.chat(&request("eyes", parts.clone()), &mut |_| {}, &cancel)
+            .unwrap();
+        assert_eq!(fake.requests()[0].messages[0].parts, parts);
+        assert!(matches!(
+            fake.chat(&request("blind", parts.clone()), &mut |_| {}, &cancel),
+            Err(ProviderError::InvalidRequest(_))
+        ));
+        assert_eq!(fake.requests().len(), 2, "refused requests are recorded");
+
+        let gemini = FakeProvider::new(id.clone(), Locality::Local)
+            .with_kind(ProviderKind::Gemini)
+            .with_model(model("eyes", true))
+            .with_script(FakeScript::new().then(FakeTurn::text("ok")));
+        assert_eq!(gemini.descriptor().kind, ProviderKind::Gemini);
+        let still = vec![ContentPart::image("image/gif", gif(1))];
+        assert!(matches!(
+            gemini.chat(&request("eyes", still), &mut |_| {}, &cancel),
+            Err(ProviderError::InvalidRequest(_))
+        ));
+        assert_eq!(gemini.remaining_turns(), 1, "a refusal consumes no turn");
+
+        // 100 PDF pages overflow the 100,000-token window at 3,000 tokens a
+        // page, but fit at Gemini's 560.
+        let long = vec![ContentPart::pdf("a.pdf", pdf(), 100)];
+        assert!(matches!(
+            fake.chat(&request("eyes", long.clone()), &mut |_| {}, &cancel),
+            Err(ProviderError::ContextOverflow { .. })
+        ));
+        gemini
+            .chat(&request("eyes", long), &mut |_| {}, &cancel)
+            .unwrap();
     }
 }

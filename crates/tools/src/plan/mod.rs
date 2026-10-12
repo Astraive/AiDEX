@@ -285,21 +285,13 @@ impl ToolPlan {
         let primary = self.intent();
         let mut intents = Vec::with_capacity(1 + self.facts.implied_actions.len());
         for &action in &self.facts.implied_actions {
-            if action != self.action
-                && !(action == Action::SecretUse && !self.facts.secrets.is_empty())
-            {
+            if action != self.action {
                 let mut implied = primary.clone();
                 implied.action = action;
                 intents.push(implied);
             }
         }
         intents.insert(0, primary);
-        for secret in &self.facts.secrets {
-            let mut credential = self.intent();
-            credential.action = Action::SecretUse;
-            credential.attributes.secret = Some(secret.clone());
-            intents.push(credential);
-        }
         intents
     }
 }

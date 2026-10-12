@@ -6,7 +6,7 @@
 //! backup does not help when both the passphrase and the recovery key are lost.
 
 use crate::{
-    LockedVault, UnlockedVault, Vault, VaultError,
+    LockedVault, MAX_SECRETS, UnlockedVault, Vault, VaultError,
     crypto::{sha256, verify_mac},
     error::IntegrityTarget,
     format::{
@@ -113,7 +113,7 @@ impl Vault {
         if Header::parse(&header_bytes)?.vault_id != *source.vault_id() {
             return Err(VaultError::Conflict);
         }
-        let blobs = source_dir.record_blobs()?;
+        let blobs = source_dir.record_blobs(Some(MAX_SECRETS))?;
         let blob_refs: Vec<&BlobId> = blobs.iter().collect();
         let restored = copy_records(&source_dir, &destination, &blob_refs)
             .and_then(|()| destination.write_header(&header_bytes))

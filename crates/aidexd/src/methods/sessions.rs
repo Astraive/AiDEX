@@ -312,10 +312,17 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let shared = Arc::clone(services);
     router.register(CANCEL, move |_context, params| {
         let params: IdParams = parse_params(params)?;
+        let id = exact_id("id", &params.id)?;
         let session = shared
             .sessions()
-            .transition(&exact_id("id", &params.id)?, SessionState::Cancelled)
+            .transition(&id, SessionState::Cancelled)
             .map_err(session_error)?;
+        // A cancelled session's running calls stop and its approvals and session
+        // grants can no longer authorize anything.
+        shared
+            .broker()
+            .cancel_session(&id, &aidex_broker::Principal::LocalUser)
+            .map_err(|error| crate::methods::approvals::broker_error(&error))?;
         to_result(&session)
     })?;
     let shared = Arc::clone(services);

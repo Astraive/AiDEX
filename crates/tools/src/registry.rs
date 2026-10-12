@@ -135,7 +135,7 @@ impl ToolRegistry {
             .tools
             .get(tool_id)
             .ok_or_else(|| ToolError::UnknownTool(tool_id.to_string()))?;
-        ctx.cancel.check()?;
+        crate::context::check_cancel(&ctx.cancel)?;
         let plan = tool.plan(ctx, input)?;
         if plan.tool_id() != tool_id {
             return Err(ToolError::PlanMismatch(format!(
@@ -166,7 +166,7 @@ impl ToolRegistry {
             .ok_or_else(|| ToolError::UnknownTool(plan.tool_id().to_string()))?;
         permit.authorize(plan, tool.descriptor())?;
         plan.check_context(ctx)?;
-        ctx.cancel.check()?;
+        crate::context::check_cancel(&ctx.cancel)?;
         self.claim(plan.plan_id())?;
         let started = Instant::now();
         let call_id = ctx.call_id.clone();

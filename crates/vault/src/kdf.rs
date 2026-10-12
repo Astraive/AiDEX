@@ -34,10 +34,11 @@ impl KdfParams {
     pub const DEFAULT_MEMORY_KIB: u32 = 64 * 1024;
     pub const DEFAULT_ITERATIONS: u32 = 3;
     pub const DEFAULT_PARALLELISM: u32 = 1;
-    /// 1 GiB: the largest memory cost a header may request.
-    pub const MAX_MEMORY_KIB: u32 = 1024 * 1024;
-    pub const MAX_ITERATIONS: u32 = 64;
-    pub const MAX_PARALLELISM: u32 = 16;
+    /// 64 MiB: cap memory before the unauthenticated header can be verified.
+    pub const MAX_MEMORY_KIB: u32 = Self::DEFAULT_MEMORY_KIB;
+    /// At most the default three passes over that memory.
+    pub const MAX_ITERATIONS: u32 = Self::DEFAULT_ITERATIONS;
+    pub const MAX_PARALLELISM: u32 = 4;
 
     /// Validate Argon2id parameters. Values far below the default are accepted (tests
     /// and constrained devices) but weaken offline brute-force resistance.
@@ -169,9 +170,9 @@ mod tests {
             (16, 1, 4),
             (KdfParams::MAX_MEMORY_KIB + 1, 1, 1),
             (8, 0, 1),
-            (8, 65, 1),
+            (8, KdfParams::MAX_ITERATIONS + 1, 1),
             (8, 1, 0),
-            (1024, 1, 17),
+            (1024, 1, KdfParams::MAX_PARALLELISM + 1),
         ] {
             assert_eq!(
                 KdfParams::new(m, t, p).unwrap_err().kind(),

@@ -16,6 +16,7 @@ aidex-inference = { path = "../inference" }
 aidex-providers = { path = "../providers" }
 aidex-router = { path = "../router" }
 aidex-sessions = { path = "../sessions" }
+aidex-skills = { path = "../skills" }
 aidex-updater = { path = "../updater" }
 aidex-workspace = { path = "../workspace" }
 aidexd = { path = "../aidexd" }
