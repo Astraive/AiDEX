@@ -282,6 +282,7 @@ impl NativeEngine {
    if cancel.is_stopped()||error.is_some(){return RuntimeControl::Pause;}
    let result=(||->Result<RuntimeControl,String>{
     match event{
+     RuntimeEvent::SessionStarted{..}=>Ok(RuntimeControl::Continue),
      RuntimeEvent::TextDelta{text}=>{partial.push_str(text);if partial.len()>1024*1024{return Err("runtime text exceeds output bound".into());}
      if run.parent_run_id.is_none(){self.emit(&run.session_id,EventKind::AgentDelta{text:text.clone()});}
      if last.elapsed()>=Duration::from_millis(100)||partial.len()-saved>=4096{if let Some(index)=index{self.store.update(&run.session_id,|s|{s.messages[index].content=partial.clone();Ok(())})?;}last=Instant::now();saved=partial.len();}Ok(RuntimeControl::Continue)},

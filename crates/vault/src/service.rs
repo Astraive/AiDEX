@@ -288,6 +288,23 @@ impl VaultService {
         self.with_vault(|vault| vault.meta(name))
     }
 
+    /// Backend-only: the current record and revision of a secret (no value).
+    pub fn secret_version(&self, name: &SecretName) -> Result<crate::SecretVersion, VaultError> {
+        self.with_vault(|vault| vault.secret_version(name))
+    }
+
+    /// Broker-only: resolve a secret for `consumer` only while `expected` is still
+    /// its current version (see [`UnlockedVault::resolve_versioned`]). The check,
+    /// handle issue, resolution and revocation hold the vault lock together.
+    pub fn resolve_versioned(
+        &self,
+        name: &SecretName,
+        consumer: &ConsumerScope,
+        expected: &crate::SecretVersion,
+    ) -> Result<SecretBytes, VaultError> {
+        self.with_vault(|vault| vault.resolve_versioned(name, consumer, expected))
+    }
+
     pub fn delete_secret(&self, name: &SecretName) -> Result<SecretMeta, VaultError> {
         self.with_vault(|vault| vault.delete(name))
     }

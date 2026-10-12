@@ -131,6 +131,17 @@ pub struct Run {
     /// Session workspace when the run began.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    /// Inference attempts repeated after a retryable provider failure. Each
+    /// one also used a step; see [`crate::SessionStore::reserve_inference_retry`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inference_retries: u32,
+    /// The most older messages any request of this run left out of its replay
+    /// view to fit the model's context window. History itself is unchanged.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub context_trimmed_messages: u32,
+}
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 /// Per-request options of a new run. Nothing here is persisted in the
 /// session configuration.

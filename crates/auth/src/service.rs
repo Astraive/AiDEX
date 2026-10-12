@@ -4,6 +4,7 @@ use crate::{
 };
 use aidex_vault::{SecretBytes, VaultService};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fmt,
@@ -507,6 +508,38 @@ impl AuthService {
     }
     pub fn secret_name(provider: &str) -> String {
         format!("oauth.{provider}.access")
+    }
+    /// Backend-only, value-free identity of the connected account: SHA-256 over
+    /// the provider id and the verified issuer, subject and issued client id of
+    /// its encrypted profile. Token refresh does not change it; another account
+    /// or registration does. Fails closed: `NotFound` without a profile,
+    /// `Reauthorize` when signed out or awaiting sign-in, `IdentityInvalid` when
+    /// the verified identity is incomplete. Never returned over RPC.
+    pub fn account_binding(&self, provider: &str) -> Result<String, AuthError> {
+        storage::validate_provider(provider)?;
+        let lock = self.provider_lock(provider);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = self.profile(provider)?.ok_or(AuthError::NotFound)?;
+        if profile.needs_reauth
+            || profile
+                .tokens
+                .as_ref()
+                .is_none_or(|tokens| tokens.access_token.is_empty())
+        {
+            return Err(AuthError::Reauthorize);
+        }
+        let (Some(issuer), Some(subject)) = (
+            profile.issuer.as_deref().filter(|v| !v.is_empty()),
+            profile.subject.as_deref().filter(|v| !v.is_empty()),
+        ) else {
+            return Err(AuthError::IdentityInvalid);
+        };
+        if profile.client_id.is_empty() {
+            return Err(AuthError::IdentityInvalid);
+        }
+        let identity = serde_json::to_vec(&(provider, issuer, subject, &profile.client_id))
+            .map_err(|_| AuthError::Unavailable)?;
+        Ok(format!("{:x}", Sha256::digest(identity)))
     }
     /// Designated names never fall back to a stale raw vault token.
     pub fn owns_secret(provider: &str, name: &str) -> bool {

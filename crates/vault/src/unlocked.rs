@@ -4,7 +4,7 @@
 
 use crate::{
     ConsumerScope, LockedVault, SecretBytes, SecretHandle, SecretKind, SecretMeta, SecretName,
-    SecretPolicy, SecretString, UnlockMethod, VaultError,
+    SecretPolicy, SecretString, SecretVersion, UnlockMethod, VaultError,
     crypto::{random_array, sha256},
     error::HandleDenial,
     format::{
@@ -30,6 +30,8 @@ use std::{
 pub const MAX_SECRET_BYTES: usize = 64 * 1024;
 /// Most secrets one vault holds.
 pub const MAX_SECRETS: usize = 4096;
+/// Lifetime of the handle [`UnlockedVault::resolve_versioned`] revokes before returning.
+const VERSIONED_HANDLE_TTL: Duration = Duration::from_secs(5);
 
 /// An unlocked vault. The master key and derived keys are zeroized when it is
 /// dropped or [`locked`](UnlockedVault::lock); its handles die with it.
@@ -112,6 +114,18 @@ impl UnlockedVault {
     pub fn meta(&self, name: &SecretName) -> Result<SecretMeta, VaultError> {
         self.entry(name)
             .map(|entry| entry.meta(&self.header.vault_id))
+    }
+
+    /// The current record and revision of a secret. Contains no value.
+    pub fn secret_version(&self, name: &SecretName) -> Result<SecretVersion, VaultError> {
+        let entry = self.entry(name)?;
+        Ok(SecretVersion {
+            secret_ref: SecretRef {
+                vault_id: self.header.vault_id.clone(),
+                secret_id: entry.record_id.clone(),
+            },
+            revision: entry.revision,
+        })
     }
 
     /// Store or replace a secret. Replacing keeps its id (and live handles, if the new
@@ -308,6 +322,26 @@ impl UnlockedVault {
             return Err(VaultError::HandleDenied(HandleDenial::PolicyRevoked));
         }
         self.read_value(entry)
+    }
+
+    /// Resolve a secret for `consumer` only while `expected` is still its current
+    /// version; otherwise fail with [`HandleDenial::RevisionChanged`] (or
+    /// `SecretNotFound` once it is deleted). The value goes through a handle
+    /// issued, resolved and revoked within this call, so the usual policy checks
+    /// apply and no handle outlives it.
+    pub fn resolve_versioned(
+        &mut self,
+        name: &SecretName,
+        consumer: &ConsumerScope,
+        expected: &SecretVersion,
+    ) -> Result<SecretBytes, VaultError> {
+        if self.secret_version(name)? != *expected {
+            return Err(VaultError::HandleDenied(HandleDenial::RevisionChanged));
+        }
+        let handle = self.issue_handle(name, consumer, VERSIONED_HANDLE_TTL)?;
+        let value = self.resolve(&handle, consumer);
+        self.revoke_handle(&handle.handle_id);
+        value
     }
 
     /// Revoke one handle; `false` if it was unknown or already revoked.

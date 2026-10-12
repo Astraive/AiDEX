@@ -41,6 +41,10 @@ let handle: SecretHandle = vault.issue_handle(&name, &consumer, Duration::from_s
 let value: SecretBytes = vault.resolve(&handle, &presenting_consumer)?;
 vault.revoke_handle(&handle.handle_id);   vault.revoke_all_handles();
 
+// Revision binding (value-free): resolve only while the bound revision is current.
+let version: SecretVersion = vault.secret_version(&name)?;
+let value: SecretBytes = vault.resolve_versioned(&name, &consumer, &version)?;
+
 // Backup / restore (still encrypted).
 vault.backup_to(dest)?;   Vault::restore_from(src, target)?;   vault.verify()?;
 let locked = vault.lock();                                   // keys zeroized, handles gone
@@ -49,9 +53,10 @@ let locked = vault.lock();                                   // keys zeroized, h
 `VaultService` is the thread-safe, `Arc`-shareable wrapper the daemon owns
 (`aidexd::Services::vault()`): `open(dir, VaultServiceConfig { kdf, idle_timeout })`,
 `status() -> VaultStatus`, `init`, `unlock`, `unlock_with_recovery`, `lock`,
-`put_secret`, `list_secrets`, `secret_meta`, `delete_secret`, `change_passphrase(old:
-Option<_>, new)`, `issue_handle`, `resolve`, `revoke_handle`, `revoke_all_handles`,
-`backup_to`, `set_kdf_params`, `set_idle_timeout`. It locks itself after 30 minutes
+`put_secret`, `list_secrets`, `secret_meta`, `secret_version`, `delete_secret`,
+`change_passphrase(old: Option<_>, new)`, `issue_handle`, `resolve`,
+`resolve_versioned`, `revoke_handle`, `revoke_all_handles`, `backup_to`,
+`set_kdf_params`, `set_idle_timeout`. It locks itself after 30 minutes
 without secret operations (configurable), re-reads the disk while locked (so damage or
 an external restore is reported), and drops its session on a `Conflict` or an
 ambiguous post-rename commit to its own header.
@@ -67,6 +72,13 @@ Types:
 - `SecretBytes`, `SecretString`, `RecoveryKey` — zeroizing, `[REDACTED]` formatting,
   not `Clone`, not `Serialize`; read with `expose()` (`RecoveryKey::encode()` returns
   the display text as a `SecretString`).
+- `SecretVersion { secret_ref, revision }` — which record and value revision is
+  current; no name or value, never stored by the vault. Replacing a value raises
+  `revision`; deleting and re-creating a secret changes `secret_ref`. Callers
+  that bind an approval or a resume to a credential keep it and later call
+  `resolve_versioned`, which checks it, then issues, resolves and revokes a
+  short-lived handle under one lock. A changed version is denied with
+  `HandleDenial::RevisionChanged` (`secret_revision_changed`) and leaves no handle.
 - `VaultError` — `kind() -> VaultErrorKind` (stable snake_case `as_str()`), `code() ->
   aidex_core::ServiceErrorCode`; handle denials carry a `HandleDenial` reason.
 

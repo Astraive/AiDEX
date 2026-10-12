@@ -2,7 +2,7 @@
 
 `SessionStore::open(path, Arc<VaultService>)` creates a SQLite native record database under the drive's sessions directory. Message bodies, configuration, complete provider messages/tool metadata, pending arguments, checkpoints and workspace memory use XChaCha20-Poly1305 with random nonces and record identity/version AAD. Only opaque IDs and lifecycle state are plaintext SQL metadata.
 
-A random 256-bit record key is generated once while the existing vault is unlocked, stored there under `native-record-encryption-key`, and resolved through short-lived `process:native-record-store` handles. Handles are revoked per operation. No plaintext config key or long-lived decrypted key cache is used. Locked/missing/damaged vaults make private records unavailable; list/status expose only IDs/status. Authenticated decryption failures never produce an empty or plaintext history.
+A random 256-bit record key is generated once while the existing vault is unlocked, stored there under `native-record-encryption-key` (`NATIVE_RECORD_KEY_SECRET`, a record AiDEX manages and clients must not replace or delete), and resolved through short-lived `process:native-record-store` handles. Handles are revoked per operation. No plaintext config key or long-lived decrypted key cache is used. Locked/missing/damaged vaults make private records unavailable; list/status expose only IDs/status. Authenticated decryption failures never produce an empty or plaintext history.
 
 SQLite transactions commit each encrypted record and its run metadata together. Message command IDs bind to input hashes and return the original run when repeated; changed-input reuse fails. Startup interrupts active runs, and private state reconciles with that metadata after unlock. Native execution owns continuation and never repeats pending effects without fresh user action/planning.
 
@@ -55,9 +55,16 @@ Users send images, PDFs and text files with a message. Bytes reach the store thr
   - On open, without the key: rows of sessions an older daemon deleted are dropped, staged attachments older than 24 hours are deleted with their blobs, and the attachments directory is swept of temporary files and unreferenced blobs. The artifacts sweep (in this daemon and older ones) never touches that directory, and the attachments sweep never touches `native-artifacts/`.
 - **Authority.** The table is the authoritative record of which message an attachment belongs to. `Run::attachments` is only a cache; older daemons drop it when they re-save a session.
 
+## External runtimes
+
+`RuntimeExecutor`, `RuntimeRequest` and `RuntimeEvent` are the contract for separately owned adapters. `RuntimeEvent::SessionStarted { runtime_ref }` reports a launch's native identity before its first turn can produce effects; it lives in memory only, and the harness decides what to persist. `is_resumable_reference(&runtime_ref)` is the one rule adapters and the harness share for `RuntimeOperation::Resume`: the reference must be an object with non-empty `native_branch_id` and `snapshot_digest` strings. References saved before native continuation have neither, so those conversations continue with `Start` and a transcript replay.
+
 ## Runs and forks
 
 - `Run` records the session's `mode`, `permission_mode` and `workspace_id` when the run began (absent on older runs), so a transcript can show where a conversation switched to Agent mode. Like `skills` and `attachments`, these are optional fields of `Run`, which has no `deny_unknown_fields`.
+- `Run::inference_retries` and `Run::context_trimmed_messages` are optional counters, omitted while zero:
+  - `reserve_inference_retry(run_id)` uses one step of the run's budget for an inference retry and counts it, in one transaction. It is refused, with nothing written, once the run has used `max_steps` steps or is no longer active, and returns the run's retry count.
+  - `record_context_trim(run_id, n)` keeps the largest number of older messages any request of the run left out of its replay view. History is unchanged, and zero writes nothing.
 - `fork(source_id, ForkRequest { configuration, title, command_id })` creates a conversation whose history is a copy of the source's:
   - Assistant tool calls that never got a result are stripped in place, and only trailing empty assistant placeholders are dropped, so every message keeps its index.
   - Sent attachments are re-sealed segment by segment under the new session (new ids, same message index and order, no run or command). Their blobs are written before the transaction that inserts the session and the rows.

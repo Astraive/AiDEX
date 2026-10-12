@@ -71,6 +71,13 @@ pub enum RuntimeToolStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    /// The native identity of this launch, reported before the first turn can
+    /// produce effects so a crash mid-turn still leaves a reference to resume.
+    /// In memory only: the event is never stored, and the harness decides what
+    /// part of the reference it persists.
+    SessionStarted {
+        runtime_ref: Value,
+    },
     TextDelta {
         text: String,
     },
@@ -116,6 +123,21 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 impl std::error::Error for RuntimeError {}
+
+/// Whether a saved `runtime_ref` is bound to a native branch and snapshot, so
+/// `RuntimeOperation::Resume` may continue it: an object whose
+/// `native_branch_id` and `snapshot_digest` are non-empty strings. References
+/// saved before native continuation have neither, so their conversations
+/// continue with `Start` and a transcript replay instead. Adapters and the
+/// harness both decide with this one rule.
+pub fn is_resumable_reference(runtime_ref: &Value) -> bool {
+    ["native_branch_id", "snapshot_digest"].iter().all(|key| {
+        runtime_ref
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
 
 /// Implementations must validate declared modes/permissions/model support, use
 /// the selected confined root, honor cancellation with managed process-tree

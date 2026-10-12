@@ -29,9 +29,10 @@ document describes their JSON form. Events are served by the daemon as
   optional field. Identifiers are opaque `EntityId`s (`[A-Za-z0-9._:-]`, at most
   128 bytes); `text` fields are free text, redacted and truncated on append.
 
-**Ephemeral** events (`agent.delta`, `process.output`) are live-only: never stored
-or replayed, they take no cursor and carry the latest durable cursor instead (they
-follow that event). Never acknowledge or deduplicate by an ephemeral cursor.
+**Ephemeral** events (`agent.delta`, `agent.run_delta`, `process.output`) are
+live-only: never stored or replayed, they take no cursor and carry the latest
+durable cursor instead (they follow that event). Never acknowledge or deduplicate
+by an ephemeral cursor.
 
 ## Filters
 
@@ -90,6 +91,7 @@ durable unless marked *ephemeral*.
 | `agent.started` | `agent_id: id`, `model: id?` |
 | `agent.message` | `role: user\|assistant\|system\|tool`, `content: text` |
 | `agent.delta` (*ephemeral*) | `text: text` |
+| `agent.run_delta` (*ephemeral*) | `agent_id: id` (the run), `text: text`; every run's output, child runs included |
 | `agent.subagent.created` | `child_session_id: id`, `role: text` |
 | `agent.error` | `code: text`, `message: text` |
 | `agent.retry` | `attempt: u32`, `reason: text` |

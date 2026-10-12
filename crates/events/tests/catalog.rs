@@ -32,7 +32,10 @@ fn every_variant_has_a_unique_dotted_name_matching_its_wire_type() {
         .filter(|kind| !kind.is_durable())
         .map(EventKind::name)
         .collect();
-    assert_eq!(ephemeral, ["agent.delta", "process.output"]);
+    assert_eq!(
+        ephemeral,
+        ["agent.delta", "agent.run_delta", "process.output"]
+    );
     assert_eq!(
         EventKind::AgentSubagentCreated {
             child_session_id: id("ses_child"),
@@ -276,4 +279,65 @@ fn long_text_fields_are_truncated_with_a_marker() {
     };
     assert!(content.len() <= redact::MAX_TEXT_BYTES);
     assert!(content.contains(redact::TRUNCATION_MARKER));
+}
+
+#[test]
+fn run_deltas_are_live_only_and_reach_agent_filtered_subscribers() {
+    let kind = EventKind::AgentRunDelta {
+        agent_id: id("run_child"),
+        text: "partial".into(),
+    };
+    let wire = serde_json::to_value(&kind).unwrap();
+    assert_eq!(
+        wire,
+        json!({"type": "agent.run_delta", "data": {"agent_id": "run_child", "text": "partial"}})
+    );
+    assert_eq!(serde_json::from_value::<EventKind>(wire).unwrap(), kind);
+    assert!(!kind.is_durable());
+    assert_eq!(kind.domain(), "agent");
+    for prefix in ["agent", "agent.run_delta"] {
+        let filter = EventFilter::all().with_kind(prefix);
+        filter.validate().unwrap();
+        assert!(filter.matches_kind("agent.run_delta"), "{prefix}");
+    }
+    assert!(
+        !EventFilter::all()
+            .with_kind("agent.delta")
+            .matches_kind("agent.run_delta")
+    );
+
+    let fixture = temp_log(RetentionPolicy::UNBOUNDED);
+    let mut agents = fixture
+        .log
+        .subscribe(
+            EventFilter::for_session(id("ses_one")).with_kind("agent"),
+            Cursor::ZERO,
+        )
+        .unwrap();
+    fixture
+        .log
+        .append(session_scope(), common::task_started("task_1"))
+        .unwrap();
+    let appended = fixture.log.append(session_scope(), kind.clone()).unwrap();
+    // It takes no cursor of its own: it follows the latest durable event.
+    assert_eq!(appended.cursor, Cursor::new(1));
+    let delivered = loop {
+        let item = agents
+            .next_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .expect("a delivery within the timeout");
+        if let Some(event) = item.event {
+            break event;
+        }
+    };
+    assert_eq!(delivered.event, kind);
+    assert_eq!(delivered.cursor, Cursor::new(1));
+    // Nothing was stored: replay holds only the durable event.
+    let page = fixture
+        .log
+        .replay(&EventFilter::all(), Cursor::ZERO, 10)
+        .unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].name(), "task.started");
+    assert_eq!(fixture.log.latest_cursor().unwrap(), Cursor::new(1));
 }

@@ -3,8 +3,8 @@
 mod common;
 
 use aidex_vault::{
-    RecoveryKey, SecretBytes, SecretKind, UnlockMethod, VaultError, VaultErrorKind, VaultService,
-    VaultServiceConfig, VaultState,
+    HandleDenial, RecoveryKey, SecretBytes, SecretKind, UnlockMethod, VaultError, VaultErrorKind,
+    VaultService, VaultServiceConfig, VaultState,
 };
 use common::*;
 use std::{
@@ -194,4 +194,70 @@ fn external_changes_end_the_session_instead_of_being_overwritten() {
         .unwrap_err();
     assert_eq!(error.kind(), VaultErrorKind::Conflict);
     assert_eq!(service.status().state, VaultState::Locked);
+}
+
+#[test]
+fn versioned_resolution_refuses_a_replaced_value_and_a_locked_vault() {
+    let root = tempfile::tempdir().unwrap();
+    let service = service(root.path(), None);
+    service.init(&passphrase(PASSPHRASE), false).unwrap();
+    let put = |value: &str| {
+        service
+            .put_secret(
+                &name(NAME),
+                SecretKind::ApiKey,
+                SecretBytes::from(value.to_owned()),
+                policy(&[openai()]),
+            )
+            .unwrap()
+    };
+    let meta = put(VALUE);
+    let bound = service.secret_version(&name(NAME)).unwrap();
+    assert_eq!(bound.secret_ref, meta.secret_ref);
+    assert_eq!(service.secret_version(&name(NAME)).unwrap(), bound);
+    assert_eq!(
+        service
+            .resolve_versioned(&name(NAME), &openai(), &bound)
+            .unwrap()
+            .expose(),
+        VALUE.as_bytes()
+    );
+
+    put("REPLACEMENT-MARKER-VALUE");
+    let current = service.secret_version(&name(NAME)).unwrap();
+    assert_eq!(current.secret_ref, bound.secret_ref);
+    assert_eq!(current.revision, bound.revision + 1);
+    let error = service
+        .resolve_versioned(&name(NAME), &openai(), &bound)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            VaultError::HandleDenied(HandleDenial::RevisionChanged)
+        ),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("MARKER"), "{error}");
+    // The refusal kept the session: the current version still resolves.
+    assert_eq!(service.status().state, VaultState::Unlocked);
+    assert_eq!(
+        service
+            .resolve_versioned(&name(NAME), &openai(), &current)
+            .unwrap()
+            .expose(),
+        b"REPLACEMENT-MARKER-VALUE"
+    );
+
+    // Neither the refusal nor the resolutions left a live handle.
+    let outcome = service.lock();
+    assert!(outcome.was_unlocked);
+    assert_eq!(outcome.revoked_handles, 0);
+    for error in [
+        service.secret_version(&name(NAME)).unwrap_err(),
+        service
+            .resolve_versioned(&name(NAME), &openai(), &current)
+            .unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), VaultErrorKind::Locked);
+    }
 }
