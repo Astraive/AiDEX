@@ -13,7 +13,7 @@ Typed TypeScript access to AiDEX Core for the Tauri apps: wrappers for the deskt
 | `@aidex/client/host` | `hostProfile()` (both apps) |
 | `@aidex/client/rpc` | `call(method, params)` typed by `RpcMethods`, `callUntyped`, `subscribe(method, params, { onData, onEnd })` |
 | `@aidex/client/format` | `formatBytes`, `formatDuration`, `bytesToGb`, `UNKNOWN` |
-| `@aidex/client/dto/<name>` | `host`, `drive`, `sandbox`, `daemon`, `status`, `installer`, `execution` (`execution.status`: engine capabilities, session and run summaries) |
+| `@aidex/client/dto/<name>` | One module per area: `daemon` (events, stream notifications and watermarks, live delta payloads), `vault` (status and value-free secret metadata), `updates` (`update.*` reports), `sessions` (conversations, runs, approvals, checkpoints and their paged lists), `runtime` (external runtimes and managed accounts), `auth` (browser sign-in flows), `models`, `execution`, `artifacts`, `attachments`, `skills`, `mcp`, `plugins`, `web`, `inference`, `preferences`, `workspace`, `host`, `drive`, `sandbox`, `status`, `installer` |
 
 `subscribe` attaches its `aidex://notification` and `aidex://subscription-ended` listeners before calling `rpc_subscribe`, so notifications sent before the call returns are delivered in order. It resolves to `{ id, initial, unsubscribe }`.
 
@@ -23,11 +23,13 @@ Every command rejects with `BridgeErrorPayload { code, kind, rpc_code?, message,
 
 ## DTOs
 
-The DTO files are hand-written mirrors of Rust serde output; each names its canonical Rust type. Until schema-driven generation exists (`protocol/`), change the Rust type and its mirror in the same commit. `EventKind` is deliberately open (`{ type: string } & Record<string, unknown>`) because the event catalog is being expanded.
+The DTO files are hand-written mirrors of Rust serde output; each names its canonical Rust type. Until schema-driven generation exists (`protocol/`), change the Rust type and its mirror in the same commit. `EventKind` is deliberately open (`{ type: string; data?: Record<string, unknown> }`) because the event catalog is being expanded; `daemon.ts` types the payloads screens read (`AgentDelta`, `AgentRunDelta`, `StreamWatermark`).
+
+`src/contracts.fixtures.ts` holds daemon params and results recorded over JSON-RPC, each checked with `satisfies` against its `RpcMethods` entry or DTO, so a missing or unknown field fails `check`. Re-record the affected fixture when a Rust type changes.
 
 ## Adding a daemon method
 
-Add its params/result types under `src/dto/` and an entry to `RpcMethods` in `src/rpc.ts`; desktop screens then call it with `useRpc`. No Tauri change is needed. A new Tauri command gets a wrapper in `src/desktop.ts` or `src/installer.ts`.
+Add its params/result types under `src/dto/` and an entry to `RpcMethods` in `src/rpc.ts`; desktop screens then call it with `useRpc`. No Tauri change is needed. Prefer a typed entry over `callUntyped`, and add a recorded fixture for a result the desktop depends on. A new Tauri command gets a wrapper in `src/desktop.ts` or `src/installer.ts`.
 
 ## Checks
 

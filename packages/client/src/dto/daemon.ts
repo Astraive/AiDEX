@@ -39,6 +39,20 @@ export type EventsSubscribed = { after: number; latest_cursor: number };
 /** Payload of an `events.error` notification (the stream ends after it). */
 export type EventStreamError = { reason: "cursor_expired" | "internal" | string; message: string; oldest_available?: number };
 
+/**
+ * Payload of an `events.watermark` notification (filtered subscriptions): every durable event
+ * through `cursor` was sent in an earlier `events.event` notification or excluded by the filter.
+ * After processing the preceding notifications, resume after `cursor`. Watermarks are not events
+ * and arrive only on durable progress, never as heartbeats.
+ */
+export type StreamWatermark = { cursor: number };
+
+/** The notifications of an `events.subscribe` stream (`onData`'s `data` and `method`). */
+export type EventStreamNotification =
+  | { method: "events.event"; data: EventEnvelope }
+  | { method: "events.watermark"; data: StreamWatermark }
+  | { method: "events.error"; data: EventStreamError };
+
 export type EventScope = { workspace_id?: string; session_id?: string };
 
 /**
@@ -56,6 +70,16 @@ export type EventEnvelope = {
   occurred_at: string;
   event: EventKind;
 };
+
+/**
+ * `data` of the ephemeral `agent.delta` event: live output text in the event's conversation.
+ * Ephemeral events are never stored or replayed and carry the latest durable cursor, so never
+ * acknowledge or deduplicate by their cursor; the saved transcript is authoritative.
+ */
+export type AgentDelta = { text: string };
+
+/** `data` of the ephemeral `agent.run_delta` event: live output of run `agent_id`, root or child. */
+export type AgentRunDelta = { agent_id: string; text: string };
 
 /** Result of `events.replay`, ascending by cursor. */
 export type ReplayPage = { events: EventEnvelope[]; next_cursor: number; has_more: boolean };
