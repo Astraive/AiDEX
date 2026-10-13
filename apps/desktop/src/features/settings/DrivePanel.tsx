@@ -3,15 +3,17 @@ import { EjectIcon, HardDriveIcon, RefreshIcon, ShieldCheckIcon } from "@aidex/u
 import { Button, Card, IconBadge, Stack, StatusIndicator, Text } from "@aidex/ui/primitives";
 import { removableLabels } from "@aidex/client/dto/drive";
 import { formatBytes, UNKNOWN } from "@aidex/client/format";
+import { useNavigation } from "../../app/providers/navigation";
 import { useToast } from "../../app/providers/toast";
 import { useDriveReport } from "../../hooks/useCoreReports";
 import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import { driveSourceLabels } from "../system/labels";
 import { ResidueCleanup } from "./ResidueCleanup";
 
-/** The session's AiDEX drive: live identity, health, capacity, and migration advice; integrity and eject are planned. */
+/** The session's AiDEX drive: live identity, health, capacity, and migration advice; integrity is in Updates, eject is planned. */
 export function DrivePanel() {
   const notify = useToast();
+  const { replace } = useNavigation();
   const drive = useDriveReport();
   const report = drive.data;
   const health = report?.health ?? null;
@@ -107,20 +109,21 @@ export function DrivePanel() {
       <section>
         <SectionHeader
           title="Integrity"
-          meta="Planned"
+          meta="In Updates"
           actions={
             <Button
               variant="outline"
               size="md"
               icon={<ShieldCheckIcon />}
-              onClick={() => notify("Preview: verifying signed integrity manifests arrives with the updater (issue #27).")}
+              onClick={() => replace({ page: "settings", tab: "updates" })}
             >
-              Verify now
+              Verify in Updates
             </Button>
           }
         />
         <Text tone="secondary">
-          Checksums and signed manifests for the AiDEX bundle are not part of this build yet, so no integrity result is shown.
+          Updates shows the selected AiDEX bundle's publisher signature, critical-file check, and SBOM, and verifies any package
+          you install before it is used.
         </Text>
       </section>
       <ResidueCleanup />

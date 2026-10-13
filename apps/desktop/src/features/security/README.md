@@ -1,20 +1,28 @@
 # Security feature
 
-The Security page (`route.page === "security"`) shows the policy, vault, sandbox, and approval state that governs what agents can do. Tabs come from `pageTabs.security` and switch with `replace({ ...route, tab })`.
+The Security page (`route.page === "security"`) shows the vault, sandbox, policy, audit, and approval state that governs what agents can do, all read from AiDEX Core. Tabs come from `pageTabs.security` and switch with `replace({ ...route, tab })`.
 
 | File | Shows |
 | --- | --- |
-| `SecurityPage.tsx` | Header, underline tabs, and the tab panels. Owns the approval queue (`useApprovals`) and isolation level so the dashboard and tab count stay in step. |
-| `SecuritySidebar.tsx` | One item per tab (active by route tab; Approvals shows the sample pending count) and recent alerts that open the related tab. |
-| `OverviewPanel.tsx` | Security dashboard: posture tiles, active permissions with local Revoke, recent audit log, and the broker explainer. |
-| `VaultPanel.tsx`, `AddSecretForm.tsx` | Vault status, masked secrets table, add-secret form, and connected accounts. |
-| `SandboxPanel.tsx`, `PolicyRules.tsx` | The live `sandbox_capabilities` report for this computer (strongest level, helper, probe facts, and one row per protection: enforced, watchdog, not enforced, or unavailable, with the mechanism and known gaps), the level choice (levels this host cannot enforce are disabled), per-platform backends with this computer marked from the probe, and sample filesystem and network rules. |
-| `tabs.ts`, `sample.ts` | Tab labels and icons, and sample data. |
+| `SecurityPage.tsx` | Header, underline tabs (Approvals with the pending count), and the tab panels. Owns the shared status (`useSecurityStatus`) and passes it down. |
+| `useSecurityStatus.ts` | The shared queries: `vault.status`, the pending total (`approval.list` with `status: "pending"`, `limit: 1`), `network.status`, and `execution.status` (only on Overview and Sandbox). One poll every 5 s refetches them and bumps `version`, which panels use to re-read their own queries (`useRefetchOnVersion`); `refresh` does the same at once after an action. It publishes the vault state and pending total to a small store that `SecuritySidebar` reads, so the sidebar adds no requests. `activeRun` keeps pending, running, and waiting-for-approval runs; `lockedByVault` tells a `vault_locked` refusal (an expected state) from a failed read. |
+| `SecuritySidebar.tsx` | One item per tab, the vault state, and the number of requests waiting, each opening its tab. |
+| `OverviewPanel.tsx` | Tiles for the vault, pending approvals (Locked, not an error, while the vault is locked), network, and this computer's strongest sandbox level; the Offline mode switch (`network.offline`); the broker explainer; the active runs (from `execution.status`, newest first, with a note when not every run fits one read) with Inspect (the execution page) and Cancel (`run.cancel`); and the audit log. |
+| `AuditPanel.tsx`, `useSecurityAudit.ts`, `auditMetadata.ts` | The audit log. Recent follows a filtered `events.subscribe` stream from a recent window of the log, resuming after the last event or `events.watermark` and reconnecting with backoff; From the start pages `events.replay` from the oldest event the drive keeps. `auditMetadata` projects each event to cursor, time, type, scope ids, and a fixed result before anything reaches state; Export saves exactly those rows (`saveBlob`). |
+| `VaultPanel.tsx`, `AddSecretForm.tsx`, `PassphraseForm.tsx`, `secretPolicy.ts` | Vault status with Lock (`vault.lock`, then a window reload, like Lock drive in the account menu, so decrypted state is dropped). A locked or missing vault points to the launch unlock screen instead of unlocking here. Unlocked: the secrets table from `vault.secret.list` (name, kind, consumers, updated; never values), Add a secret and Replace (`vault.secret.set` with a kind and exact consumers, suggested from `model.providers`, `mcp.list`, `runtime.list` as `process:runtime-<id>`, and `process:web`), Delete after a confirmation dialog (`vault.secret.delete`; a failure shows inside the dialog), and Change passphrase (`vault.passphrase.change`). A `managed_secret` refusal from set or delete reads as the managed-record message (`secretWriteError`). |
+| `SandboxPanel.tsx`, `PolicyRules.tsx` | The live `sandbox_capabilities` report (strongest level, helper, probe facts, one row per protection with its mechanism and known gaps), warnings when commands are not confined to the project or kept off the network, the platform backends with this computer marked, and the default permission for new conversations (labels and descriptions from `chat/continuation/permissions.ts`, saved in the encrypted preferences). |
+| `tabs.ts` | Tab labels and icons, shared with the sidebar. |
 
-The Approvals tab renders `../approvals/ApprovalsPanel`.
+The Approvals tab renders `../approvals/LiveApprovalsPanel`.
 
 ## Honesty rules
 
-- The sandbox capability matrix is live (`aidex_sandbox::probe()` through `sandbox_capabilities`). Everything else is sample data until the daemon exposes the policy engine, vault, and audit log (`crates/policy`, `crates/vault`, `crates/broker`). Actions that need Core show a "Preview: …" toast; local-only state (revoking a permission, choosing an isolation level, approval decisions) is not persisted.
-- Secrets are never shown in full. The add-secret form validates, clears the value from state, and never stores, logs, or sends it.
-- Copy follows `docs/spec.md` and `docs/security.md`: sensitive actions pass through the execution broker, the vault design is Argon2id plus XChaCha20-Poly1305 records, agents get secret handles rather than values, and isolation fails closed when a host can't enforce the chosen level.
+- Every panel reads AiDEX Core; nothing is sample data. Controls without a daemon method (editing filesystem mounts or network allowlists, choosing a global isolation level) are not shown.
+- Secret values are never read back. The add, replace, and passphrase forms send values straight to the daemon and clear them from state after every attempt. The vault policy rules are mirrored in `secretPolicy.ts` (names, exact `provider:`, `mcp:`, `process:`, and `git:` consumers, at most 32), and the daemon enforces them again.
+- Records AiDEX manages (the daemon's `managed` list from `vault.secret.list`, plus `aidex-preferences`, `aidex-model-preferences`, `native-record-encryption-key`, `external-runtime-encryption-key`, and `oauth.*` when that list is missing) are read-only here.
+- The audit view keeps no event bodies: commands, messages, reasons, secret names, and consumers are dropped. Its `auditKinds` filter only names kinds in the daemon's catalog (`EVENT_NAMES` in crates/events), which the daemon requires.
+- Copy follows `docs/spec.md` and `docs/security.md`: sensitive actions pass through the execution broker, agents get secret handles rather than values, and isolation fails closed when a host cannot enforce the requested level.
+
+## Tests
+
+`secretPolicy.test.ts`, `auditMetadata.test.ts`, and `useSecurityStatus.test.ts` (which runs count as active, and which errors mean a locked vault) run with `bun run --cwd apps/desktop test`. The audit test reads `EVENT_NAMES` and `MAX_FILTER_KINDS` from the Rust sources, so it fails when `auditKinds` names a kind the catalog does not have.

@@ -1,39 +1,40 @@
 import { DataTable, KeyValueList, List, ListRow, Notice, SectionHeader, type DataTableColumn } from "@aidex/ui/components";
-import { AlertTriangleIcon, LaptopIcon, MonitorIcon, RefreshIcon, ServerIcon } from "@aidex/ui/icons";
-import { Badge, Button, ChoiceCardGroup, Stack, StatusIndicator, Text, type ChoiceCardOption } from "@aidex/ui/primitives";
-import { rankOf, type BackendCapabilities, type Capability } from "@aidex/client/dto/sandbox";
-import { useToast } from "../../app/providers/toast";
+import { LaptopIcon, MonitorIcon, RefreshIcon, ServerIcon } from "@aidex/ui/icons";
+import { Button, Stack, StatusIndicator, Text } from "@aidex/ui/primitives";
+import type { BackendKind, Capability, Requirement } from "@aidex/client/dto/sandbox";
+import type { ExecutionStatus } from "@aidex/client/dto/execution";
 import { useSandboxCapabilities } from "../../hooks/useCoreReports";
-import { enforcementDetail, enforcementLabel, enforcementTone, levelLabel, requirementLabels } from "../system/labels";
+import { enforcementDetail, enforcementLabel, enforcementTone, levelLabel, osLabel, requirementLabels } from "../system/labels";
 import { PolicyRules } from "./PolicyRules";
-import { sandboxBackends, type IsolationLevel } from "./sample";
 
-type Props = { isolation: IsolationLevel; onIsolationChange: (level: IsolationLevel) => void };
+type Props = { execution: ExecutionStatus | undefined };
 
-const levelOptions: readonly { value: IsolationLevel; title: string; description: string }[] = [
+type PlatformBackend = { id: Exclude<BackendKind, "unsupported">; platform: string; mechanism: string; detail: string };
+
+/** How each OS backend isolates processes (the enforcement matrix in crates/sandbox/README.md). */
+const platformBackends: readonly PlatformBackend[] = [
   {
-    value: "direct",
-    title: "Direct",
-    description: "Runs as your user account with no confinement, only with explicit consent. For trusted, one-off work.",
+    id: "windows_job_object",
+    platform: "Windows",
+    mechanism: "Job Objects",
+    detail:
+      "Each process tree runs in a Job Object with a cleared environment; process, memory, and CPU limits are watchdog-enforced. No filesystem or network confinement yet, so the strongest level is Brokered.",
   },
   {
-    value: "brokered",
-    title: "Brokered",
-    description: "Sensitive actions go through the broker; processes get a cleared environment, a killable process tree, and limits.",
+    id: "linux_landlock",
+    platform: "Linux",
+    mechanism: "Landlock + namespaces",
+    detail: "Landlock filesystem rules (Linux 6.2+), rlimits, and private user and network namespaces where the kernel allows; up to Restricted.",
   },
   {
-    value: "restricted",
-    title: "Restricted",
-    description: "Adds native OS confinement of file reads and writes to the workspace mounts.",
-  },
-  {
-    value: "ephemeral",
-    title: "Ephemeral",
-    description: "A disposable isolated environment. No backend implements it yet, so requests are refused.",
+    id: "macos_seatbelt",
+    platform: "macOS",
+    mechanism: "Seatbelt",
+    detail: "A sandbox-exec profile that denies writes outside the mounts and network when requested, plus rlimits; up to Brokered.",
   },
 ];
 
-const backendIcons = { windows_job_object: MonitorIcon, linux_landlock: ServerIcon, macos_seatbelt: LaptopIcon, unsupported: ServerIcon } as const;
+const backendIcons = { windows_job_object: MonitorIcon, linux_landlock: ServerIcon, macos_seatbelt: LaptopIcon } as const;
 
 const columns: readonly DataTableColumn<Capability>[] = [
   { key: "requirement", header: "Protection", rowHeader: true, render: (row) => requirementLabels[row.requirement] },
@@ -44,46 +45,25 @@ const columns: readonly DataTableColumn<Capability>[] = [
     render: (row) => <StatusIndicator tone={enforcementTone(row.enforcement)} label={enforcementLabel(row.enforcement)} />,
   },
   { key: "detail", header: "How", render: (row) => enforcementDetail(row.enforcement) },
-  { key: "limitations", header: "Known gaps", render: (row) => row.limitations?.join(" ") ?? "None stated" },
+  { key: "limitations", header: "Known gaps", render: (row) => row.limitations?.join(" ") || "None stated" },
 ];
 
-function levelChoices(capabilities: BackendCapabilities | undefined): readonly ChoiceCardOption<IsolationLevel>[] {
-  const maxRank = capabilities?.max_level ? rankOf(capabilities.max_level) : -1;
-  return levelOptions.map((option) => {
-    const enforceable = capabilities ? rankOf(option.value) <= maxRank : true;
-    return {
-      ...option,
-      title: levelLabel(option.value),
-      disabled: !enforceable,
-      meta:
-        option.value === "direct" ? (
-          <Badge tone="neutral" icon={<AlertTriangleIcon size={14} />}>
-            Not recommended
-          </Badge>
-        ) : !enforceable ? (
-          <Badge tone="neutral">Not enforceable here</Badge>
-        ) : option.value === capabilities?.max_level ? (
-          <Badge tone="accent">Strongest here</Badge>
-        ) : undefined,
-    };
-  });
-}
+const enforced = (capabilities: readonly Capability[], requirement: Requirement): boolean =>
+  capabilities.find((capability) => capability.requirement === requirement)?.enforcement.state === "enforced";
 
-/** Sandbox and policies: the live capability report of this host, the level choice, and the sample policy rules. */
-export function SandboxPanel({ isolation, onIsolationChange }: Props) {
-  const notify = useToast();
+/**
+ * Sandbox and policies: the live capability report of this computer (what it can enforce, not the
+ * scope of every process), warnings for the protections it lacks, the platform backends, and the
+ * policy controls that exist.
+ */
+export function SandboxPanel({ execution }: Props) {
   const sandbox = useSandboxCapabilities();
   const report = sandbox.data;
-
-  const changeIsolation = (level: IsolationLevel) => {
-    onIsolationChange(level);
-    notify(
-      level === "direct"
-        ? "Preview: Direct runs commands as your user without confinement. The choice is not saved until the policy service is connected."
-        : `Preview: ${levelLabel(level)} selected for this session only; the policy service will apply it once connected.`,
-      level === "direct" ? "danger" : "info",
-    );
-  };
+  const filesystemConfined =
+    report &&
+    enforced(report.capabilities, "filesystem_read_confinement") &&
+    enforced(report.capabilities, "filesystem_write_confinement");
+  const networkDenied = report && enforced(report.capabilities, "network_deny");
 
   return (
     <Stack gap={10}>
@@ -93,7 +73,7 @@ export function SandboxPanel({ isolation, onIsolationChange }: Props) {
             title="This computer"
             meta={report ? `${report.backend.replace(/_/g, " ")} · capability report v${report.version}` : undefined}
             actions={
-              <Button variant="ghost" size="md" icon={<RefreshIcon />} onClick={sandbox.refetch}>
+              <Button variant="ghost" size="md" icon={<RefreshIcon />} disabled={sandbox.loading} onClick={sandbox.refetch}>
                 Probe again
               </Button>
             }
@@ -106,8 +86,21 @@ export function SandboxPanel({ isolation, onIsolationChange }: Props) {
                   The sandbox helper is missing ({report.helper.reason}), so no managed process can start. It ships next to aidexd.
                 </Notice>
               ) : null}
+              {!filesystemConfined ? (
+                <Notice tone="warning">
+                  Commands are not confined to the project's files on this computer. File tools still stay inside the selected
+                  project, but a process running with Full access can reach the rest of the drive and computer.
+                </Notice>
+              ) : null}
+              {!networkDenied ? (
+                <Notice tone="warning">
+                  Processes are not kept off the network on this computer. Offline mode (Overview) stops AiDEX's own network
+                  requests, not those of a process.
+                </Notice>
+              ) : null}
               <KeyValueList
                 items={[
+                  { label: "System", value: osLabel(report.os) },
                   { label: "Strongest level", value: report.max_level ? levelLabel(report.max_level) : "None (nothing can launch)" },
                   { label: "Helper", value: report.helper.state === "available" ? report.helper.path : `Missing: ${report.helper.path}` },
                   ...(report.facts?.length ? [{ label: "Probe facts", value: report.facts.join(", ") }] : []),
@@ -120,6 +113,11 @@ export function SandboxPanel({ isolation, onIsolationChange }: Props) {
                 rows={report.capabilities}
                 rowKey={(row) => row.requirement}
               />
+              <Text tone="secondary">
+                This is what the computer can enforce, not the protection every process has. Isolation fails closed: if a
+                requested level cannot be enforced, the broker refuses the action instead of running it with weaker isolation.
+                External runtimes run with Full access and use their own tools.
+              </Text>
             </>
           ) : sandbox.loading ? (
             <Text tone="secondary">Probing the sandbox backend…</Text>
@@ -129,27 +127,9 @@ export function SandboxPanel({ isolation, onIsolationChange }: Props) {
 
       <section>
         <Stack gap={4}>
-          <SectionHeader title="Isolation level" meta="Session preview" />
-          <ChoiceCardGroup
-            label="Isolation level"
-            labelVisibility="hidden"
-            columns={2}
-            options={levelChoices(report)}
-            value={isolation}
-            onValueChange={changeIsolation}
-          />
-          <Text tone="secondary">
-            Isolation fails closed. If this computer cannot enforce a requested level, the broker refuses the action instead of
-            running it with weaker isolation.
-          </Text>
-        </Stack>
-      </section>
-
-      <section>
-        <Stack gap={4}>
           <SectionHeader title="Platform backends" />
           <List>
-            {sandboxBackends.map((backend) => {
+            {platformBackends.map((backend) => {
               const Icon = backendIcons[backend.id];
               const isHost = backend.id === report?.backend;
               return (
@@ -166,7 +146,7 @@ export function SandboxPanel({ isolation, onIsolationChange }: Props) {
         </Stack>
       </section>
 
-      <PolicyRules />
+      <PolicyRules execution={execution} />
     </Stack>
   );
 }

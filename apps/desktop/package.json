@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev --turbopack --hostname 127.0.0.1 --port 3311",
     "build": "next build && tsc --noEmit",
+    "test": "bun test src",
     "tauri": "tauri"
   },
   "dependencies": {
