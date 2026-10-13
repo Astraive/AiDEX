@@ -3,6 +3,7 @@ use crate::{
     broker::{Broker, Prepared},
     extensions::{Extensions, NoExtensions},
     native_tools::{ExtensionPlan, McpTarget},
+    runtimes::RuntimeLaunch,
 };
 use aidex_core::{CancelToken, EntityId, WorkspacePath};
 use aidex_events::{EventKind, EventScope, EventSink};
@@ -152,7 +153,9 @@ impl NativeEngine {
     /// `context_too_large_for_runtime:`, and the store's attachment reasons
     /// (`attachment_unavailable:` for unknown, foreign, sent, or duplicated
     /// ids and for attachments on a child run, `too_large:`). Nothing is
-    /// stored when a check fails. A command id the session already records
+    /// stored when one of these checks fails; an external runtime's policy,
+    /// request, or validation refusal, checked once the run is stored,
+    /// leaves it `failed`. A command id the session already records
     /// skips the checks and returns its original run (or a fingerprint
     /// conflict). External runtimes receive the text unchanged and ignore
     /// skills and web search.
@@ -214,10 +217,26 @@ impl NativeEngine {
                 ));
             }
         }
+        // A new root message continues the conversation's native thread only
+        // when the saved reference is bound to a native branch and snapshot;
+        // everything else (and a refused resume) replays the transcript.
+        let mut runtime_launch = RuntimeLaunch::Start;
         if external {
-            let runtime = self.runtime_for(&s.configuration)?;
+            let descriptor = self.runtime_for(&s.configuration)?.descriptor();
+            if parent.is_none()
+                && descriptor.supports_resume
+                && s.runtime_ref.as_ref().is_some_and(is_resumable_reference)
+            {
+                runtime_launch = RuntimeLaunch::FollowUp;
+            }
             if !retry {
-                self.check_runtime_context(&s, &runtime.descriptor(), content, parent.is_some())?;
+                self.check_runtime_context(
+                    &s,
+                    &descriptor,
+                    content,
+                    parent.is_some(),
+                    runtime_launch.operation(),
+                )?;
             }
         } else {
             let provider = aidex_providers::ProviderId::new(&s.configuration.provider_id)
@@ -281,32 +300,40 @@ impl NativeEngine {
             self.remember_attachments(&r.id, bytes);
         }
         if external && r.status == RunStatus::Pending {
-            let request = self.runtime_request(&r, RuntimeOperation::Start)?;
-            if let Err(error) = self.runtime_for(&s.configuration)?.validate(&request) {
-                self.transition(&r.id, RunStatus::Failed, Some(error.to_string()))?;
-                return Err(error.to_string());
+            // The run is stored now: a refusal (policy, request, validation)
+            // fails it instead of leaving it pending.
+            match self.check_launch(&r, &s.configuration, runtime_launch) {
+                Ok(launch) => runtime_launch = launch,
+                Err(error) => {
+                    self.transition(
+                        &r.id,
+                        RunStatus::Failed,
+                        Some(aidex_events::redact_text(&error).into_owned()),
+                    )?;
+                    return Err(error);
+                }
             }
         }
         if r.status == RunStatus::Pending
-            && let Err(error) = self.launch(&r)
+            && let Err(error) = self.launch_operation(&r, runtime_launch)
         {
             self.forget_attachments(&r.id);
             return Err(error);
         }
         Ok(r)
     }
-    /// Refuse an external-runtime run before anything is stored when the
-    /// conversation it would receive exceeds the runtime's bounds: more than
-    /// 1 MiB of message text, a prompt frame over 1 MiB, or, for runtimes
-    /// that take the prompt as one command-line argument (Claude Code,
-    /// Cursor), more than this platform allows in one argument
-    /// ([`argv_limit_exceeded`]).
+    /// Refuse an external-runtime run before anything is stored when what it
+    /// would send exceeds the runtime's bounds ([`check_runtime_bounds`]): the
+    /// whole conversation for `Start`, and for `Resume` only the new message,
+    /// which is all a resumed native thread receives
+    /// ([`resume_messages`]).
     fn check_runtime_context(
         &self,
         s: &SessionDetail,
         runtime: &RuntimeDescriptor,
         content: &str,
         child: bool,
+        operation: RuntimeOperation,
     ) -> Result<(), String> {
         let mut messages = if child {
             Vec::new()
@@ -327,35 +354,10 @@ impl NativeEngine {
             });
             crate::attachments::placeholders_only(&mut messages, &turn, &runtime.name);
         }
-        let refuse = |detail: String| Err(format!("{CONTEXT_TOO_LARGE_FOR_RUNTIME}: {detail}"));
-        let text: usize = messages.iter().map(|m| m.content.len()).sum();
-        if text > RUNTIME_TEXT_BYTES {
-            return refuse(format!(
-                "This conversation is too long for {} (at most 1 MiB of messages). Continue in a \
-                 new conversation or with an AiDEX native model.",
-                runtime.name
-            ));
+        if operation == RuntimeOperation::Resume {
+            resume_messages(&mut messages);
         }
-        let prompt = runtime_prompt(&s.configuration.instructions, &messages);
-        let frame = serde_json::to_string(&prompt).map_or(usize::MAX, |json| json.len());
-        if frame.saturating_add(RUNTIME_FRAME_RESERVE) > RUNTIME_FRAME_BYTES {
-            return refuse(format!(
-                "This conversation is too long for {} (its request would exceed 1 MiB). Continue \
-                 in a new conversation or with an AiDEX native model.",
-                runtime.name
-            ));
-        }
-        if ARGV_RUNTIMES.contains(&runtime.name.as_str())
-            && let Some(limit) = argv_limit_exceeded(ArgvPlatform::HOST, &prompt)
-        {
-            return refuse(format!(
-                "This conversation is too long for {}, which receives it as one command-line \
-                 argument (at most {limit} on this system). Continue in a new conversation or \
-                 with an AiDEX native model.",
-                runtime.name
-            ));
-        }
-        Ok(())
+        check_runtime_bounds(&runtime.name, &s.configuration.instructions, &messages)
     }
     /// Deduplicate and validate invoked skills and the web switch.
     fn check_options(
@@ -401,14 +403,15 @@ impl NativeEngine {
         })
     }
     pub(crate) fn launch(self: &Arc<Self>, run: &Run) -> Result<(), String> {
-        self.launch_with(run, None, RuntimeOperation::Start)
+        self.launch_with(run, None, RuntimeLaunch::Start)
     }
+    /// [`launch`](Self::launch) telling an external runtime what to do.
     pub(crate) fn launch_operation(
         self: &Arc<Self>,
         run: &Run,
-        operation: RuntimeOperation,
+        launch: RuntimeLaunch,
     ) -> Result<(), String> {
-        self.launch_with(run, None, operation)
+        self.launch_with(run, None, launch)
     }
     fn launch_with(
         self: &Arc<Self>,
@@ -418,8 +421,18 @@ impl NativeEngine {
             aidex_providers::ToolCall,
             aidex_tools::PermitIssuer,
         )>,
-        operation: RuntimeOperation,
+        launch: RuntimeLaunch,
     ) -> Result<(), String> {
+        // A finished, cancelled, or interrupted run continues only through an
+        // explicit `resume`, which makes it pending first. (A run that cannot
+        // be read here fails in its thread.)
+        if self
+            .store
+            .run(&run.id)
+            .is_ok_and(|stored| !stored.status.active())
+        {
+            return Err("cannot launch a run that is no longer active".into());
+        }
         let mut live = relock(&self.live);
         if live.get(&run.id).is_some_and(|r| r.executing) {
             return Ok(());
@@ -451,6 +464,7 @@ impl NativeEngine {
                 // Last resort: a panic anywhere in the run (a provider, an
                 // extension, a runtime) fails the run instead of unwinding
                 // past the bookkeeping below and leaving it running forever.
+                // `Ok(true)`: an external runtime paused for approval.
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     match prelude {
                         Some((PendingPlan::Tool(prepared), call, issuer)) => {
@@ -468,14 +482,15 @@ impl NativeEngine {
                         .as_deref()
                         .is_some_and(|id| id != "native")
                     {
-                        engine.execute_runtime(&run.id, operation, &token)
+                        engine.execute_runtime(&run.id, launch, &token)
                     } else {
-                        engine.pump(&run.id, &token, &tool)
+                        engine.pump(&run.id, &token, &tool).map(|()| false)
                     }
                 }))
                 .unwrap_or_else(|_| Err(RUN_CRASHED.into()));
                 // Attachment bytes live only while a thread works on the run.
                 engine.forget_attachments(&run.id);
+                let paused = matches!(result, Ok(true));
                 if let Err(error) = result {
                     let status = if token.is_cancelled() {
                         RunStatus::Cancelled
@@ -492,48 +507,46 @@ impl NativeEngine {
                         )
                     }));
                 }
+                // A paused runtime keeps its entry (`execute_runtime` marked
+                // it no longer executing before the pause was saved), without
+                // reading the store again: a vault locked meanwhile must not
+                // drop a process that may still hold credentials. A cancel
+                // that wins the race removes it once the run is cancelled.
                 let mut live = relock(&engine.live);
-                if live
-                    .get(&run.id)
-                    .is_some_and(|r| r.generation == generation)
+                if !paused
+                    && live
+                        .get(&run.id)
+                        .is_some_and(|r| r.generation == generation)
                 {
-                    let paused_external = engine
-                        .store
-                        .run(&run.id)
-                        .ok()
-                        .is_some_and(|r| r.status == RunStatus::WaitingApproval)
-                        && engine.store.get(&run.session_id).ok().is_some_and(|s| {
-                            s.configuration
-                                .runtime_id
-                                .as_deref()
-                                .is_some_and(|id| id != "native")
-                        });
-                    if paused_external {
-                        if let Some(r) = live.get_mut(&run.id) {
-                            r.executing = false;
-                        }
-                    } else {
-                        live.remove(&run.id);
-                    }
+                    live.remove(&run.id);
                 }
             })
             .map_err(|e| e.to_string())?;
         Ok(())
     }
     pub(crate) fn emit(&self, session: &str, event: EventKind) {
-        if let Ok(s) = self.store.get(session) {
-            let workspace = s
-                .configuration
-                .workspace_id
-                .unwrap_or_else(|| "workspace_chat".into());
-            if let (Ok(workspace), Ok(session)) = (EntityId::new(workspace), EntityId::new(session))
-            {
-                let _ = self
-                    .events
-                    .emit(EventScope::session(workspace, session), event);
-            }
+        if let Some(scope) = self.event_scope(session) {
+            let _ = self.events.emit(scope, event);
         }
     }
+    /// The scope of a session's events: its workspace, or the chat
+    /// workspace. `None` when the session cannot be read.
+    pub(crate) fn event_scope(&self, session: &str) -> Option<EventScope> {
+        let s = self.store.get(session).ok()?;
+        let workspace = s
+            .configuration
+            .workspace_id
+            .unwrap_or_else(|| "workspace_chat".into());
+        Some(EventScope::session(
+            EntityId::new(workspace).ok()?,
+            EntityId::new(session).ok()?,
+        ))
+    }
+    /// Move an active run to `status`. A run that is no longer active keeps
+    /// its state and emits nothing: only [`resume`](Self::resume) moves an
+    /// interrupted run on. Failing, cancelling, or interrupting a run expires
+    /// its pending approvals and answers its pending tool calls, and a failing
+    /// parent cancels its active children first.
     pub(crate) fn transition(
         &self,
         id: &str,
@@ -541,28 +554,47 @@ impl NativeEngine {
         error: Option<String>,
     ) -> Result<Run, String> {
         let r = self.store.run(id)?;
-        let result = self.store.update(&r.session_id, |s| {
+        if status == RunStatus::Failed && r.status.active() {
+            self.cancel_children(&r.session_id, id)?;
+        }
+        let (result, changed) = self.store.update(&r.session_id, |s| {
             let r = s
                 .runs
                 .iter_mut()
                 .find(|r| r.id == id)
                 .ok_or("run not found")?;
-            if r.status == RunStatus::Cancelled && status != RunStatus::Cancelled {
-                return Ok(r.clone());
+            if !r.status.active() {
+                return Ok((r.clone(), false));
             }
             r.status = status;
             r.error = error;
             r.updated_at = now();
-            if matches!(status,RunStatus::Failed|RunStatus::Cancelled){
-                for approval in &mut s.approvals{if approval.run_id==id&&approval.status=="pending"{approval.status="expired".into();}}
-                for call in r.pending_calls.drain(..){
-                    let message=aidex_providers::ChatMessage::tool_result(&call.id,"Tool execution did not complete successfully. Inspect the workspace before retrying; effects may be unknown after interruption.");
+            if matches!(
+                status,
+                RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted
+            ) {
+                for approval in &mut s.approvals {
+                    if approval.run_id == id && approval.status == "pending" {
+                        approval.status = "expired".into();
+                    }
+                }
+                for call in r.pending_calls.drain(..) {
+                    let message = aidex_providers::ChatMessage::tool_result(
+                        &call.id,
+                        "Tool execution did not complete successfully. Inspect the workspace \
+                         before retrying; effects may be unknown after interruption.",
+                    );
                     r.transcript.push(message.clone());
-                    if r.parent_run_id.is_none(){s.messages.push(message);}
+                    if r.parent_run_id.is_none() {
+                        s.messages.push(message);
+                    }
                 }
             }
-            Ok(r.clone())
+            Ok((r.clone(), true))
         })?;
+        if !changed {
+            return Ok(result);
+        }
         if !result.status.active() {
             self.forget_offer(id);
         }
@@ -608,7 +640,7 @@ impl NativeEngine {
         if command.is_empty() || command.len() > 128 {
             return Err("approval command id is required".into());
         }
-        let guard = relock(&self.operations);
+        let _guard = relock(&self.operations);
         let approval = self
             .approvals(None)?
             .into_iter()
@@ -640,18 +672,28 @@ impl NativeEngine {
             .first()
             .cloned()
             .ok_or("approval has no pending call")?;
+        // Checked again where the decision is recorded: the run may have been
+        // cancelled or interrupted, and the approval expired, since the
+        // checks above.
         self.store.update(&run.session_id, |s| {
+            let waiting = s
+                .runs
+                .iter_mut()
+                .find(|r| r.id == run.id)
+                .ok_or("run not found")?;
+            if waiting.status != RunStatus::WaitingApproval {
+                return Err("approval no longer has a waiting run".into());
+            }
             let a = s
                 .approvals
                 .iter_mut()
                 .find(|a| a.id == id)
                 .ok_or("approval not found")?;
+            if a.status != "pending" || a.fingerprint != fingerprint {
+                return Err("approval changed or expired".into());
+            }
             a.status = if approved { "approved" } else { "denied" }.into();
-            s.runs
-                .iter_mut()
-                .find(|r| r.id == run.id)
-                .ok_or("run not found")?
-                .status = RunStatus::Running;
+            waiting.status = RunStatus::Running;
             Ok(())
         })?;
         if approved {
@@ -671,7 +713,7 @@ impl NativeEngine {
                     call,
                     aidex_tools::PermitIssuer::Approval { approval_id },
                 )),
-                RuntimeOperation::Approval,
+                RuntimeLaunch::Approval,
             )?;
             return Ok(current);
         } else {
@@ -691,7 +733,8 @@ impl NativeEngine {
             );
             self.append_result(&run.id, &call.id, "Tool execution denied by user.".into())?;
         }
-        drop(guard);
+        // The lock is held through the launch, so no reconciliation sees the
+        // running run without its thread.
         let r = self.store.run(&run.id)?;
         self.launch(&r)?;
         Ok(r)
@@ -701,24 +744,46 @@ impl NativeEngine {
         if !r.status.active() {
             return Ok(r);
         }
-        if let Some(live) = relock(&self.live).get(id) {
-            live.provider.cancel();
-            live.tool.cancel();
+        // A runtime paused for approval has no thread left to drop its entry,
+        // so it is dropped here once the run is cancelled, also when it
+        // paused while this cancel ran. Until then it keeps the cancelled
+        // tokens: an approval or resume launched meanwhile reuses them (or is
+        // refused once the run is cancelled), and a cancel that cannot be
+        // saved leaves the entry to `reconcile_after_unlock`.
+        let generation = relock(&self.live).get(id).map(|entry| {
+            entry.provider.cancel();
+            entry.tool.cancel();
+            entry.generation.clone()
+        });
+        self.cancel_children(&r.session_id, id)?;
+        let cancelled = self.transition(id, RunStatus::Cancelled, None)?;
+        if let Some(generation) = generation {
+            let mut live = relock(&self.live);
+            if live
+                .get(id)
+                .is_some_and(|entry| !entry.executing && entry.generation == generation)
+            {
+                live.remove(id);
+            }
         }
+        Ok(cancelled)
+    }
+    /// Cancel every child of `parent` that is still active.
+    fn cancel_children(&self, session: &str, parent: &str) -> Result<(), String> {
         let children = self
             .store
-            .get(&r.session_id)?
+            .get(session)?
             .runs
             .into_iter()
-            .filter(|r| r.parent_run_id.as_deref() == Some(id))
+            .filter(|r| r.parent_run_id.as_deref() == Some(parent) && r.status.active())
             .collect::<Vec<_>>();
         for child in children {
             self.cancel(&child.id)?;
         }
-        self.transition(id, RunStatus::Cancelled, None)
+        Ok(())
     }
     pub fn resume(self: &Arc<Self>, id: &str) -> Result<Run, String> {
-        let guard = relock(&self.operations);
+        let _guard = relock(&self.operations);
         let r = self.store.run(id)?;
         let configuration = self.store.get(&r.session_id)?.configuration;
         let external = configuration
@@ -726,8 +791,12 @@ impl NativeEngine {
             .as_deref()
             .is_some_and(|id| id != "native");
         if external {
+            // Resuming continues this run's own native thread; replaying its
+            // conversation instead could repeat effects.
             let runtime = self.runtime_for(&configuration)?;
-            if !runtime.descriptor().supports_resume || r.runtime_ref.is_none() {
+            if !runtime.descriptor().supports_resume
+                || !r.runtime_ref.as_ref().is_some_and(is_resumable_reference)
+            {
                 return Err(
                     "selected runtime cannot safely resume without a saved protocol reference"
                         .into(),
@@ -764,10 +833,11 @@ impl NativeEngine {
             run.error = None;
             Ok(())
         })?;
-        drop(guard);
+        // The lock is held through the launch, so no reconciliation sees the
+        // pending run without its thread.
         let r = self.store.run(id)?;
         if external {
-            self.launch_operation(&r, RuntimeOperation::Resume)?;
+            self.launch_operation(&r, RuntimeLaunch::Resume)?;
         } else {
             self.launch(&r)?;
         }
@@ -894,6 +964,10 @@ impl NativeEngine {
     }
     pub fn cancel_all(&self) {
         self.forget_all_attachments();
+        // No held plan may run after this, even when a cancelled run's final
+        // state cannot be saved (a locked vault): `reconcile_after_unlock`
+        // then interrupts its run.
+        relock(&self.pending).clear();
         if let Ok(runs) = self.store.run_summaries() {
             for run in runs {
                 if run.status.active() {
@@ -911,6 +985,69 @@ impl NativeEngine {
             .registry()
             .terminate_all(aidex_sandbox::StopReason::Cancelled);
         self.forget_all_attachments();
+    }
+    /// Whether any run has a working thread, or an external runtime paused
+    /// for approval (its process may still hold credentials).
+    pub fn has_active(&self) -> bool {
+        !relock(&self.live).is_empty()
+    }
+    /// Settle runs whose final state could not be saved while the vault was
+    /// locked. Every active run with no working thread, with a cancelled one,
+    /// or waiting on a native approval whose plan is gone becomes
+    /// `interrupted`, which expires its approvals. Nothing is continued: an
+    /// interrupted run needs an explicit `resume`. A run that cannot be
+    /// settled does not stop the others; the first such error is returned.
+    pub fn reconcile_after_unlock(&self) -> Result<(), String> {
+        let _guard = relock(&self.operations);
+        let mut first_error = None;
+        for summary in self.store.run_summaries()? {
+            if summary.status.active()
+                && let Err(error) = self.reconcile_run(&summary)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+    fn reconcile_run(&self, summary: &RunSummary) -> Result<(), String> {
+        let id = summary.id.as_str();
+        let thread = relock(&self.live)
+            .get(id)
+            .map(|live| live.provider.is_stopped() || live.tool.is_cancelled());
+        let approvals = self
+            .store
+            .get(&summary.session_id)?
+            .approvals
+            .into_iter()
+            .filter(|a| a.run_id == id)
+            .collect::<Vec<_>>();
+        let stopped = match thread {
+            Some(cancelled) => cancelled,
+            None => {
+                let pending = relock(&self.pending);
+                !approvals.iter().any(|a| {
+                    a.status == "pending" && a.runtime_id.is_none() && pending.contains_key(&a.id)
+                })
+            }
+        };
+        if !stopped {
+            return Ok(());
+        }
+        self.transition(
+            id,
+            RunStatus::Interrupted,
+            Some(
+                "Execution stopped while private records were locked; explicit continuation is \
+                 required"
+                    .into(),
+            ),
+        )?;
+        relock(&self.pending).retain(|approval, _| approvals.iter().all(|a| a.id != *approval));
+        let mut live = relock(&self.live);
+        if live.get(id).is_some_and(|entry| !entry.executing) {
+            live.remove(id);
+        }
+        Ok(())
     }
 }
 
@@ -980,6 +1117,56 @@ impl ArgvPlatform {
     } else {
         Self::Other
     };
+}
+
+/// Refuse (`context_too_large_for_runtime`) `messages` that exceed what the
+/// runtime named `runtime` can receive with `instructions`: more than 1 MiB
+/// of message text, a prompt frame over 1 MiB, or, for runtimes that take the
+/// prompt as one command-line argument (Claude Code, Cursor), more than this
+/// platform allows in one argument ([`argv_limit_exceeded`]).
+pub(crate) fn check_runtime_bounds(
+    runtime: &str,
+    instructions: &str,
+    messages: &[aidex_providers::ChatMessage],
+) -> Result<(), String> {
+    let refuse = |detail: String| Err(format!("{CONTEXT_TOO_LARGE_FOR_RUNTIME}: {detail}"));
+    let text: usize = messages.iter().map(|m| m.content.len()).sum();
+    if text > RUNTIME_TEXT_BYTES {
+        return refuse(format!(
+            "This conversation is too long for {runtime} (at most 1 MiB of messages). Continue \
+             in a new conversation or with an AiDEX native model."
+        ));
+    }
+    let prompt = runtime_prompt(instructions, messages);
+    let frame = serde_json::to_string(&prompt).map_or(usize::MAX, |json| json.len());
+    if frame.saturating_add(RUNTIME_FRAME_RESERVE) > RUNTIME_FRAME_BYTES {
+        return refuse(format!(
+            "This conversation is too long for {runtime} (its request would exceed 1 MiB). \
+             Continue in a new conversation or with an AiDEX native model."
+        ));
+    }
+    if ARGV_RUNTIMES.contains(&runtime)
+        && let Some(limit) = argv_limit_exceeded(ArgvPlatform::HOST, &prompt)
+    {
+        return refuse(format!(
+            "This conversation is too long for {runtime}, which receives it as one command-line \
+             argument (at most {limit} on this system). Continue in a new conversation or with \
+             an AiDEX native model."
+        ));
+    }
+    Ok(())
+}
+
+/// Keep only what a `Resume` request carries: the messages from the newest
+/// user message on. A resumed native thread already holds the rest, and the
+/// runtime receives just that message (or, resuming the same interrupted run,
+/// only uses it as evidence of the request).
+pub(crate) fn resume_messages(messages: &mut Vec<aidex_providers::ChatMessage>) {
+    let newest = messages
+        .iter()
+        .rposition(|m| m.role == aidex_providers::Role::User)
+        .unwrap_or(0);
+    messages.drain(..newest);
 }
 
 /// The one-argument limit `prompt` exceeds on `platform`, as the refusal

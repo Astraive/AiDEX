@@ -1,6 +1,7 @@
 //! Provider turns and scoped tool exchange; no blind retry of side effects.
 use crate::{
     NativeEngine,
+    broker::PrepareError,
     engine::{PendingPlan, relock},
     inference::Turn,
     native_tools::{AGENT_RESULT, AGENT_SPAWN},
@@ -10,7 +11,7 @@ use aidex_events::{EventKind, Outcome};
 use aidex_native_sessions::*;
 use aidex_providers::{ChatMessage, ChatRequest, ModelId, ToolCallSupport, ToolChoice, ToolSpec};
 use aidex_tools::PermitIssuer;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 /// What an approval shows the user and binds to.
 pub(crate) struct ApprovalRequest {
@@ -161,7 +162,21 @@ impl NativeEngine {
         if s.configuration.mode != Mode::Agent {
             return Err("tools are unavailable in chat and plan modes".into());
         }
-        let mut prepared = self.broker.prepare(s, call)?;
+        let mut prepared = match self.broker.prepare(s, call) {
+            Ok(prepared) => prepared,
+            // Nothing started: the model reads why and can correct the call.
+            Err(PrepareError::Repairable { code, message }) => {
+                let result = serde_json::json!({
+                    "is_error": true,
+                    "code": code,
+                    "message": aidex_events::redact_text(&message),
+                    "effect": "not_started",
+                });
+                self.append_result(id, &call.id, result.to_string())?;
+                return Ok(false);
+            }
+            Err(PrepareError::Fatal(error)) => return Err(error),
+        };
         prepared.context.cancel = tool_cancel.clone();
         let call_id = prepared.plan.call_id().clone();
         self.emit(
@@ -284,6 +299,7 @@ impl NativeEngine {
                 nonce: self.run_nonce(&run),
                 index: message_index,
                 attachments,
+                streamed: Default::default(),
             };
             let response = self.infer(&request, &run, &s.configuration, cancel, primary, &turn)?;
             if cancel.is_cancelled() {
@@ -308,6 +324,15 @@ impl NativeEngine {
                 Ok(())
             })?;
             if calls.is_empty() {
+                // Children still working are waited for, and results the run
+                // has not read are added for one more turn, while a step
+                // remains for it. The stored count includes this turn and any
+                // retries it reserved.
+                if self.store.run(id)?.steps < s.configuration.max_steps
+                    && self.settle_children(id, &run.session_id, cancel)?
+                {
+                    continue;
+                }
                 self.transition(id, RunStatus::Completed, None)?;
                 self.emit(
                     &run.session_id,
@@ -331,14 +356,12 @@ impl NativeEngine {
         if run.status == RunStatus::Cancelled {
             return Err("run cancelled".into());
         }
-        self.emit(
-            &run.session_id,
-            EventKind::ToolStarted {
-                call_id: p.plan.call_id().clone(),
-            },
-        );
-        let started = Instant::now();
-        let output = self.broker.execute(p, issuer)?;
+        // The registry publishes `tool.started`, `file.changed`,
+        // `diff.created`, and `tool.completed` or `tool.failed`, and the
+        // launcher `process.*`, all as metadata.
+        let output = self
+            .broker
+            .execute_observed(p, issuer, Arc::clone(&self.events))?;
         let mut checkpoints = vec![];
         for (path, before) in &p.before {
             let relative = WorkspacePath::new(path).map_err(|e| e.to_string())?;
@@ -364,14 +387,12 @@ impl NativeEngine {
             s.checkpoints.extend(checkpoints);
             Ok(())
         })?;
-        self.emit(
-            &run.session_id,
-            EventKind::ToolCompleted {
-                call_id: p.plan.call_id().clone(),
-                duration_ms: started.elapsed().as_millis() as u64,
-                summary: "native tool completed; output in encrypted history".into(),
-            },
-        );
-        self.append_result(id, &call.id, output.content.to_string())
+        // The whole output (content, applied diff, changed paths, warnings)
+        // stays in encrypted history and is what the model reads.
+        self.append_result(
+            id,
+            &call.id,
+            serde_json::to_string(&output).map_err(|e| e.to_string())?,
+        )
     }
 }

@@ -1,14 +1,17 @@
 //! Native ownership of execution permits and the tool registry.
-use crate::{extensions::Extensions, launcher::NativeLauncher};
+use crate::{extensions::Extensions, launcher::NativeLauncher, telemetry::ToolEventSink};
 use aidex_core::{EntityId, WorkspacePath};
-use aidex_events::NullEventSink;
+use aidex_events::{EventScope, EventSink, NullEventSink};
 use aidex_native_sessions::{PermissionMode, SessionDetail};
 use aidex_policy::{
     EvaluationContext, HostTrust, NetworkMode, PolicySet, PrivacyMode, Profile, ProjectRules,
     evaluate,
 };
 use aidex_sandbox::{Sandbox, SandboxLevel};
-use aidex_tools::{ExecutionPermit, PermitIssuer, ToolContext, ToolOutput, ToolPlan, ToolRegistry};
+use aidex_tools::{
+    ExecutionPermit, PermitIssuer, PlanFingerprint, ToolContext, ToolError, ToolOutput, ToolPlan,
+    ToolRegistry,
+};
 use aidex_workspace::WorkspaceRegistry;
 use std::{
     path::{Path, PathBuf},
@@ -23,6 +26,70 @@ pub(crate) struct Broker {
     /// planned network access is evaluated under.
     extensions: Arc<dyn Extensions>,
 }
+/// Why a model's tool call could not be planned.
+#[derive(Debug)]
+pub(crate) enum PrepareError {
+    /// The call is malformed in a way the model can correct (an unknown
+    /// tool, invalid arguments, a missing file, a patch that does not
+    /// apply). Nothing was started; the model receives the code and message.
+    Repairable { code: String, message: String },
+    /// Anything else (a policy denial, a path outside the workspace, an
+    /// unavailable workspace) fails the run.
+    Fatal(String),
+}
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Repairable { message, .. } | Self::Fatal(message) => f.write_str(message),
+        }
+    }
+}
+impl From<String> for PrepareError {
+    fn from(message: String) -> Self {
+        Self::Fatal(message)
+    }
+}
+impl From<&str> for PrepareError {
+    fn from(message: &str) -> Self {
+        Self::Fatal(message.into())
+    }
+}
+impl From<PrepareError> for String {
+    fn from(error: PrepareError) -> Self {
+        error.to_string()
+    }
+}
+impl PrepareError {
+    fn repairable(code: &str, message: &str) -> Self {
+        Self::Repairable {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+/// A planning failure of the tool itself. Errors about the call's own input
+/// or the state of the workspace are repairable; paths outside the
+/// workspace, forbidden or linked targets, and malformed paths are not.
+fn planning_error(error: ToolError) -> PrepareError {
+    let repairable = match &error {
+        ToolError::InvalidInput { reason, .. } => *reason != aidex_tools::InputError::InvalidPath,
+        ToolError::UnknownTool(_)
+        | ToolError::NotFound { .. }
+        | ToolError::WrongKind { .. }
+        | ToolError::TooLarge { .. }
+        | ToolError::Conflict { .. }
+        | ToolError::PatchFailed { .. } => true,
+        _ => false,
+    };
+    if repairable {
+        PrepareError::Repairable {
+            code: error.reason().into(),
+            message: error.to_string(),
+        }
+    } else {
+        PrepareError::Fatal(error.to_string())
+    }
+}
 pub(crate) struct Prepared {
     pub context: ToolContext,
     pub plan: ToolPlan,
@@ -32,6 +99,8 @@ pub(crate) struct Prepared {
     /// The drive settings a plan that reaches the network was evaluated
     /// under; `None` for other plans.
     network: Option<EvaluationContext>,
+    /// The isolation the plan's processes run at.
+    level: SandboxLevel,
 }
 impl Broker {
     pub(crate) fn policy_state(
@@ -134,11 +203,33 @@ impl Broker {
             extensions,
         }
     }
+    /// A process launcher for one plan, publishing its `process.*` events to
+    /// `events`.
+    fn launcher(
+        &self,
+        fingerprint: PlanFingerprint,
+        level: SandboxLevel,
+        events: Arc<dyn EventSink>,
+        scope: EventScope,
+    ) -> Arc<NativeLauncher> {
+        Arc::new(NativeLauncher::new(
+            self.sandbox.clone(),
+            self.scratch.clone(),
+            fingerprint,
+            level,
+            events,
+            scope,
+        ))
+    }
+    /// Plan a model's tool call under the session's permission mode and the
+    /// drive and project policies. The plan's context publishes no events;
+    /// [`execute_observed`](Self::execute_observed) attaches a sink when it
+    /// runs.
     pub fn prepare(
         &self,
         s: &SessionDetail,
         call: &aidex_providers::ToolCall,
-    ) -> Result<Prepared, String> {
+    ) -> Result<Prepared, PrepareError> {
         let workspace = s
             .configuration
             .workspace_id
@@ -155,12 +246,15 @@ impl Broker {
             Arc::new(handle.root().clone()),
             Arc::new(NullEventSink),
         );
-        let tool = self
-            .tools
-            .resolve_model_name(&call.name)
-            .ok_or("unknown native tool")?;
-        let input: serde_json::Value =
-            serde_json::from_str(&call.arguments).map_err(|_| "invalid tool arguments JSON")?;
+        let tool = self.tools.resolve_model_name(&call.name).ok_or_else(|| {
+            PrepareError::repairable(
+                "unknown_tool",
+                "unknown native tool; call one of the offered tools",
+            )
+        })?;
+        let input: serde_json::Value = serde_json::from_str(&call.arguments).map_err(|_| {
+            PrepareError::repairable("invalid_input", "tool arguments are not valid JSON")
+        })?;
         if tool.as_str() == "fs.delete" {
             if input
                 .get("recursive")
@@ -192,7 +286,7 @@ impl Broker {
         let plan = self
             .tools
             .plan(&context, tool, input)
-            .map_err(|e| e.to_string())?;
+            .map_err(planning_error)?;
         let (policies, policy_fingerprint) =
             self.policy_state(Some(&handle.root().display_root()), Some(handle.id()))?;
         let profile = if s.configuration.permission_mode == PermissionMode::FullAccess {
@@ -222,7 +316,7 @@ impl Broker {
         for intent in plan.intents() {
             let d = evaluate(&policies, &evaluation, &intent);
             if d.verdict.is_deny() {
-                return Err(format!("policy denied: {}", d.reason));
+                return Err(PrepareError::Fatal(format!("policy denied: {}", d.reason)));
             }
             if d.rate_limit.is_some() {
                 return Err("rate-limited tools unavailable in native v1".into());
@@ -256,12 +350,12 @@ impl Broker {
         {
             level = level.max(SandboxLevel::Restricted);
         }
-        let launcher = Arc::new(NativeLauncher::new(
-            self.sandbox.clone(),
-            self.scratch.clone(),
+        let launcher = self.launcher(
             plan.fingerprint(),
             level,
-        ));
+            Arc::new(NullEventSink),
+            context.scope(),
+        );
         let context = context.with_launcher(launcher);
         let mut before = vec![];
         for p in &plan.facts().paths {
@@ -292,6 +386,7 @@ impl Broker {
             before,
             policy_fingerprint,
             network,
+            level,
         })
     }
     /// The context network-bearing plans are evaluated under: refused while
@@ -311,7 +406,34 @@ impl Broker {
             network.context.network_mode,
         ))
     }
+    /// Run a prepared plan without publishing events (checkpoint restores,
+    /// automatic prompt context).
     pub fn execute(&self, p: &Prepared, issuer: PermitIssuer) -> Result<ToolOutput, String> {
+        self.execute_in(p, &p.context, issuer)
+    }
+    /// Run a prepared plan, publishing its `tool.*`, `file.changed`,
+    /// `diff.created`, and `process.*` events to `events` as metadata only
+    /// ([`ToolEventSink`]).
+    pub fn execute_observed(
+        &self,
+        p: &Prepared,
+        issuer: PermitIssuer,
+        events: Arc<dyn EventSink>,
+    ) -> Result<ToolOutput, String> {
+        let events: Arc<dyn EventSink> = Arc::new(ToolEventSink::new(events));
+        let mut context = p.context.clone();
+        context.events = Arc::clone(&events);
+        let scope = context.scope();
+        let context =
+            context.with_launcher(self.launcher(p.plan.fingerprint(), p.level, events, scope));
+        self.execute_in(p, &context, issuer)
+    }
+    fn execute_in(
+        &self,
+        p: &Prepared,
+        context: &ToolContext,
+        issuer: PermitIssuer,
+    ) -> Result<ToolOutput, String> {
         let (_, current) = self.policy_state(
             Some(&p.context.root.display_root()),
             Some(&p.context.workspace_id),
@@ -327,11 +449,7 @@ impl Broker {
             return Err("policy changed since tool planning; request a new plan".into());
         }
         self.tools
-            .execute(
-                &p.context,
-                &p.plan,
-                ExecutionPermit::for_plan(&p.plan, issuer),
-            )
+            .execute(context, &p.plan, ExecutionPermit::for_plan(&p.plan, issuer))
             .map_err(|e| e.to_string())
     }
 }

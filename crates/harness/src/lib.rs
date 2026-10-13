@@ -2,6 +2,7 @@
 mod attachments;
 mod broker;
 mod children;
+mod context;
 mod engine;
 mod execution;
 mod extensions;
@@ -9,7 +10,9 @@ mod history;
 mod inference;
 mod native_tools;
 mod prompt;
+mod replay;
 mod runtimes;
+mod telemetry;
 mod untrusted;
 pub use attachments::{ATTACHMENTS_UNSUPPORTED, CONTEXT_TOO_LARGE_FOR_RUNTIME, start_refusal};
 pub use children::ChildResult;

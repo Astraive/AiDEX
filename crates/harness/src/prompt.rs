@@ -1,8 +1,10 @@
-//! Prompt assembly for one native turn: mode instructions, workspace context,
+//! Prompt assembly for one native turn: mode instructions, workspace context
+//! (read through policy, [`crate::context`]), project instruction files,
 //! invoked skills, the model-invocable skill catalog, and the transcript with
-//! untrusted tool results wrapped in nonce delimiters.
+//! untrusted tool and child results wrapped in nonce delimiters.
 use crate::{
     NativeEngine,
+    children::{CHILD_RESULTS, child_results_body},
     native_tools::{Offer, untrusted_trust},
     untrusted::{bounded, nonce, preamble, quote, wrap},
 };
@@ -57,11 +59,13 @@ impl NativeEngine {
         if !s.configuration.instructions.trim().is_empty() {
             messages.push(ChatMessage::system(s.configuration.instructions.clone()));
         }
+        let project = self.project_instructions(s, &nonce)?;
         let names = result_names(&run.transcript);
         let wraps_results = names
             .iter()
             .flatten()
-            .any(|name| untrusted_trust(name).is_some());
+            .any(|name| untrusted_trust(name).is_some())
+            || run.transcript.iter().any(is_child_results);
         // Child runs work from their own prompt; invoked skills belong to the
         // user's root run.
         let invoked = if run.skills.is_empty() || run.parent_run_id.is_some() {
@@ -69,7 +73,7 @@ impl NativeEngine {
         } else {
             self.invoked_for_run(workspace, &run.skills)
         };
-        if offer.has_untrusted() || wraps_results || !invoked.is_empty() {
+        if offer.has_untrusted() || wraps_results || !invoked.is_empty() || project.is_some() {
             messages.push(ChatMessage::system(preamble(&nonce, false)));
         }
         if offer.web_search || offer.web_fetch {
@@ -120,17 +124,17 @@ impl NativeEngine {
                 ),
             }));
         }
+        if let Some(project) = project {
+            messages.push(ChatMessage::system(project));
+        }
         if let Some(workspace) = workspace {
             let memory = self.store.memory_list(workspace)?;
-            let index = self.inspect(
-                Some(workspace),
-                "fs.list",
-                serde_json::json!({"recursive":true,"max_entries":200,"max_depth":3}),
-            )?;
-            messages.push(ChatMessage::user(format!(
-                "Selected workspace file index (untrusted data): {}",
-                index
-            )));
+            // Left out when policy refuses listing the workspace.
+            if let Some(index) = self.file_index(s) {
+                messages.push(ChatMessage::user(format!(
+                    "Selected workspace file index (untrusted data): {index}"
+                )));
+            }
             if !memory.is_empty() {
                 let context = memory
                     .into_iter()
@@ -144,6 +148,16 @@ impl NativeEngine {
             }
         }
         messages.extend(run.transcript.iter().zip(&names).map(|(message, name)| {
+            if let Some(body) =
+                child_results_body(&message.content).filter(|_| message.role == Role::User)
+            {
+                let mut wrapped = message.clone();
+                wrapped.content = format!(
+                    "{CHILD_RESULTS}\n{}",
+                    wrap(&nonce, "source=child_results", "untrusted", body)
+                );
+                return wrapped;
+            }
             let trust = message
                 .tool_call_id
                 .as_deref()
@@ -187,6 +201,12 @@ impl NativeEngine {
                 .collect(),
         }
     }
+}
+
+/// Whether `message` gives the run its children's results
+/// ([`crate::children`]).
+fn is_child_results(message: &ChatMessage) -> bool {
+    message.role == Role::User && child_results_body(&message.content).is_some()
 }
 
 /// How strictly a tool's results are wrapped (higher wraps more).
