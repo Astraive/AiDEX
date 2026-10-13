@@ -16,7 +16,7 @@ use crate::{
 use aidex_events::{EventKind, EventScope};
 use aidex_vault::{
     ConsumerScope, RecoveryKey, SecretBytes, SecretKind, SecretName, SecretPolicy, SecretString,
-    VaultError, VaultErrorKind,
+    VaultError, VaultErrorKind, VaultService,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
@@ -134,6 +134,17 @@ pub struct PassphraseChanged {
 /// Map a vault error to its wire error. Wrong credentials and a locked vault use
 /// `vault_locked` (-32020); `data.reason` carries the stable vault error kind.
 pub fn vault_error(error: &VaultError) -> RpcError {
+    wire_error(error, false)
+}
+
+/// [`vault_error`] for an operation on the unlocked vault. When the error ended the
+/// session (`conflict`, or an uncertain commit of the vault's own header), the vault
+/// is now locked and `data.session_dropped` is `true`: the client must unlock again.
+pub fn vault_session_error(vault: &VaultService, error: &VaultError) -> RpcError {
+    wire_error(error, vault.ends_session(error))
+}
+
+fn wire_error(error: &VaultError, session_dropped: bool) -> RpcError {
     let kind = error.kind();
     let rpc = match kind {
         VaultErrorKind::WrongPassphrase
@@ -141,7 +152,21 @@ pub fn vault_error(error: &VaultError) -> RpcError {
         | VaultErrorKind::Locked => RpcError::new(ErrorCode::VaultLocked, error.to_string()),
         _ => RpcError::service(error.code(), error.to_string()),
     };
-    rpc.with_data(json!({ "reason": kind.as_str() }))
+    let mut data = json!({ "reason": kind.as_str() });
+    if session_dropped {
+        data["session_dropped"] = Value::Bool(true);
+    }
+    rpc.with_data(data)
+}
+
+/// Lock the vault on the user's request (`vault.lock`, `emergency.stop` with
+/// `lock_vault`). Native runs are cancelled first, while the record key is still
+/// available, so they are recorded as cancelled. Ending the session then runs the
+/// daemon's lock cleanup (`services/vault_lock.rs`: uploads aborted, `vault.locked`
+/// recorded once) before this returns.
+pub(crate) fn lock_vault(services: &Services) -> LockOutcome {
+    services.native().cancel_all();
+    services.vault().lock()
 }
 
 /// Decode params whose fields may hold secrets: serde messages such as
@@ -244,19 +269,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let shared = Arc::clone(services);
     router.register(LOCK, move |_context, params| {
         expect_no_params(&params)?;
-        shared.native().cancel_all();
-        // In-flight attachment uploads end with the vault: their partial
-        // sealed files are deleted and later chunks are refused.
-        shared.native().store().abort_all_uploads();
-        let vault_id = shared.vault().status().vault_id;
-        let outcome = shared.vault().lock();
-        if let (true, Some(vault_id)) = (outcome.was_unlocked, vault_id) {
-            record_event(
-                &shared,
-                EventScope::global(),
-                EventKind::VaultLocked { vault_id },
-            )?;
-        }
+        let outcome = lock_vault(&shared);
         to_result(&LockResult {
             state: shared.vault().status().state,
             was_unlocked: outcome.was_unlocked,
@@ -287,7 +300,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         let meta = shared
             .vault()
             .put_secret(&name, kind, value, policy)
-            .map_err(|error| vault_error(&error))?;
+            .map_err(|error| vault_session_error(shared.vault(), &error))?;
         to_result(&meta)
     })?;
 
@@ -297,7 +310,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         let secrets = shared
             .vault()
             .list_secrets()
-            .map_err(|error| vault_error(&error))?;
+            .map_err(|error| vault_session_error(shared.vault(), &error))?;
         to_result(&SecretList { secrets })
     })?;
 
@@ -308,7 +321,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         let deleted = shared
             .vault()
             .delete_secret(&name)
-            .map_err(|error| vault_error(&error))?;
+            .map_err(|error| vault_session_error(shared.vault(), &error))?;
         to_result(&DeleteResult { deleted })
     })?;
 
@@ -324,7 +337,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         shared
             .vault()
             .change_passphrase(old.as_ref(), &new)
-            .map_err(|error| vault_error(&error))?;
+            .map_err(|error| vault_session_error(shared.vault(), &error))?;
         to_result(&PassphraseChanged { changed: true })
     })?;
     Ok(())
@@ -337,7 +350,16 @@ mod tests {
         lifecycle::ShutdownSignal,
         router::{CallContext, ClientInfo},
     };
-    use aidex_vault::KdfParams;
+    use aidex_core::EntityId;
+    use aidex_events::{Cursor, EventFilter};
+    use aidex_vault::{
+        KdfParams, Vault,
+        testing::{WriteFailure, fail_next_write},
+    };
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
 
     const PASSPHRASE: &str = "correct horse battery staple";
     const VALUE: &str = "PLAINTEXT-MARKER-VALUE-91ab";
@@ -494,5 +516,236 @@ mod tests {
         assert_eq!(meta.kind, SecretKind::ApiKey);
         let listed = call(&router, &context, SECRET_LIST, Value::Null).unwrap();
         assert!(!listed.to_string().contains(VALUE));
+    }
+
+    fn init(router: &Router, context: &CallContext) -> EntityId {
+        let init: InitResult = serde_json::from_value(
+            call(router, context, INIT, json!({"passphrase": PASSPHRASE})).unwrap(),
+        )
+        .unwrap();
+        EntityId::new(init.vault_id).unwrap()
+    }
+
+    /// `vault.*` events recorded after `after`.
+    fn vault_events(services: &Services, after: Cursor) -> Vec<EventKind> {
+        let filter = EventFilter::all().with_kind("vault");
+        let page = services.events().replay(&filter, after, 100).unwrap();
+        page.events
+            .into_iter()
+            .map(|envelope| envelope.event)
+            .collect()
+    }
+
+    /// Wait (generously, for slow CI runners) until `count` `vault.*` events were
+    /// recorded after `after`, then check that no further one follows.
+    fn settled_vault_events(services: &Services, after: Cursor, count: usize) -> Vec<EventKind> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while vault_events(services, after).len() < count {
+            assert!(
+                Instant::now() < deadline,
+                "{:?}",
+                vault_events(services, after)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(100));
+        let events = vault_events(services, after);
+        assert_eq!(events.len(), count, "{events:?}");
+        events
+    }
+
+    #[test]
+    fn explicit_locks_record_vault_locked_once_before_returning() {
+        let (_root, services, router, context) = fixture();
+        let vault_id = init(&router, &context);
+        let after = services.events().latest_cursor().unwrap();
+        let first: LockResult =
+            serde_json::from_value(call(&router, &context, LOCK, Value::Null).unwrap()).unwrap();
+        assert!(first.was_unlocked);
+        assert_eq!(
+            vault_events(&services, after),
+            [EventKind::VaultLocked {
+                vault_id: vault_id.clone()
+            }]
+        );
+        let second: LockResult =
+            serde_json::from_value(call(&router, &context, LOCK, Value::Null).unwrap()).unwrap();
+        assert!(!second.was_unlocked);
+        assert_eq!(
+            settled_vault_events(&services, after, 1),
+            [EventKind::VaultLocked { vault_id }]
+        );
+    }
+
+    #[test]
+    fn emergency_stop_with_lock_vault_records_vault_locked_once() {
+        let (_root, services, mut router, context) = fixture();
+        crate::methods::emergency::register(&mut router, &services).unwrap();
+        let vault_id = init(&router, &context);
+        let after = services.events().latest_cursor().unwrap();
+        let stop = || {
+            call(
+                &router,
+                &context,
+                crate::methods::emergency::STOP,
+                json!({"lock_vault": true}),
+            )
+            .unwrap()
+        };
+        assert_eq!(stop()["vault_locked"], true);
+        assert_eq!(services.vault().status().state, VaultState::Locked);
+        // Recorded by the lock cleanup before the call returned, and only there.
+        assert_eq!(
+            vault_events(&services, after),
+            [EventKind::VaultLocked {
+                vault_id: vault_id.clone()
+            }]
+        );
+        // Stopping again with the vault already locked records nothing more.
+        assert_eq!(stop()["vault_locked"], true);
+        assert_eq!(
+            settled_vault_events(&services, after, 1),
+            [EventKind::VaultLocked { vault_id }]
+        );
+    }
+
+    #[test]
+    fn idle_auto_lock_runs_the_lock_cleanup_once() {
+        let (_root, services, router, context) = fixture();
+        let vault_id = init(&router, &context);
+        let after = services.events().latest_cursor().unwrap();
+        services
+            .vault()
+            .set_idle_timeout(Some(Duration::from_millis(50)));
+        assert_eq!(
+            settled_vault_events(&services, after, 1),
+            [EventKind::VaultLocked {
+                vault_id: vault_id.clone()
+            }]
+        );
+        assert_eq!(services.vault().status().state, VaultState::Locked);
+
+        services.vault().set_idle_timeout(None);
+        call(&router, &context, UNLOCK, json!({"passphrase": PASSPHRASE})).unwrap();
+        assert_eq!(
+            vault_events(&services, after),
+            [
+                EventKind::VaultLocked {
+                    vault_id: vault_id.clone()
+                },
+                EventKind::VaultUnlocked { vault_id }
+            ]
+        );
+    }
+
+    #[test]
+    fn dropped_sessions_report_session_dropped_and_run_the_lock_cleanup_once() {
+        let (_root, services, router, context) = fixture();
+        let vault_id = init(&router, &context);
+        call(
+            &router,
+            &context,
+            SECRET_SET,
+            json!({"name": "openai", "value": VALUE, "consumers": ["provider:openai"]}),
+        )
+        .unwrap();
+        let after = services.events().latest_cursor().unwrap();
+        // Another writer commits behind the daemon's session.
+        let mut other = Vault::open(services.vault().dir())
+            .unwrap()
+            .unlock(&SecretString::from(PASSPHRASE.to_owned()))
+            .unwrap();
+        other.delete(&SecretName::new("openai").unwrap()).unwrap();
+        drop(other);
+
+        let conflict =
+            call(&router, &context, SECRET_DELETE, json!({"name": "openai"})).unwrap_err();
+        assert_eq!(
+            conflict.data,
+            Some(json!({"reason": "conflict", "session_dropped": true}))
+        );
+        assert_eq!(
+            settled_vault_events(&services, after, 1),
+            [EventKind::VaultLocked {
+                vault_id: vault_id.clone()
+            }]
+        );
+        // Later calls see a plainly locked vault until the client unlocks again.
+        let locked = call(&router, &context, SECRET_LIST, Value::Null).unwrap_err();
+        assert_eq!(locked.data, Some(json!({"reason": "locked"})));
+        call(&router, &context, UNLOCK, json!({"passphrase": PASSPHRASE})).unwrap();
+        let listed: SecretList =
+            serde_json::from_value(call(&router, &context, SECRET_LIST, Value::Null).unwrap())
+                .unwrap();
+        assert!(listed.secrets.is_empty());
+        assert_eq!(
+            vault_events(&services, after),
+            [
+                EventKind::VaultLocked {
+                    vault_id: vault_id.clone()
+                },
+                EventKind::VaultUnlocked { vault_id }
+            ]
+        );
+    }
+
+    #[test]
+    fn an_uncertain_header_commit_drops_the_session_and_runs_the_lock_cleanup_once() {
+        let (_root, services, router, context) = fixture();
+        let vault_id = init(&router, &context);
+        call(
+            &router,
+            &context,
+            SECRET_SET,
+            json!({"name": "openai", "value": VALUE, "consumers": ["provider:openai"]}),
+        )
+        .unwrap();
+        let after = services.events().latest_cursor().unwrap();
+        // The new header is renamed into place, then syncing its directory fails.
+        fail_next_write(services.vault().dir(), WriteFailure::AfterRename);
+        let uncertain =
+            call(&router, &context, SECRET_DELETE, json!({"name": "openai"})).unwrap_err();
+        assert_eq!(
+            uncertain.data,
+            Some(json!({"reason": "io", "session_dropped": true}))
+        );
+        assert!(!uncertain.message.contains(VALUE));
+        assert_eq!(
+            settled_vault_events(&services, after, 1),
+            [EventKind::VaultLocked { vault_id }]
+        );
+        assert_eq!(services.vault().status().state, VaultState::Locked);
+        let locked = call(&router, &context, SECRET_LIST, Value::Null).unwrap_err();
+        assert_eq!(locked.data, Some(json!({"reason": "locked"})));
+    }
+
+    #[test]
+    fn only_errors_that_ended_the_session_report_session_dropped() {
+        let (root, services, _router, _context) = fixture();
+        let vault = services.vault();
+        let uncertain = |path: std::path::PathBuf| VaultError::CommitUncertain {
+            path,
+            source: std::io::Error::other("directory sync failed"),
+        };
+        let own = uncertain(vault.dir().join("vault.json"));
+        assert_eq!(
+            vault_session_error(vault, &own).data,
+            Some(json!({"reason": "io", "session_dropped": true}))
+        );
+        assert_eq!(vault_error(&own).data, Some(json!({"reason": "io"})));
+        let backup = uncertain(root.path().join("backup").join("vault.json"));
+        assert_eq!(
+            vault_session_error(vault, &backup).data,
+            Some(json!({"reason": "io"})),
+            "a backup destination's uncertain commit leaves the session alone"
+        );
+        assert_eq!(
+            vault_session_error(vault, &VaultError::Conflict).data,
+            Some(json!({"reason": "conflict", "session_dropped": true}))
+        );
+        assert_eq!(
+            vault_session_error(vault, &VaultError::Locked).data,
+            Some(json!({"reason": "locked"}))
+        );
     }
 }

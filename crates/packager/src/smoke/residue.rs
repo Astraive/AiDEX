@@ -6,9 +6,16 @@
 //! cache, and state roots, plus AiDEX-named entries in the system temp directory
 //! (other processes create unrelated temp files concurrently). Writes deeper inside
 //! pre-existing directories and changes to existing entries are not detected.
-//! macOS Preferences and Application Support exclude a finite list of exact
-//! OS-maintained entry names with their expected file types; other entries there
-//! remain fully watched. This audit does not attribute entries to a process.
+//!
+//! macOS services (Siri, Apple Intelligence reporting, remote management, managed
+//! app distribution, ...) create their own state at any time under Apple's
+//! reserved `com.apple.` reverse-DNS namespace. In `~/Library/Preferences`,
+//! `~/Library/Application Support`, and `~/Library/Caches` only, new entries in that
+//! namespace with the type the OS keeps there are therefore not residue (see
+//! [`Watch::is_apple_service_state`]). AiDEX's own identifiers are `dev.aidex.*`;
+//! AiDEX-named entries, other types, symlinks, and the same names in any other
+//! watched directory remain audited. This audit does not attribute entries to a
+//! process.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,10 +34,12 @@ pub enum Watch {
     All,
     /// Only new entries whose name contains `aidex` (case-insensitive).
     AidexNamed,
-    /// All new entries except known OS-maintained regular plists.
+    /// `~/Library/Preferences`: all new entries except regular
+    /// `com.apple.<domain>.plist` files.
     MacosPreferences,
-    /// All new entries except known OS-maintained application data directories.
-    MacosApplicationSupport,
+    /// `~/Library/Application Support` and `~/Library/Caches`: all new entries
+    /// except `com.apple.<domain>` directories.
+    MacosAppData,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,28 +50,37 @@ enum EntryKind {
     Other,
 }
 
+/// Apple's reverse-DNS namespace for OS preference domains and service data.
+const APPLE_NAMESPACE: &str = "com.apple.";
+
 impl Watch {
-    fn is_known_os_entry(self, name: &OsStr, kind: EntryKind) -> bool {
-        matches!(
-            (self, kind, name.to_str()),
-            (
-                Self::MacosPreferences,
-                EntryKind::RegularFile,
-                Some(
-                    "com.apple.siri.ODDI.ExperimentationWorker.plist"
-                        | "com.apple.GenerativeFunctions.GenerativeFunctionsInstrumentation.plist"
-                        | "com.apple.appleintelligencereporting.plist"
-                ),
-            ) | (
-                Self::MacosApplicationSupport,
-                EntryKind::Directory,
-                Some(
-                    "com.apple.RemoteManagementAgent"
-                        | "com.apple.appleintelligencereporting.processing"
-                ),
-            )
-        )
+    /// Whether a new entry is macOS service state: a name in Apple's namespace
+    /// with the file type the OS keeps in this directory. Never true for
+    /// [`Watch::All`], [`Watch::AidexNamed`], symlinks, or non-UTF-8 names.
+    fn is_apple_service_state(self, name: &OsStr, kind: EntryKind) -> bool {
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        let domain = match (self, kind) {
+            (Self::MacosPreferences, EntryKind::RegularFile) => name.strip_suffix(".plist"),
+            (Self::MacosAppData, EntryKind::Directory) => Some(name),
+            _ => None,
+        };
+        domain.is_some_and(is_apple_domain)
     }
+}
+
+/// `com.apple.` (case-sensitive, as Apple's services write it) followed by one or
+/// more non-empty dot-separated labels of ASCII letters, digits, `-`, and `_`.
+fn is_apple_domain(domain: &str) -> bool {
+    domain.strip_prefix(APPLE_NAMESPACE).is_some_and(|labels| {
+        labels.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+    })
 }
 
 /// Entry names mapped to their file type at snapshot time.
@@ -98,12 +116,12 @@ pub fn watched() -> Vec<(PathBuf, Watch)> {
     } else if let Some(home) = &home {
         let xdg = |name: &str, default: &str| var(name).unwrap_or_else(|| home.join(default));
         if cfg!(target_os = "macos") {
-            for sub in ["Application Support", "Caches", "Preferences", "Logs"] {
-                let watch = match sub {
-                    "Preferences" => Watch::MacosPreferences,
-                    "Application Support" => Watch::MacosApplicationSupport,
-                    _ => Watch::All,
-                };
+            for (sub, watch) in [
+                ("Application Support", Watch::MacosAppData),
+                ("Caches", Watch::MacosAppData),
+                ("Preferences", Watch::MacosPreferences),
+                ("Logs", Watch::All),
+            ] {
                 dirs.push((home.join("Library").join(sub), watch));
             }
         } else {
@@ -149,15 +167,17 @@ impl Snapshot {
                 if before.contains_key(name) {
                     continue;
                 }
-                // Background OS services can create these entries during smoke.
-                // Match the directory policy, exact name, and snapshot file type
-                // without following symlinks or exempting a namespace prefix.
-                let os_entry = watch.is_known_os_entry(name, *kind);
                 let named = name
                     .to_string_lossy()
                     .to_ascii_lowercase()
                     .contains("aidex");
-                if (*watch != Watch::AidexNamed || named) && !os_entry {
+                let residue = match watch {
+                    Watch::AidexNamed => named,
+                    // Background macOS services write Apple-namespace state on
+                    // their own schedule; an AiDEX-named entry is never theirs.
+                    _ => named || !watch.is_apple_service_state(name, *kind),
+                };
+                if residue {
                     found.insert(dir.join(name));
                 }
             }
@@ -166,8 +186,8 @@ impl Snapshot {
     }
 }
 
-/// Entry names and their file type at snapshot time. Symlinks, special files, and
-/// unknown types are never eligible for an OS-maintained entry exception.
+/// Entry names and their file type at snapshot time, without following symlinks.
+/// Symlinks, special files, and unknown types are never macOS service state.
 fn list(dir: &Path) -> Option<Entries> {
     let entries = fs::read_dir(dir).ok()?;
     Some(
@@ -189,223 +209,274 @@ fn list(dir: &Path) -> Option<Entries> {
 mod tests {
     use super::*;
 
+    /// Preference plists macOS services created during package smoke runs on
+    /// GitHub's macos-arm64 runners; each one failed a smoke run.
+    const OBSERVED_PREFERENCES: [&str; 5] = [
+        "com.apple.siri.ODDI.ExperimentationWorker.plist",
+        "com.apple.GenerativeFunctions.GenerativeFunctionsInstrumentation.plist",
+        "com.apple.appleintelligencereporting.plist",
+        "com.apple.managedappdistributionagent.plist",
+        "com.apple.remotemanagement.ManagedSettingsSubscriber.plist",
+    ];
+
+    /// Directories the same runs saw in Application Support and Caches.
+    const OBSERVED_APP_DATA: [&str; 3] = [
+        "com.apple.RemoteManagementAgent",
+        "com.apple.appleintelligencereporting.processing",
+        "com.apple.managedappdistributionagent",
+    ];
+
+    #[derive(Clone, Copy)]
+    enum Make {
+        File,
+        Dir,
+    }
+
+    fn make(dir: &Path, name: &str, kind: Make) -> PathBuf {
+        let path = dir.join(name);
+        match kind {
+            Make::File => fs::write(&path, "host write").unwrap(),
+            Make::Dir => fs::create_dir(&path).unwrap(),
+        }
+        path
+    }
+
+    /// Snapshots `dir` under `watch` while a background writer stands in for
+    /// macOS services creating `service` entries and the foreground creates
+    /// `audited`. Returns the residue found and the sorted `audited` paths.
+    fn churn(
+        dir: &Path,
+        watch: Watch,
+        service: &'static [&'static str],
+        service_kind: Make,
+        audited: &[(&str, Make)],
+    ) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let dirs = vec![(dir.to_path_buf(), watch)];
+        let before = Snapshot::take(&dirs);
+        let background_dir = dir.to_path_buf();
+        let background = std::thread::spawn(move || {
+            for name in service {
+                make(&background_dir, name, service_kind);
+            }
+        });
+        let mut expected: Vec<_> = audited
+            .iter()
+            .map(|&(name, kind)| make(dir, name, kind))
+            .collect();
+        // Joining before the second snapshot makes the fixture deterministic.
+        background.join().unwrap();
+        expected.sort();
+        (before.new_entries(&Snapshot::take(&dirs)), expected)
+    }
+
     #[test]
-    fn macos_preferences_background_churn_does_not_hide_host_writes() {
+    fn apple_domains_require_the_exact_namespace_and_label_syntax() {
+        for domain in OBSERVED_PREFERENCES
+            .iter()
+            .map(|name| name.strip_suffix(".plist").unwrap())
+            .chain(OBSERVED_APP_DATA)
+            .chain([
+                "com.apple.knowledge-agent",
+                "com.apple.x_y",
+                "com.apple.a.b.c",
+            ])
+        {
+            assert!(is_apple_domain(domain), "{domain}");
+        }
+        for domain in [
+            "",
+            "com.apple",
+            "com.apple.",
+            "com.apple..x",
+            "com.apple.x.",
+            "com.apple.x..y",
+            "Com.apple.x",
+            "COM.APPLE.X",
+            "com.applex.y",
+            "com.apple-x.y",
+            "xcom.apple.y",
+            " com.apple.x",
+            "apple.com.x",
+            "dev.aidex.desktop",
+            "com.apple.x y",
+            "com.apple.x/y",
+            "com.apple.x\\y",
+            "com.apple.x\0",
+            "com.apple.\u{e9}",
+        ] {
+            assert!(!is_apple_domain(domain), "{domain:?}");
+        }
+    }
+
+    #[test]
+    fn macos_preferences_skip_apple_service_plists_and_audit_everything_else() {
         let host = tempfile::tempdir().unwrap();
         let preferences = host.path().join("Library/Preferences");
         fs::create_dir_all(&preferences).unwrap();
-        let dirs = vec![(preferences.clone(), Watch::MacosPreferences)];
-        let before = Snapshot::take(&dirs);
-
-        // A separate background writer reproduces the runner's Siri preference
-        // appearing between snapshots; joining makes the fixture deterministic.
-        let background_preferences = preferences.clone();
-        let background = std::thread::spawn(move || {
-            for name in [
-                "com.apple.siri.ODDI.ExperimentationWorker.plist",
-                "com.apple.GenerativeFunctions.GenerativeFunctionsInstrumentation.plist",
-                "com.apple.appleintelligencereporting.plist",
-            ] {
-                fs::write(background_preferences.join(name), "OS-owned preference").unwrap();
-            }
-        });
-        for name in [
-            "unexpected.plist",
-            "com.apple.unexpected.plist",
-            "AiDEX.plist",
-            "com.apple.siri.ODDI.ExperimentationWorker.plist.bak",
-            "com.apple.siri.ODDI.ExperimentationWorker-AiDEX.plist",
-        ] {
-            fs::write(preferences.join(name), "unexpected host write").unwrap();
-        }
-        fs::create_dir(preferences.join("AiDEX-data")).unwrap();
-        background.join().unwrap();
-
-        let mut expected = vec![
-            preferences.join("unexpected.plist"),
-            preferences.join("com.apple.unexpected.plist"),
-            preferences.join("AiDEX.plist"),
-            preferences.join("com.apple.siri.ODDI.ExperimentationWorker.plist.bak"),
-            preferences.join("com.apple.siri.ODDI.ExperimentationWorker-AiDEX.plist"),
-            preferences.join("AiDEX-data"),
-        ];
-        expected.sort();
-        assert_eq!(before.new_entries(&Snapshot::take(&dirs)), expected);
+        let (found, expected) = churn(
+            &preferences,
+            Watch::MacosPreferences,
+            &OBSERVED_PREFERENCES,
+            Make::File,
+            &[
+                ("unexpected.plist", Make::File),
+                ("AiDEX.plist", Make::File),
+                ("dev.aidex.desktop.plist", Make::File),
+                // AiDEX-named entries are audited even inside Apple's namespace.
+                ("com.apple.aidex.plist", Make::File),
+                ("com.apple.AIDEX.settings.plist", Make::File),
+                (
+                    "com.apple.siri.ODDI.ExperimentationWorker-AiDEX.plist",
+                    Make::File,
+                ),
+                // Not a `com.apple.<domain>.plist` name.
+                (
+                    "com.apple.siri.ODDI.ExperimentationWorker.plist.bak",
+                    Make::File,
+                ),
+                ("com.apple.remotemanagement", Make::File),
+                ("com.apple.plist", Make::File),
+                ("com.apple..plist", Make::File),
+                ("com.apple.with space.plist", Make::File),
+                ("Com.apple.MixedCase.plist", Make::File),
+                ("com.applex.plist", Make::File),
+                // Wrong type for an OS preference.
+                ("com.apple.directory.plist", Make::Dir),
+                ("AiDEX-data", Make::Dir),
+            ],
+        );
+        assert_eq!(found, expected);
     }
 
     #[test]
-    fn macos_application_support_background_churn_does_not_hide_host_writes() {
-        let host = tempfile::tempdir().unwrap();
-        let support = host.path().join("Library/Application Support");
-        fs::create_dir_all(&support).unwrap();
-        let dirs = vec![(support.clone(), Watch::MacosApplicationSupport)];
-        let before = Snapshot::take(&dirs);
-        let background_support = support.clone();
-        let background = std::thread::spawn(move || {
-            for name in [
-                "com.apple.RemoteManagementAgent",
-                "com.apple.appleintelligencereporting.processing",
-            ] {
-                fs::create_dir(background_support.join(name)).unwrap();
-            }
-        });
-        for name in [
-            "unexpected-data",
-            "com.apple.unexpected",
-            "AiDEX-data",
-            "com.apple.RemoteManagementAgent.bak",
-            "com.apple.appleintelligencereporting.processing-AiDEX",
-        ] {
-            fs::create_dir(support.join(name)).unwrap();
-        }
-        fs::write(support.join("unexpected-file"), "host write").unwrap();
-        background.join().unwrap();
-        let mut expected = vec![
-            support.join("unexpected-data"),
-            support.join("com.apple.unexpected"),
-            support.join("AiDEX-data"),
-            support.join("com.apple.RemoteManagementAgent.bak"),
-            support.join("com.apple.appleintelligencereporting.processing-AiDEX"),
-            support.join("unexpected-file"),
-        ];
-        expected.sort();
-        assert_eq!(before.new_entries(&Snapshot::take(&dirs)), expected);
-    }
-
-    #[test]
-    fn macos_os_entry_names_are_audited_with_wrong_types_or_directory_policies() {
-        let cases = [
-            (
-                Watch::MacosPreferences,
-                Watch::MacosApplicationSupport,
+    fn macos_app_data_skips_apple_service_directories_and_audits_everything_else() {
+        for sub in ["Application Support", "Caches"] {
+            let host = tempfile::tempdir().unwrap();
+            let root = host.path().join("Library").join(sub);
+            fs::create_dir_all(&root).unwrap();
+            let (found, expected) = churn(
+                &root,
+                Watch::MacosAppData,
+                &OBSERVED_APP_DATA,
+                Make::Dir,
                 &[
-                    "com.apple.siri.ODDI.ExperimentationWorker.plist",
-                    "com.apple.GenerativeFunctions.GenerativeFunctionsInstrumentation.plist",
-                    "com.apple.appleintelligencereporting.plist",
-                ][..],
-                false,
-            ),
-            (
-                Watch::MacosApplicationSupport,
-                Watch::MacosPreferences,
-                &[
-                    "com.apple.RemoteManagementAgent",
-                    "com.apple.appleintelligencereporting.processing",
-                ][..],
-                true,
-            ),
-        ];
-        for (policy, other_policy, names, directory) in cases {
-            for name in names {
-                // Even the exact name is residue when its type is wrong, when
-                // it appears under the other macOS policy, or under Watch::All.
-                for (watch, is_directory) in [
-                    (policy, !directory),
-                    (other_policy, directory),
-                    (Watch::All, directory),
-                ] {
-                    let root = tempfile::tempdir().unwrap();
-                    let dirs = vec![(root.path().to_path_buf(), watch)];
-                    let before = Snapshot::take(&dirs);
-                    let unexpected = root.path().join(name);
-                    if is_directory {
-                        fs::create_dir(&unexpected).unwrap();
-                    } else {
-                        fs::write(&unexpected, "unexpected host write").unwrap();
-                    }
-                    assert_eq!(before.new_entries(&Snapshot::take(&dirs)), vec![unexpected]);
-                }
-            }
+                    ("unexpected-data", Make::Dir),
+                    ("AiDEX-data", Make::Dir),
+                    ("dev.aidex.desktop", Make::Dir),
+                    ("com.apple.aidex", Make::Dir),
+                    ("com.apple.RemoteManagementAgent-AiDEX", Make::Dir),
+                    ("com.apple", Make::Dir),
+                    ("com.apple.with space", Make::Dir),
+                    ("Com.apple.MixedCase", Make::Dir),
+                    // Wrong type for OS service data.
+                    ("com.apple.file", Make::File),
+                    ("com.apple.preference.plist", Make::File),
+                    ("unexpected-file", Make::File),
+                ],
+            );
+            assert_eq!(found, expected, "{sub}");
         }
     }
 
     #[test]
-    fn unknown_file_types_are_not_excluded_for_known_macos_entry_names() {
-        for watch in [Watch::MacosPreferences, Watch::MacosApplicationSupport] {
-            for name in [
-                "com.apple.siri.ODDI.ExperimentationWorker.plist",
-                "com.apple.GenerativeFunctions.GenerativeFunctionsInstrumentation.plist",
-                "com.apple.appleintelligencereporting.plist",
-                "com.apple.RemoteManagementAgent",
-                "com.apple.appleintelligencereporting.processing",
-            ] {
-                assert!(!watch.is_known_os_entry(OsStr::new(name), EntryKind::Other));
-            }
-        }
-    }
-
-    #[test]
-    fn differently_cased_macos_entry_names_are_audited() {
-        for (watch, name, directory) in [
-            (
-                Watch::MacosPreferences,
-                "Com.apple.siri.ODDI.ExperimentationWorker.plist",
-                false,
-            ),
-            (
-                Watch::MacosPreferences,
-                "Com.apple.GenerativeFunctions.GenerativeFunctionsInstrumentation.plist",
-                false,
-            ),
-            (
-                Watch::MacosPreferences,
-                "Com.apple.appleintelligencereporting.plist",
-                false,
-            ),
-            (
-                Watch::MacosApplicationSupport,
-                "Com.apple.RemoteManagementAgent",
-                true,
-            ),
-            (
-                Watch::MacosApplicationSupport,
-                "Com.apple.appleintelligencereporting.processing",
-                true,
-            ),
+    fn apple_service_names_are_audited_in_every_other_watched_directory() {
+        // The home directory, `~/Library/Logs`, and every Windows and Linux root
+        // use `Watch::All`; the two macOS policies audit each other's entries.
+        for (watch, plist_kind, data_kind) in [
+            (Watch::All, Make::File, Make::Dir),
+            (Watch::All, Make::Dir, Make::File),
+            (Watch::MacosPreferences, Make::Dir, Make::File),
+            (Watch::MacosAppData, Make::File, Make::File),
         ] {
             let root = tempfile::tempdir().unwrap();
             let dirs = vec![(root.path().to_path_buf(), watch)];
             let before = Snapshot::take(&dirs);
-            // Each case is separate from its OS-owned filename fixture, so
-            // case-insensitive hosts do not alias the two names.
-            let unexpected = root.path().join(name);
-            if directory {
-                fs::create_dir(&unexpected).unwrap();
-            } else {
-                fs::write(&unexpected, "unexpected host write").unwrap();
+            let mut expected = Vec::new();
+            for name in OBSERVED_PREFERENCES {
+                expected.push(make(root.path(), name, plist_kind));
             }
-            assert_eq!(before.new_entries(&Snapshot::take(&dirs)), vec![unexpected]);
+            for name in OBSERVED_APP_DATA {
+                expected.push(make(root.path(), name, data_kind));
+            }
+            expected.sort();
+            assert_eq!(
+                before.new_entries(&Snapshot::take(&dirs)),
+                expected,
+                "{watch:?}"
+            );
         }
     }
 
     #[test]
-    fn known_macos_preference_name_is_audited_in_other_directories() {
-        let host = tempfile::tempdir().unwrap();
-        let cache = host.path().join("Library/Caches");
-        fs::create_dir_all(&cache).unwrap();
-        let dirs = vec![
-            (host.path().to_path_buf(), Watch::All),
-            (cache.clone(), Watch::All),
-        ];
-        let before = Snapshot::take(&dirs);
-        let name = "com.apple.siri.ODDI.ExperimentationWorker.plist";
-        fs::write(host.path().join(name), "unexpected host write").unwrap();
-        fs::write(cache.join(name), "unexpected cache write").unwrap();
-        let mut expected = vec![host.path().join(name), cache.join(name)];
-        expected.sort();
-        assert_eq!(before.new_entries(&Snapshot::take(&dirs)), expected);
+    fn apple_service_exceptions_apply_only_to_the_macos_library_directories() {
+        let mut policies = Vec::new();
+        for (dir, watch) in watched() {
+            let in_library = dir
+                .parent()
+                .is_some_and(|parent| parent.ends_with("Library"));
+            let sub = dir.file_name().and_then(OsStr::to_str);
+            match watch {
+                Watch::MacosPreferences => {
+                    assert!(in_library && sub == Some("Preferences"), "{dir:?}");
+                }
+                Watch::MacosAppData => assert!(
+                    in_library && matches!(sub, Some("Application Support" | "Caches")),
+                    "{dir:?}"
+                ),
+                Watch::All | Watch::AidexNamed => continue,
+            }
+            policies.push(watch);
+        }
+        if !cfg!(target_os = "macos") {
+            assert!(policies.is_empty(), "{policies:?}");
+        } else if env::var_os("HOME").is_some_and(|home| !home.is_empty()) {
+            assert_eq!(
+                policies,
+                [
+                    Watch::MacosAppData,
+                    Watch::MacosAppData,
+                    Watch::MacosPreferences
+                ]
+            );
+        }
     }
 
     #[test]
-    fn known_macos_preference_name_does_not_exclude_a_directory() {
-        let preferences = tempfile::tempdir().unwrap();
-        let dirs = vec![(preferences.path().to_path_buf(), Watch::MacosPreferences)];
-        let before = Snapshot::take(&dirs);
-        let unexpected = preferences
-            .path()
-            .join("com.apple.siri.ODDI.ExperimentationWorker.plist");
-        fs::create_dir(&unexpected).unwrap();
-        assert_eq!(before.new_entries(&Snapshot::take(&dirs)), vec![unexpected]);
+    fn only_regular_files_and_directories_can_be_apple_service_state() {
+        for name in OBSERVED_PREFERENCES.iter().chain(&OBSERVED_APP_DATA) {
+            let name = OsStr::new(name);
+            for kind in [
+                EntryKind::RegularFile,
+                EntryKind::Directory,
+                EntryKind::Other,
+            ] {
+                assert!(!Watch::All.is_apple_service_state(name, kind));
+                assert!(!Watch::AidexNamed.is_apple_service_state(name, kind));
+            }
+            assert!(!Watch::MacosPreferences.is_apple_service_state(name, EntryKind::Other));
+            assert!(!Watch::MacosAppData.is_apple_service_state(name, EntryKind::Other));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_names_are_never_apple_service_state() {
+        use std::os::unix::ffi::OsStrExt;
+
+        for (watch, kind, name) in [
+            (
+                Watch::MacosPreferences,
+                EntryKind::RegularFile,
+                &b"com.apple.\xff.plist"[..],
+            ),
+            (
+                Watch::MacosAppData,
+                EntryKind::Directory,
+                &b"com.apple.\xff"[..],
+            ),
+        ] {
+            assert!(!watch.is_apple_service_state(OsStr::from_bytes(name), kind));
+        }
     }
 
     #[test]
@@ -413,9 +484,7 @@ mod tests {
         let preferences = tempfile::tempdir().unwrap();
         let dirs = vec![(preferences.path().to_path_buf(), Watch::MacosPreferences)];
         let before = Snapshot::take(&dirs);
-        let unexpected = preferences
-            .path()
-            .join("com.apple.siri.ODDI.ExperimentationWorker.plist");
+        let unexpected = preferences.path().join(OBSERVED_PREFERENCES[4]);
         fs::create_dir(&unexpected).unwrap();
         let after = Snapshot::take(&dirs);
         fs::remove_dir(&unexpected).unwrap();
@@ -428,12 +497,12 @@ mod tests {
     }
 
     #[test]
-    fn macos_application_support_file_type_is_captured_in_the_snapshot() {
+    fn macos_app_data_file_type_is_captured_in_the_snapshot() {
         for was_directory in [false, true] {
             let support = tempfile::tempdir().unwrap();
-            let dirs = vec![(support.path().to_path_buf(), Watch::MacosApplicationSupport)];
+            let dirs = vec![(support.path().to_path_buf(), Watch::MacosAppData)];
             let before = Snapshot::take(&dirs);
-            let entry = support.path().join("com.apple.RemoteManagementAgent");
+            let entry = support.path().join(OBSERVED_APP_DATA[0]);
             if was_directory {
                 fs::create_dir(&entry).unwrap();
             } else {
@@ -456,7 +525,8 @@ mod tests {
     fn newly_created_macos_watched_directory_is_audited() {
         for (sub, watch) in [
             ("Preferences", Watch::MacosPreferences),
-            ("Application Support", Watch::MacosApplicationSupport),
+            ("Application Support", Watch::MacosAppData),
+            ("Caches", Watch::MacosAppData),
         ] {
             let host = tempfile::tempdir().unwrap();
             let root = host.path().join("Library").join(sub);
@@ -469,28 +539,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn known_macos_entry_names_do_not_exclude_symlinks() {
+    fn apple_service_names_do_not_exclude_symlinks() {
         for (watch, name) in [
-            (
-                Watch::MacosPreferences,
-                "com.apple.siri.ODDI.ExperimentationWorker.plist",
-            ),
-            (
-                Watch::MacosPreferences,
-                "com.apple.GenerativeFunctions.GenerativeFunctionsInstrumentation.plist",
-            ),
-            (
-                Watch::MacosPreferences,
-                "com.apple.appleintelligencereporting.plist",
-            ),
-            (
-                Watch::MacosApplicationSupport,
-                "com.apple.RemoteManagementAgent",
-            ),
-            (
-                Watch::MacosApplicationSupport,
-                "com.apple.appleintelligencereporting.processing",
-            ),
+            (Watch::MacosPreferences, OBSERVED_PREFERENCES[4]),
+            (Watch::MacosAppData, OBSERVED_APP_DATA[0]),
         ] {
             // A regular-file target, directory target, and dangling link must
             // all be classified as symlinks rather than as their target's type.
@@ -528,6 +580,7 @@ mod tests {
         let before = Snapshot::take(&dirs);
         fs::write(all.path().join("new-file"), "").unwrap();
         fs::write(named.path().join("unrelated.tmp"), "").unwrap();
+        fs::write(named.path().join("com.apple.unrelated"), "").unwrap();
         fs::write(named.path().join("AiDEX-residue"), "").unwrap();
         fs::create_dir(all.path().join("later")).unwrap();
         let after = Snapshot::take(&dirs);

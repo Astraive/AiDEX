@@ -256,8 +256,15 @@ a new passphrase without the old one (`reset_passphrase`).
   the header and all well-formed record files, compares them byte-for-byte, and
   returns the restored vault locked. Cryptographic verification needs a credential:
   unlock it and call `UnlockedVault::verify()`.
-  Enumeration rejects more than 4096 well-named records before constructing the
-  reference collection or copying any record, bounding damaged-backup restores.
+  Enumeration rejects more than 4160 well-named records (`MAX_RECORD_FILES`: the
+  4096-secret limit plus 64 files of headroom) before constructing the reference
+  collection or copying any record, bounding damaged-backup restores. The headroom
+  admits a full vault copied with the unreferenced records a crash or an uncertain
+  commit left beside it (the first unlock collects them). `put` still refuses a new
+  secret once the index holds 4096 (`MAX_SECRETS`), but restore does not hold the
+  index to that limit: a restored backup may hold a few more indexed records than
+  `put` allows. They stay readable, replaceable, and deletable; no new name is
+  accepted until fewer than 4096 remain.
 - A backup is protected exactly like the live vault: the same passphrase and the
   same recovery key unlock it, and changing the passphrase later does not change
   the backup's slot (the old passphrase keeps opening the old backup).

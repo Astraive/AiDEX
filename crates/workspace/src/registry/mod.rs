@@ -19,6 +19,7 @@ pub(crate) use db::Record;
 use crate::{
     Access, ConfinedRoot, EphemeralLimits, Workspace, WorkspaceAvailability, WorkspaceError,
     WorkspaceKind, WorkspaceRoot,
+    confine::RELOCATED_ROOT,
     discover::repository_info,
     fsutil, marker,
     model::{WORKSPACE_ID_PREFIX, name_key, validate_name},
@@ -35,7 +36,8 @@ pub const EPHEMERAL_DIR: &str = "ephemeral";
 /// Durable registry of host, drive, and ephemeral workspaces for one drive.
 ///
 /// Thread-safe (`Send + Sync`): database access is serialized internally, and
-/// ephemeral creation/apply/discard and data deletion are serialized against each other.
+/// ephemeral creation/apply/discard, data deletion, and unregistering are serialized
+/// against each other.
 pub struct WorkspaceRegistry {
     paths: DrivePaths,
     database: PathBuf,
@@ -253,6 +255,12 @@ impl WorkspaceRegistry {
     /// [`Self::delete_data`] or [`Self::discard`] to delete AiDEX-created data.
     /// A workspace with ephemeral copies must have them discarded first.
     pub fn remove(&self, id: &EntityId) -> Result<Workspace, WorkspaceError> {
+        // Serialized with ephemeral creation, so a copy is never registered for a
+        // source that was unregistered while it was being made.
+        let _guard = self
+            .ephemeral_ops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let record = self.record(id)?;
         let connection = self.connection();
         let children = db::children(&connection, id)?;
@@ -335,7 +343,13 @@ impl WorkspaceRegistry {
             other => other,
         })?;
         match &record.root {
-            WorkspaceRoot::Host(_) => host::check_not_drive_state(&self.paths, root.root())?,
+            WorkspaceRoot::Host(_) => {
+                // The path may have been redirected since the availability check.
+                if !platform::same_location(root.root(), &location) {
+                    return Err(unavailable(RELOCATED_ROOT.to_owned()));
+                }
+                host::check_not_drive_state(&self.paths, root.root())?;
+            }
             WorkspaceRoot::Drive(relative) => {
                 // Every directory from the drive's `workspaces/` down to the root must be
                 // a real directory on the drive, so the root cannot be redirected.
@@ -381,6 +395,9 @@ impl WorkspaceRegistry {
         let unavailable = |reason: &str| WorkspaceAvailability::Unavailable {
             reason: reason.to_owned(),
         };
+        let inaccessible = |error: io::Error| WorkspaceAvailability::Unavailable {
+            reason: format!("the root cannot be accessed: {error}"),
+        };
         if !location.is_absolute() {
             return unavailable("the root was added on a different operating system");
         }
@@ -389,7 +406,18 @@ impl WorkspaceRegistry {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 unavailable("the workspace root directory was replaced by a link")
             }
-            Ok(metadata) if metadata.is_dir() => WorkspaceAvailability::Available,
+            Ok(metadata) if metadata.is_dir() => match record.root {
+                // Host roots are stored canonical, so a different resolution means a
+                // parent directory was replaced by a link or a mount was remapped elsewhere.
+                WorkspaceRoot::Host(_) => match fs::canonicalize(&location) {
+                    Ok(canonical) if platform::same_location(&canonical, &location) => {
+                        WorkspaceAvailability::Available
+                    }
+                    Ok(_) => unavailable(RELOCATED_ROOT),
+                    Err(error) => inaccessible(error),
+                },
+                WorkspaceRoot::Drive(_) => WorkspaceAvailability::Available,
+            },
             Ok(_) => unavailable("the root is not a directory"),
             Err(error) if error.kind() == ErrorKind::NotFound => match record.root {
                 WorkspaceRoot::Host(_) => {
@@ -397,9 +425,7 @@ impl WorkspaceRegistry {
                 }
                 WorkspaceRoot::Drive(_) => unavailable("the drive workspace directory is missing"),
             },
-            Err(error) => WorkspaceAvailability::Unavailable {
-                reason: format!("the root cannot be accessed: {error}"),
-            },
+            Err(error) => inaccessible(error),
         }
     }
 

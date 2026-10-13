@@ -228,20 +228,26 @@ fn start(
             spawn_thread(format!("aidex-sandbox-stdin-{}", shared.id), move || {
                 if interactive {
                     use std::io::Write;
-                    let mut pipe = stdin_pipe;
+                    // Hand the pipe over before the plan can reach the helper and keep it
+                    // locked until the plan is written. The helper confirms only after
+                    // reading the plan, so once `spawn_interactive` returns the caller's
+                    // first write always finds the pipe (it used to race this thread and
+                    // fail as closed input) and can never land ahead of the plan.
+                    let mut slot = shared
+                        .stdin
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let pipe = slot.insert(stdin_pipe);
                     if pipe
                         .write_all(&frame)
                         .and_then(|()| pipe.write_all(stdin.as_deref().unwrap_or_default()))
                         .and_then(|()| pipe.flush())
                         .is_err()
                     {
+                        slot.take();
+                        drop(slot);
                         let _ = shared.kill(KillReason::HandshakeFailed);
-                        return;
                     }
-                    *shared
-                        .stdin
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pipe);
                 } else {
                     monitor::run_stdin_writer(stdin_pipe, frame, stdin);
                 }

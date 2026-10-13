@@ -104,6 +104,11 @@ pub(crate) fn is_within(path: &Path, root: &Path) -> bool {
     component_keys(path).starts_with(&component_keys(root))
 }
 
+/// Whether two spellings name the same location under [`component_keys`].
+pub(crate) fn same_location(left: &Path, right: &Path) -> bool {
+    component_keys(left) == component_keys(right)
+}
+
 /// The components of `path` below `root`, in their original spelling, or `None`
 /// when `path` is not within `root`.
 pub(crate) fn strip_root(path: &Path, root: &Path) -> Option<Vec<OsString>> {
@@ -250,6 +255,9 @@ mod tests {
             Some(vec![OsString::from("src"), OsString::from("main.rs")])
         );
         assert_eq!(strip_root(Path::new("/elsewhere"), root), None);
+        assert!(same_location(Path::new("/work/./repo/"), root));
+        assert!(!same_location(Path::new("/work/repo/src"), root));
+        assert!(!same_location(Path::new("/work"), root));
     }
 
     #[cfg(windows)]
@@ -271,6 +279,13 @@ mod tests {
             Path::new(r"\\?\UNC\Server\Share\x"),
             Path::new(r"\\server\share")
         ));
+        assert!(same_location(Path::new(r"c:\work\REPO"), root));
+        assert!(same_location(
+            Path::new(r"\\?\UNC\Server\Share\x"),
+            Path::new(r"\\server\share\X")
+        ));
+        assert!(!same_location(Path::new(r"C:\Work\Repo\src"), root));
+        assert!(!same_location(Path::new(r"D:\Work\Repo"), root));
     }
 
     #[cfg(unix)]
@@ -281,5 +296,6 @@ mod tests {
             Path::new("/work/repo")
         ));
         assert_ne!(root_key(Path::new("/A")), root_key(Path::new("/a")));
+        assert!(!same_location(Path::new("/A"), Path::new("/a")));
     }
 }

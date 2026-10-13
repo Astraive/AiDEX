@@ -3,12 +3,16 @@
 //! The daemon exposes user operations (init/unlock/lock/set/list/delete/passphrase)
 //! over IPC. Handle issuance and resolution are Rust-only methods for the broker; they
 //! are deliberately not RPC methods. While sealed, state is re-read from disk on every
-//! call, so external restores or damage are reported instead of a stale cache.
+//! call, so external restores or damage are reported instead of a stale cache. Every
+//! end of an unlocked session is reported once to the lock observers (see
+//! [`crate::observer`]), and the next session begins only after they have seen it.
+//! The one exception: unlocking while a session is open whose `vault.json` changed
+//! on disk replaces that session without a notice, since the vault never locks.
 
 use crate::{
-    BackupReport, ConsumerScope, CreateOptions, KdfParams, RecoveryKey, SecretBytes, SecretHandle,
-    SecretKind, SecretMeta, SecretName, SecretPolicy, SecretString, UnlockMethod, UnlockedVault,
-    Vault, VaultError, VaultErrorKind,
+    BackupReport, ConsumerScope, CreateOptions, KdfParams, LockNotice, LockReason, RecoveryKey,
+    SecretBytes, SecretHandle, SecretKind, SecretMeta, SecretName, SecretPolicy, SecretString,
+    UnlockMethod, UnlockedVault, Vault, VaultError, VaultErrorKind, observer::LockNotices,
 };
 use aidex_core::{EntityId, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -117,6 +121,7 @@ struct Inner {
     dir: PathBuf,
     config: Mutex<VaultServiceConfig>,
     session: Mutex<Option<Session>>,
+    notices: Arc<LockNotices>,
 }
 
 /// The daemon's vault: `Arc`-shareable, all methods take `&self`.
@@ -126,20 +131,52 @@ pub struct VaultService {
 
 impl VaultService {
     /// Serve the vault stored in `dir`. Never fails because of vault contents (a
-    /// damaged vault is reported by [`VaultService::status`]); starts the auto-lock thread.
+    /// damaged vault is reported by [`VaultService::status`]); starts the thread that
+    /// auto-locks and delivers lock notices.
     pub fn open(dir: impl Into<PathBuf>, config: VaultServiceConfig) -> Result<Self, VaultError> {
         let dir = dir.into();
+        let notices = Arc::new(LockNotices::default());
         let inner = Arc::new(Inner {
             dir: dir.clone(),
             config: Mutex::new(config),
             session: Mutex::new(None),
+            notices: Arc::clone(&notices),
         });
         let weak = Arc::downgrade(&inner);
         thread::Builder::new()
             .name("aidex-vault-autolock".into())
-            .spawn(move || auto_lock_loop(&weak))
+            .spawn(move || auto_lock_loop(&weak, &notices))
             .map_err(|error| VaultError::io("start the auto-lock thread for vault", dir, error))?;
         Ok(Self { inner })
+    }
+
+    /// Call `observer` once for every unlocked session that ends, whatever the
+    /// [`LockReason`]. Observers never run while the vault's own locks are held:
+    /// [`VaultService::lock`] runs them on its caller's thread before it returns,
+    /// and every other ending runs them on the service's background thread, one
+    /// notice at a time and in order ([`VaultService::unlock`] and
+    /// [`VaultService::init`] wait for them, or run them on their own thread, before
+    /// a new session begins). An observer must not hold a strong reference to this
+    /// service (or to anything that owns it), or neither is ever dropped.
+    pub fn add_lock_observer(&self, observer: impl Fn(&LockNotice) + Send + Sync + 'static) {
+        self.inner.notices.observe(Arc::new(observer));
+    }
+
+    /// Whether `error`, returned by an operation on the unlocked vault (secrets,
+    /// handles, passphrase change, backup), ended the session: a `Conflict`, or an
+    /// uncertain commit of this vault's own header. The vault must be unlocked again.
+    pub fn ends_session(&self, error: &VaultError) -> bool {
+        self.ending_reason(error).is_some()
+    }
+
+    fn ending_reason(&self, error: &VaultError) -> Option<LockReason> {
+        match error {
+            VaultError::CommitUncertain { path, .. } if path.parent() == Some(self.dir()) => {
+                Some(LockReason::CommitUncertain)
+            }
+            _ if error.kind() == VaultErrorKind::Conflict => Some(LockReason::Conflict),
+            _ => None,
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -162,7 +199,8 @@ impl VaultService {
     pub fn status(&self) -> VaultStatus {
         let idle = self.config().idle_timeout;
         let mut session = self.session();
-        expire_if_idle(&mut session, idle, Instant::now());
+        self.inner
+            .expire_if_idle(&mut session, idle, Instant::now());
         let base = VaultStatus {
             state: VaultState::Missing,
             vault_id: None,
@@ -202,14 +240,15 @@ impl VaultService {
         }
     }
 
-    /// Create the vault and leave it unlocked.
+    /// Create the vault and leave it unlocked (after every earlier session end has
+    /// reached the lock observers, as for [`VaultService::unlock`]).
     pub fn init(
         &self,
         passphrase: &SecretString,
         recovery_key: bool,
     ) -> Result<InitOutcome, VaultError> {
         let kdf = self.config().kdf;
-        let mut session = self.session();
+        let mut session = self.settled_session();
         if session.is_some() || Vault::exists(&self.inner.dir) {
             return Err(VaultError::AlreadyExists);
         }
@@ -227,7 +266,16 @@ impl VaultService {
     }
 
     /// Unlock with the passphrase (re-reading the header from disk). Unlocking an
-    /// already unlocked vault re-verifies the passphrase and keeps the session.
+    /// already unlocked vault re-verifies the passphrase and keeps the session; when
+    /// `vault.json` changed on disk since that session loaded it, the session is
+    /// replaced without a lock notice (the vault never locks).
+    ///
+    /// Every session that ended before this unlock has reached the lock observers
+    /// before the new session begins, even one that ends on another thread while
+    /// this call waits for the vault: a notice still queued is delivered on this
+    /// thread, or awaited while the background thread delivers it. So an observer's
+    /// cleanup never reaches the new session. An observer that unlocks the vault
+    /// itself does not wait for the notice it is handling or those queued behind it.
     pub fn unlock(&self, passphrase: &SecretString) -> Result<VaultStatus, VaultError> {
         self.unlock_with(|locked| locked.unlock(passphrase))
     }
@@ -241,7 +289,7 @@ impl VaultService {
         unlock: impl FnOnce(&crate::LockedVault) -> Result<UnlockedVault, VaultError>,
     ) -> Result<VaultStatus, VaultError> {
         {
-            let mut session = self.session();
+            let mut session = self.settled_session();
             let locked = Vault::open(&self.inner.dir)?;
             let vault = unlock(&locked)?;
             match session.as_mut() {
@@ -255,18 +303,18 @@ impl VaultService {
         Ok(self.status())
     }
 
-    /// Lock and zeroize keys; every handle stops resolving.
+    /// Lock and zeroize keys; every handle stops resolving. Lock observers have seen
+    /// this and every earlier session end when it returns: they run on this thread,
+    /// so do not call it while holding a lock an observer takes.
     pub fn lock(&self) -> LockOutcome {
-        let mut session = self.session();
-        match session.take() {
-            Some(mut current) => LockOutcome {
-                was_unlocked: true,
-                revoked_handles: current.vault.revoke_all_handles(),
-            },
-            None => LockOutcome {
-                was_unlocked: false,
-                revoked_handles: 0,
-            },
+        let revoked = {
+            let mut session = self.session();
+            self.inner.end_session(&mut session, LockReason::Requested)
+        };
+        self.inner.notices.deliver();
+        LockOutcome {
+            was_unlocked: revoked.is_some(),
+            revoked_handles: revoked.unwrap_or(0),
         }
     }
 
@@ -362,7 +410,26 @@ impl VaultService {
     }
 
     fn session(&self) -> MutexGuard<'_, Option<Session>> {
-        lock_or_recover_session(&self.inner.session)
+        self.inner.session()
+    }
+
+    /// The session lock, taken once every session end queued so far has been
+    /// delivered to the lock observers, for a caller that may begin a new session.
+    /// Ends are queued only under this lock, so none can slip in while the caller
+    /// holds it; one that was queued while this waited for the lock is delivered
+    /// (with the lock released, as observers may use the vault) before retrying.
+    fn settled_session(&self) -> MutexGuard<'_, Option<Session>> {
+        loop {
+            self.inner.notices.deliver();
+            #[cfg(test)]
+            if let Some(hook) = tests::BEFORE_SESSION_LOCK.take() {
+                hook();
+            }
+            let session = self.session();
+            if self.inner.notices.settled() {
+                return session;
+            }
+        }
     }
 
     /// Run `operation` on the unlocked vault, failing closed when it is not unlocked.
@@ -373,7 +440,7 @@ impl VaultService {
         let idle = self.config().idle_timeout;
         let mut session = self.session();
         let now = Instant::now();
-        expire_if_idle(&mut session, idle, now);
+        self.inner.expire_if_idle(&mut session, idle, now);
         let Some(current) = session.as_mut() else {
             return Err(match Vault::open(&self.inner.dir) {
                 Ok(_) => VaultError::Locked,
@@ -382,16 +449,13 @@ impl VaultService {
         };
         current.last_used = now;
         let result = operation(&mut current.vault);
-        if result.as_ref().is_err_and(|error| {
-            error.kind() == VaultErrorKind::Conflict
-                || matches!(
-                    error,
-                    VaultError::CommitUncertain { path, .. }
-                        if path.parent() == Some(current.vault.dir())
-                )
-        }) {
+        if let Some(reason) = result
+            .as_ref()
+            .err()
+            .and_then(|error| self.ending_reason(error))
+        {
             // External changes or an ambiguous local commit require a fresh unlock.
-            *session = None;
+            self.inner.end_session(&mut session, reason);
         }
         result
     }
@@ -407,47 +471,74 @@ impl Session {
     }
 }
 
-fn expire_if_idle(session: &mut Option<Session>, idle: Option<Duration>, now: Instant) {
-    let expired = match (session.as_ref(), idle) {
-        (Some(current), Some(timeout)) => {
-            now.saturating_duration_since(current.last_used) >= timeout
+impl Inner {
+    /// A panic while the vault was in use locks it (fail closed) before continuing.
+    fn session(&self) -> MutexGuard<'_, Option<Session>> {
+        self.session.lock().unwrap_or_else(|poisoned| {
+            self.session.clear_poison();
+            let mut guard = poisoned.into_inner();
+            self.end_session(&mut guard, LockReason::Panic);
+            guard
+        })
+    }
+
+    /// End the session (with its lock held) and queue its notice; returns the
+    /// handles revoked, or `None` when the vault was not unlocked.
+    fn end_session(&self, session: &mut Option<Session>, reason: LockReason) -> Option<usize> {
+        let mut ended = session.take()?;
+        let revoked_handles = ended.vault.revoke_all_handles();
+        self.notices.push(LockNotice {
+            vault_id: ended.vault.vault_id().clone(),
+            reason,
+            revoked_handles,
+        });
+        Some(revoked_handles)
+    }
+
+    fn expire_if_idle(&self, session: &mut Option<Session>, idle: Option<Duration>, now: Instant) {
+        let expired = match (session.as_ref(), idle) {
+            (Some(current), Some(timeout)) => {
+                now.saturating_duration_since(current.last_used) >= timeout
+            }
+            _ => false,
+        };
+        if expired {
+            self.end_session(session, LockReason::Idle);
         }
-        _ => false,
-    };
-    if expired {
-        *session = None;
     }
 }
 
-fn auto_lock_loop(inner: &Weak<Inner>) {
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.notices.close();
+    }
+}
+
+/// Lock idle sessions and deliver queued lock notices until the service is dropped.
+/// Holds the service only while checking, never while observers run or it waits.
+fn auto_lock_loop(inner: &Weak<Inner>, notices: &LockNotices) {
     loop {
         let tick = {
             let Some(inner) = inner.upgrade() else {
+                // A session that ended just before the service was dropped is
+                // still reported.
+                notices.deliver();
                 return;
             };
             let idle = lock_or_recover(&inner.config).idle_timeout;
-            let mut session = lock_or_recover_session(&inner.session);
-            expire_if_idle(&mut session, idle, Instant::now());
+            let mut session = inner.session();
+            inner.expire_if_idle(&mut session, idle, Instant::now());
             idle.map_or(MAX_TICK, |timeout| (timeout / 4).clamp(MIN_TICK, MAX_TICK))
         };
-        thread::sleep(tick);
+        notices.deliver();
+        notices.wait(tick);
     }
 }
 
-fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
         mutex.clear_poison();
         poisoned.into_inner()
-    })
-}
-
-/// A panic while the vault was in use locks it (fail closed) before continuing.
-fn lock_or_recover_session(mutex: &Mutex<Option<Session>>) -> MutexGuard<'_, Option<Session>> {
-    mutex.lock().unwrap_or_else(|poisoned| {
-        mutex.clear_poison();
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
     })
 }
 
@@ -463,8 +554,17 @@ impl fmt::Debug for VaultService {
 mod tests {
     use super::*;
     use crate::fsio::{WriteFailure, fail_next_write};
+    use std::cell::RefCell;
 
     const PASSPHRASE: &str = "correct horse battery staple";
+
+    thread_local! {
+        /// Runs once on this thread inside `settled_session`, after the queued
+        /// notices were delivered and before the session lock is taken: the window
+        /// in which another thread can end the session.
+        pub(super) static BEFORE_SESSION_LOCK: RefCell<Option<Box<dyn FnOnce()>>> =
+            const { RefCell::new(None) };
+    }
 
     fn passphrase(text: &str) -> SecretString {
         SecretString::from(text.to_owned())
@@ -607,6 +707,7 @@ mod tests {
         let error = service.delete_secret(&name).unwrap_err();
         assert!(matches!(error, VaultError::Io { .. }));
         assert_eq!(error.kind(), VaultErrorKind::Io);
+        assert!(!service.ends_session(&error));
         assert_eq!(service.status().state, VaultState::Unlocked);
         assert_eq!(
             std::fs::read(service.dir().join("vault.json")).unwrap(),
@@ -651,11 +752,216 @@ mod tests {
         // Avoid injecting the failure at initial records-directory creation.
         std::fs::create_dir_all(destination.join("records")).unwrap();
         fail_next_write(&destination, WriteFailure::AfterRename);
-        assert_uncertain(&service.backup_to(&destination).unwrap_err());
+        let error = service.backup_to(&destination).unwrap_err();
+        assert_uncertain(&error);
+        assert!(!service.ends_session(&error));
         assert_eq!(service.status().state, VaultState::Unlocked);
         assert_eq!(
             service.resolve(&handle, &scope).unwrap().expose(),
             b"original"
         );
+    }
+
+    /// Every notice delivered so far; the observer holds no service reference.
+    fn observe(service: &VaultService) -> Arc<Mutex<Vec<LockNotice>>> {
+        let notices = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&notices);
+        service.add_lock_observer(move |notice| seen.lock().unwrap().push(notice.clone()));
+        notices
+    }
+
+    /// Wait (generously, for slow CI runners) until `count` notices arrived.
+    fn wait_for<T: Clone + fmt::Debug>(seen: &Mutex<Vec<T>>, count: usize) -> Vec<T> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let current = seen.lock().unwrap().clone();
+            if current.len() >= count {
+                return current;
+            }
+            assert!(Instant::now() < deadline, "waited for {count}: {current:?}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn every_session_end_is_observed_once_in_order() {
+        let (_root, service, name, _scope, _handle) = service_with_secret();
+        let vault_id = service.status().vault_id.unwrap();
+        let notices = observe(&service);
+        let notice = |reason, revoked_handles| LockNotice {
+            vault_id: vault_id.clone(),
+            reason,
+            revoked_handles,
+        };
+
+        // An uncertain commit of the vault's own header (its handles were
+        // already revoked by the commit) is delivered by the background thread.
+        fail_next_write(service.dir(), WriteFailure::AfterRename);
+        let error = service.delete_secret(&name).unwrap_err();
+        assert!(service.ends_session(&error));
+        assert_eq!(
+            wait_for(&notices, 1),
+            [notice(LockReason::CommitUncertain, 0)]
+        );
+        assert!(!service.lock().was_unlocked, "already locked: no notice");
+
+        // An explicit lock is observed before `lock` returns.
+        service.unlock(&passphrase(PASSPHRASE)).unwrap();
+        let scope = ConsumerScope::provider("openai").unwrap();
+        service
+            .put_secret(
+                &name,
+                SecretKind::ApiKey,
+                SecretBytes::from(b"value".to_vec()),
+                SecretPolicy::new([scope.clone()]).unwrap(),
+            )
+            .unwrap();
+        service
+            .issue_handle(&name, &scope, Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(service.lock().revoked_handles, 1);
+        assert_eq!(
+            notices.lock().unwrap()[1..],
+            [notice(LockReason::Requested, 1)]
+        );
+
+        service.unlock(&passphrase(PASSPHRASE)).unwrap();
+        service.set_idle_timeout(Some(Duration::from_millis(50)));
+        assert_eq!(wait_for(&notices, 3)[2..], [notice(LockReason::Idle, 0)]);
+        service.set_idle_timeout(None);
+
+        service.unlock(&passphrase(PASSPHRASE)).unwrap();
+        let mut other = Vault::open(service.dir())
+            .unwrap()
+            .unlock(&passphrase(PASSPHRASE))
+            .unwrap();
+        other.delete(&name).unwrap();
+        let error = service.delete_secret(&name).unwrap_err();
+        assert_eq!(error.kind(), VaultErrorKind::Conflict);
+        assert!(service.ends_session(&error));
+        assert_eq!(
+            wait_for(&notices, 4)[3..],
+            [notice(LockReason::Conflict, 0)]
+        );
+
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(notices.lock().unwrap().len(), 4, "each end is seen once");
+    }
+
+    #[test]
+    fn observers_run_outside_the_vault_lock_and_may_use_the_vault() {
+        let (_root, service, _name, _scope, _handle) = service_with_secret();
+        let service = Arc::new(service);
+        let weak = Arc::downgrade(&service);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        service.add_lock_observer(move |_| {
+            // Both calls would deadlock if observers ran under the session lock
+            // or waited for their own delivery.
+            if let Some(service) = weak.upgrade() {
+                let state = service.status().state;
+                record
+                    .lock()
+                    .unwrap()
+                    .push((state, service.lock().was_unlocked));
+            }
+        });
+        service.lock();
+        assert_eq!(*seen.lock().unwrap(), [(VaultState::Locked, false)]);
+
+        service.unlock(&passphrase(PASSPHRASE)).unwrap();
+        service.set_idle_timeout(Some(Duration::from_millis(20)));
+        assert_eq!(
+            wait_for(&seen, 2),
+            [(VaultState::Locked, false), (VaultState::Locked, false)]
+        );
+    }
+
+    #[test]
+    fn observers_are_released_with_the_service() {
+        let (_root, service, _name, _scope, _handle) = service_with_secret();
+        let marker = Arc::new(());
+        let held = Arc::clone(&marker);
+        service.add_lock_observer(move |_| {
+            let _ = &held;
+        });
+        drop(service);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&marker) > 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the observer outlived the service"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn unlock_delivers_a_session_end_from_another_thread_before_the_new_session() {
+        let (_root, service, name, _scope, _handle) = service_with_secret();
+        let service = Arc::new(service);
+        let weak = Arc::downgrade(&service);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        service.add_lock_observer(move |notice| {
+            // A slow cleanup: an unlock that did not wait for it would open the
+            // next session, and return, before it ran. It must find the vault
+            // locked, not the session that the unlock below opens next.
+            thread::sleep(Duration::from_millis(200));
+            let state = weak.upgrade().map(|service| service.status().state);
+            record.lock().unwrap().push((notice.reason, state));
+        });
+
+        // After `unlock` delivered the queued notices but before it takes the
+        // session lock, another thread ends the session with an uncertain commit.
+        let other = Arc::clone(&service);
+        BEFORE_SESSION_LOCK.set(Some(Box::new(move || {
+            thread::spawn(move || {
+                fail_next_write(other.dir(), WriteFailure::AfterRename);
+                assert_uncertain(&other.delete_secret(&name).unwrap_err());
+            })
+            .join()
+            .unwrap();
+        })));
+        service.unlock(&passphrase(PASSPHRASE)).unwrap();
+        assert!(BEFORE_SESSION_LOCK.take().is_none(), "the hook ran");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [(LockReason::CommitUncertain, Some(VaultState::Locked))],
+            "delivered before unlock returned, while the vault was still locked"
+        );
+        assert_eq!(service.status().state, VaultState::Unlocked);
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(seen.lock().unwrap().len(), 1, "delivered once");
+    }
+
+    #[test]
+    fn a_panic_while_the_vault_is_in_use_locks_it_and_is_observed() {
+        let (_root, service, _name, scope, handle) = service_with_secret();
+        let vault_id = service.status().vault_id.unwrap();
+        let notices = observe(&service);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.with_vault(|_| -> Result<(), VaultError> {
+                panic!("injected panic while the vault is in use")
+            })
+        }));
+        assert!(panicked.is_err());
+        // The next use of the poisoned session fails closed and queues the notice;
+        // `lock` delivers it on this thread before returning.
+        assert_eq!(service.status().state, VaultState::Locked);
+        assert!(!service.lock().was_unlocked);
+        assert_eq!(
+            *notices.lock().unwrap(),
+            [LockNotice {
+                vault_id,
+                reason: LockReason::Panic,
+                revoked_handles: 1,
+            }]
+        );
+        assert_eq!(
+            service.resolve(&handle, &scope).unwrap_err().kind(),
+            VaultErrorKind::Locked
+        );
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(notices.lock().unwrap().len(), 1, "delivered once");
     }
 }

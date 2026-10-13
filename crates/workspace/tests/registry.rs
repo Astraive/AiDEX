@@ -8,8 +8,8 @@ use std::fs;
 use aidex_core::ServiceErrorCode;
 use aidex_drive::DrivePaths;
 use aidex_workspace::{
-    Access, MARKER_FILE, TREE_DIR, Vcs, WorkspaceAvailability, WorkspaceError, WorkspaceKind,
-    WorkspaceRegistry, WorkspaceRoot,
+    Access, ApplySelection, MARKER_FILE, TREE_DIR, Vcs, WorkspaceAvailability, WorkspaceError,
+    WorkspaceKind, WorkspaceRegistry, WorkspaceRoot,
 };
 use common::{Drive, canonical, project, wp};
 
@@ -438,6 +438,146 @@ fn a_host_root_replaced_by_a_link_is_unavailable_and_never_accessed() {
         fs::read_to_string(repo.path().join("original/original.txt")).unwrap(),
         "original"
     );
+}
+
+#[test]
+fn a_host_root_whose_parent_was_replaced_by_a_link_is_unavailable_and_never_read() {
+    let drive = Drive::new();
+    let registry = drive.registry();
+    let repo = project(&[("parent/root/original.txt", "original")]);
+    let parent = repo.path().join("parent");
+    let root = parent.join("root");
+    let outside = project(&[("root/secret.txt", "secret"), ("root/.git/HEAD", "ref")]);
+    let workspace = registry.add_host(&root, Some("redirected-parent")).unwrap();
+    let copy = registry.create_ephemeral(&workspace.id).unwrap().workspace;
+    let held = registry.handle(&workspace.id).unwrap();
+    fs::rename(&parent, repo.path().join("moved")).unwrap();
+    if !common::dir_link(outside.path(), &parent) {
+        return;
+    }
+    // Only a parent is a link: the root's own last component is a real directory.
+    assert!(fs::symlink_metadata(&root).unwrap().is_dir());
+
+    for current in [
+        registry.get(&workspace.id).unwrap(),
+        registry.list().unwrap().remove(0),
+        drive.registry().get(&workspace.id).unwrap(),
+    ] {
+        let WorkspaceAvailability::Unavailable { reason } = &current.availability else {
+            panic!("expected unavailable, got {:?}", current.availability);
+        };
+        assert!(
+            reason.contains("resolves to a different location"),
+            "{reason}"
+        );
+        assert!(current.repository.is_none());
+    }
+    for refusal in [
+        registry.confined_root(&workspace.id).map(drop),
+        registry.handle(&workspace.id).map(drop),
+        registry.create_ephemeral(&workspace.id).map(drop),
+        registry.review(&copy.id).map(drop),
+        registry
+            .apply(&copy.id, &ApplySelection::All, None)
+            .map(drop),
+        // A handle resolved before the replacement no longer reads or writes through it.
+        held.resolve(&wp("secret.txt"), Access::Read).map(drop),
+        held.resolve(&wp("added.txt"), Access::Create).map(drop),
+    ] {
+        let error = refusal.unwrap_err();
+        assert!(
+            matches!(error, WorkspaceError::RootUnavailable { .. }),
+            "{error}"
+        );
+    }
+    assert!(matches!(
+        held.relativize(&root.join("secret.txt")),
+        Err(WorkspaceError::EscapesRoot(_))
+    ));
+    assert_eq!(
+        common::files_under(outside.path()),
+        ["root/.git/HEAD", "root/secret.txt"]
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("moved/root/original.txt")).unwrap(),
+        "original"
+    );
+
+    // The copy can still be discarded, and registering again accepts the new location.
+    registry.discard(&copy.id).unwrap();
+    registry.remove(&workspace.id).unwrap();
+    let accepted = registry.add_host(&root, Some("accepted")).unwrap();
+    assert!(accepted.is_available(), "{:?}", accepted.availability);
+    assert_eq!(
+        canonical(std::path::Path::new(&accepted.path)),
+        canonical(&outside.path().join("root"))
+    );
+}
+
+#[test]
+fn untouched_host_roots_stay_available_however_they_were_spelled() {
+    let drive = Drive::new();
+    let registry = drive.registry();
+    let base = project(&[("plain/a.txt", "a")]);
+    let mut spellings = vec![base.path().join("plain")];
+    if cfg!(windows) {
+        let text = base.path().to_string_lossy().into_owned();
+        common::write(base.path(), "verbatim/a.txt", "a");
+        spellings.push(std::path::PathBuf::from(format!(r"\\?\{text}\verbatim")));
+        common::write(base.path(), "mixed-case/a.txt", "a");
+        spellings.push(std::path::PathBuf::from(format!(
+            r"{}\MIXED-CASE",
+            text.to_uppercase()
+        )));
+        // Longer than MAX_PATH, so the root is stored with its verbatim prefix.
+        let long = ["long", &"x".repeat(100), &"y".repeat(100), &"z".repeat(100)].join("/");
+        common::write(base.path(), &format!("{long}/a.txt"), "a");
+        spellings.push(
+            long.split('/')
+                .fold(base.path().to_path_buf(), |path, part| path.join(part)),
+        );
+    }
+    let ids: Vec<_> = spellings
+        .iter()
+        .enumerate()
+        .map(|(index, spelling)| {
+            let workspace = registry
+                .add_host(spelling, Some(&format!("spelling-{index}")))
+                .unwrap();
+            assert!(
+                workspace.is_available(),
+                "{}: {:?}",
+                spelling.display(),
+                workspace.availability
+            );
+            workspace.id
+        })
+        .collect();
+    if cfg!(windows) {
+        let long = registry.get(ids.last().unwrap()).unwrap();
+        assert!(long.root.as_str().starts_with(r"\\?\"), "{}", long.path);
+        // A case-only rename keeps the same directory on a case-insensitive volume.
+        fs::rename(base.path().join("plain"), base.path().join("PLAIN")).unwrap();
+    }
+
+    let reopened = drive.registry();
+    for current in [&registry, &reopened] {
+        for id in &ids {
+            let workspace = current.get(id).unwrap();
+            assert!(
+                workspace.is_available(),
+                "{}: {:?}",
+                workspace.path,
+                workspace.availability
+            );
+            let file = current
+                .handle(id)
+                .unwrap()
+                .resolve(&wp("a.txt"), Access::Read)
+                .unwrap();
+            assert_eq!(fs::read_to_string(file).unwrap(), "a");
+        }
+    }
 }
 
 #[test]

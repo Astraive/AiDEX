@@ -486,6 +486,38 @@ fn workspace_mcp_json_files_import_disabled_servers() {
     );
 }
 
+/// The vault's lock observer stops servers as the session ends, so a lock
+/// followed at once by an unlock (well within one watchdog interval) still
+/// stops them.
+#[test]
+fn a_vault_lock_stops_running_servers_before_it_returns() {
+    let f = fixture();
+    let vault = f.services.vault();
+    vault.set_kdf_params(aidex_vault::KdfParams::new(8, 1, 1).unwrap());
+    vault
+        .init(&SecretString::new(PASSPHRASE.into()), false)
+        .unwrap();
+    f.ok(ADD, stdio_spec("fixture", true));
+    assert_eq!(f.ok(START, json!({"id": "fixture"}))["status"], "running");
+    assert!(vault.lock().was_unlocked);
+    assert_eq!(f.status("fixture"), "stopped");
+    vault.unlock(&SecretString::new(PASSPHRASE.into())).unwrap();
+    assert_eq!(f.status("fixture"), "stopped");
+    let logs = f.ok(LOGS, json!({"id": "fixture"}));
+    let lines: Vec<&str> = logs["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line["text"].as_str().unwrap())
+        .collect();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("stopped because the vault was locked")),
+        "{lines:?}"
+    );
+}
+
 #[test]
 fn vault_lock_and_emergency_stop_stop_running_servers() {
     let f = fixture();
@@ -500,8 +532,11 @@ fn vault_lock_and_emergency_stop_stop_running_servers() {
     f.services.vault().lock();
     f.wait_for_status("fixture", "stopped");
 
-    // A server without secrets runs with a locked vault.
+    // A server without secrets runs with a locked vault: the watchdog leaves
+    // it alone, since the lock observer already handled that lock.
     assert_eq!(f.ok(START, json!({"id": "fixture"}))["status"], "running");
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(f.status("fixture"), "running");
     f.services
         .broker()
         .emergency_stop("test emergency", &aidex_broker::Principal::LocalUser)

@@ -73,7 +73,7 @@ Index tables: `meta`, `files(path, size, mtime_ns, sha256, language, lines, reda
 
 ## Daemon and CLI
 
-`aidexd` methods (see `protocol/commands/README.md`): `context.index`, `context.index.cancel`, `context.status`, `context.search`, `context.pack` (debug view, budget ≤ 100 000), `memory.list|add|edit|remove` (user-written memories only), and `rules.show`. Index jobs emit `task.created` (role `context.index`), `task.started`, and `task.completed`/`task.cancelled`/`task.failed` events scoped to the workspace; progress is polled with `context.status`. CLI: `aidex index build|status|cancel`, `aidex search`, `aidex context pack`, `aidex memory`, `aidex rules show` (`apps/cli/README.md`).
+`aidexd` methods (see `protocol/commands/README.md`): `context.index`, `context.index.cancel`, `context.status`, `context.search`, `context.pack` (debug view, budget ≤ 100 000), `memory.list|add|edit|remove` (user-written memories only), and `rules.show`. Index jobs emit `task.created` (role `context.index`), `task.started`, and `task.completed`/`task.cancelled`/`task.failed` events scoped to the workspace; progress is polled with `context.status`, and a job reads `running` until its terminal event is recorded (a failed append sets `event_error`). CLI: `aidex index build|status|cancel`, `aidex search`, `aidex context pack`, `aidex memory`, `aidex rules show` (`apps/cli/README.md`).
 
 ## Limitations
 

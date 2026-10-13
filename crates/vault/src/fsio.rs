@@ -215,7 +215,7 @@ pub(crate) fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), V
     let temporary = dir.join(format!(".{name}.{suffix}{TEMP_SUFFIX}"));
     let written = write_new_file(&temporary, bytes)
         .and_then(|()| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             test_write_failure(dir, WriteFailure::BeforeRename)?;
             fs::rename(&temporary, &target)
         })
@@ -274,7 +274,7 @@ pub(crate) fn sync_dir(dir: &Path) -> Result<(), VaultError> {
 }
 
 fn sync_dir_io(dir: &Path) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     test_write_failure(dir, WriteFailure::AfterRename)?;
     #[cfg(unix)]
     {
@@ -285,26 +285,29 @@ fn sync_dir_io(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum WriteFailure {
+/// Where an injected failure strikes a write: before the temporary file is renamed
+/// into place, or after the rename, when the directory is synced (which makes a
+/// header commit uncertain).
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteFailure {
     BeforeRename,
     AfterRename,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 thread_local! {
     static WRITE_FAILURE: std::cell::RefCell<Option<(PathBuf, WriteFailure)>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Inject one filesystem failure on this thread, without affecting other vaults.
-#[cfg(test)]
-pub(crate) fn fail_next_write(dir: &Path, stage: WriteFailure) {
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn fail_next_write(dir: &Path, stage: WriteFailure) {
     WRITE_FAILURE.with(|failure| *failure.borrow_mut() = Some((dir.to_path_buf(), stage)));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn test_write_failure(dir: &Path, stage: WriteFailure) -> io::Result<()> {
     WRITE_FAILURE.with(|failure| {
         let mut failure = failure.borrow_mut();

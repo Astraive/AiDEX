@@ -15,6 +15,9 @@ use crate::{
     platform::{self, ENFORCE_WINDOWS_RULES, windows_component_issue},
 };
 
+/// Why a root whose path now names another directory is unavailable.
+pub(crate) const RELOCATED_ROOT: &str = "the root path now resolves to a different location";
+
 /// What the caller intends to do with a resolved path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Access {
@@ -95,20 +98,28 @@ impl ConfinedRoot {
     /// the root. Unresolvable links (dangling or looping) fail closed with
     /// [`WorkspaceError::EscapesRoot`]. Read/Write require the path to exist; Create
     /// allows missing components (the caller creates them) but refuses a leaf that
-    /// is itself a link.
+    /// is itself a link. A root whose path no longer resolves to itself (a parent
+    /// directory was replaced by a link, or a mount was remapped so the path resolves elsewhere) is
+    /// [`WorkspaceError::RootUnavailable`].
     pub fn resolve(&self, path: &WorkspacePath, access: Access) -> Result<PathBuf, WorkspaceError> {
         validate_components(path)?;
         let escapes = || WorkspaceError::EscapesRoot(path.as_str().to_owned());
+        let unavailable = |reason: &str| WorkspaceError::RootUnavailable {
+            workspace: self.display_root().display().to_string(),
+            reason: reason.to_owned(),
+        };
         match fs::symlink_metadata(&self.root) {
             // The canonical root was replaced by a link after it was resolved.
             Ok(metadata) if metadata.file_type().is_symlink() => return Err(escapes()),
             Ok(metadata) if metadata.is_dir() => {}
-            _ => {
-                return Err(WorkspaceError::RootUnavailable {
-                    workspace: self.display_root().display().to_string(),
-                    reason: "the root directory no longer exists".into(),
-                });
-            }
+            _ => return Err(unavailable("the root directory no longer exists")),
+        }
+        // The root is canonical, so any other resolution means one of its parent
+        // directories now leads somewhere else.
+        match fs::canonicalize(&self.root) {
+            Ok(current) if platform::same_location(&current, &self.root) => {}
+            Ok(_) => return Err(unavailable(RELOCATED_ROOT)),
+            Err(_) => return Err(unavailable("the root directory can no longer be resolved")),
         }
         let segments: Vec<&str> = path.as_str().split('/').collect();
         let last = segments.len() - 1;

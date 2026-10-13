@@ -193,6 +193,7 @@ fn external_changes_end_the_session_instead_of_being_overwritten() {
         )
         .unwrap_err();
     assert_eq!(error.kind(), VaultErrorKind::Conflict);
+    assert!(service.ends_session(&error));
     assert_eq!(service.status().state, VaultState::Locked);
 }
 

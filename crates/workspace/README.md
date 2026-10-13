@@ -41,7 +41,11 @@ workspaces/ephemeral/<id>/tree/            ephemeral workspace root
 - **Explicit roots.** A host root is exactly the directory the user selected, canonicalized; discovery only informs. It must exist. The drive root, any directory that contains the drive (which would expose the vault, identity, and sessions), and roots containing or lying inside any declared managed directory or `.aidex` are refused, including custom layouts. Unrelated sibling directories remain allowed. The check is repeated whenever a host root is resolved for use. A root that is already registered (in any spelling) is a conflict; names are unique case-insensitively.
 - **Unavailable roots are reported, never recreated.** A missing host root (or one added on another OS) is `Unavailable` in `list`/`get` and `RootUnavailable` for `confined_root`/`handle`; nothing is created. The registry, ids, and selection survive restarts.
   Persisted host roots replaced by symbolic links or junctions are unavailable;
-  workspace access never redirects to the replacement target.
+  workspace access never redirects to the replacement target. The same holds when a
+  root's path now resolves to a different location (a parent directory replaced by a
+  link, a mount remapped so the path resolves elsewhere, or a case-only rename on a case-insensitive macOS volume):
+  availability, `confined_root`/`handle`, and `ConfinedRoot::resolve` on an existing
+  handle fail closed. Remove and re-add the workspace to accept the new location.
 - **Confinement.** `WorkspacePath` rejects traversal, absolute and drive-letter paths, UNC paths, backslashes, and `:` (so NTFS alternate data streams). Resolution walks components from the canonical root: real entries are physical children, and a symbolic link or junction is followed only when its fully resolved target stays inside the root; dangling or looping links fail closed (`EscapesRoot`). `Create` refuses a leaf that is itself a link. On Windows, reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM0-9`, `LPT0-9`, superscript forms, `CONIN$`, `CONOUT$`, any extension), trailing dots/spaces, and `<>:"|?*` are rejected; comparisons ignore case and treat `\\?\C:\x`/`C:\x` and `\\?\UNC\s\x`/`\\s\x` as the same location. Drive workspace roots must be reached through real directories from `workspaces/`.
 - **Ephemeral copies.** The copy honours `.gitignore` files (from the source root down, plus those between an enclosing repository's root and the source, and `.git/info/exclude`; the user's global excludes file is host-specific and not read), always skips `.git/` and `.aidex/`, never follows or reproduces links (reported as `skipped`), and hashes exactly the bytes it writes into the baseline. Exceeding `EphemeralLimits` (default 50 000 files, 2 GiB) aborts and removes the partial copy.
   Repository excludes also come from valid `gitdir:` files (separate Git directories)
@@ -56,8 +60,9 @@ workspaces/ephemeral/<id>/tree/            ephemeral workspace root
   review/apply returns `TooLarge` before any selected change is applied.
 - **Selective, atomic apply.** Only selected, non-conflicting changes are written; a selected path that is not a change rejects the whole request before anything is written, and a `digest` that no longer matches refuses the apply (`ReviewChanged`). Each file is re-verified (ephemeral hash, source state, confinement after creating parents and again just before rename), written to an exclusive temporary file, fsynced, and renamed into place. Applied changes are folded into the baseline; rejected and unselected changes are never applied.
 - **Deletion only of AiDEX-created data.** `remove` only unregisters. `delete_data`/`discard` refuse host workspaces, delete only `workspaces/<id>/` or `workspaces/ephemeral/<id>/` after verifying the ownership marker names that workspace, refuse when the directory or its parents are links, remove links inside the tree without following them, and never touch anything else. A workspace with ephemeral copies cannot be removed until they are discarded.
-  Ephemeral creation and source data deletion share the operation lock: a completed
-  child prevents source deletion, and a completed deletion prevents child creation.
+  Ephemeral creation, source data deletion, and `remove` share the operation lock: a
+  completed child prevents deleting or unregistering its source, and a completed
+  deletion or unregistration makes child creation `NotFound`.
 
 ## Limitations
 

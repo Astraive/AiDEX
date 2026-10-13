@@ -4,13 +4,15 @@
 //! Index jobs are reported as `task.*` events (`task.created` with role
 //! [`INDEX_TASK_ROLE`], then `task.started` and `task.completed`,
 //! `task.cancelled`, or `task.failed`) scoped to the workspace; live progress is
-//! read with [`ContextService::status`].
+//! read with [`ContextService::status`]. A job stays `running` until its terminal
+//! event has been recorded, so whoever sees it finished also finds that event
+//! (or the job's `event_error`).
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use aidex_core::{CancelToken, EntityId, Timestamp};
@@ -83,15 +85,15 @@ pub struct IndexJobStarted {
 
 struct Job {
     status: Mutex<IndexJobStatus>,
+    /// Notified when `status` leaves [`JobState::Running`].
+    finished: Condvar,
     cancel: CancelToken,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Job {
     fn status(&self) -> MutexGuard<'_, IndexJobStatus> {
-        self.status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.status.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -108,9 +110,7 @@ pub struct ContextService {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl ContextService {
@@ -203,6 +203,7 @@ impl ContextService {
                 error: None,
                 event_error: None,
             }),
+            finished: Condvar::new(),
             cancel: CancelToken::new(),
             handle: Mutex::new(None),
         });
@@ -233,7 +234,6 @@ impl ContextService {
             }
             Err(error) => {
                 let message = format!("cannot start the index job: {error}");
-                finish(&job, JobState::Failed, None, Some(message.clone()));
                 emit(
                     &*self.events,
                     &job,
@@ -242,6 +242,7 @@ impl ContextService {
                         reason: message.clone(),
                     },
                 );
+                finish(&job, JobState::Failed, None, Some(message.clone()));
                 jobs.insert(workspace, job);
                 Err(ContextError::Index(message))
             }
@@ -260,14 +261,17 @@ impl ContextService {
         }
     }
 
-    /// Wait up to `timeout` for the workspace's job to finish; returns its status.
+    /// Wait up to `timeout` for the workspace's job to finish (its terminal
+    /// `task.*` event recorded); returns its status.
     pub fn wait_index(&self, workspace: &EntityId, timeout: Duration) -> Option<IndexJobStatus> {
         let job = lock(&self.jobs).get(workspace).map(Arc::clone)?;
-        let deadline = Instant::now() + timeout;
-        while job.status().state == JobState::Running && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        Some(job.status().clone())
+        let (status, _) = job
+            .finished
+            .wait_timeout_while(job.status(), timeout, |status| {
+                status.state == JobState::Running
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        Some(status.clone())
     }
 
     /// Run a build on the calling thread (for the harness and tests).
@@ -370,12 +374,19 @@ fn emit(events: &dyn EventSink, job: &Job, event: EventKind) {
     }
 }
 
+/// Publish the job's terminal state and wake [`ContextService::wait_index`].
+/// Called only after the terminal `task.*` event was emitted: until then the job
+/// reads as running, so no observer sees it finished without that event (or its
+/// `event_error`), and no new job for the workspace can start in between.
 fn finish(job: &Job, state: JobState, report: Option<IndexReport>, error: Option<String>) {
-    let mut status = job.status();
-    status.state = state;
-    status.report = report;
-    status.error = error;
-    status.finished_at = Some(Timestamp::now());
+    {
+        let mut status = job.status();
+        status.state = state;
+        status.report = report;
+        status.error = error;
+        status.finished_at = Some(Timestamp::now());
+    }
+    job.finished.notify_all();
 }
 
 fn run_job(
@@ -399,30 +410,25 @@ fn run_job(
     match result {
         Ok(report) => {
             let cancelled = report.outcome == BuildOutcome::Cancelled;
-            let state = if cancelled {
-                JobState::Cancelled
+            let (state, event) = if cancelled {
+                (JobState::Cancelled, EventKind::TaskCancelled { task_id })
             } else {
-                JobState::Completed
-            };
-            finish(job, state, Some(report), None);
-            let event = if cancelled {
-                EventKind::TaskCancelled { task_id }
-            } else {
-                EventKind::TaskCompleted { task_id }
+                (JobState::Completed, EventKind::TaskCompleted { task_id })
             };
             emit(events, job, event);
+            finish(job, state, Some(report), None);
         }
         Err(error) => {
             let message = error.to_string();
-            finish(job, JobState::Failed, None, Some(message.clone()));
             emit(
                 events,
                 job,
                 EventKind::TaskFailed {
                     task_id,
-                    reason: message,
+                    reason: message.clone(),
                 },
             );
+            finish(job, JobState::Failed, None, Some(message));
         }
     }
 }

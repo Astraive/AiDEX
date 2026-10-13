@@ -7,9 +7,15 @@ use aidex_native_sessions::{
     ATTACHMENT_TEXT_PAGE_BYTES, MAX_ATTACHMENTS_PER_MESSAGE, MAX_STAGED_PER_SESSION,
     MAX_TEXT_ATTACHMENT_BYTES, NewAttachment, RunOptions, digest,
 };
-use aidex_vault::SecretString;
+use aidex_vault::{
+    SecretString,
+    testing::{WriteFailure, fail_next_write},
+};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 const PASSPHRASE: &str = "fixture-passphrase";
 
@@ -672,7 +678,7 @@ fn attachments_are_unavailable_while_the_vault_is_locked() {
         h.call("attachment.upload.abort", json!({"upload_id": upload}))
             .unwrap(),
         json!({"aborted": false}),
-        "abort needs no key; the failed chunk already ended the upload"
+        "abort needs no key; the lock already ended the upload"
     );
     assert_eq!(h.temporary_files(), 0);
     h.unlock();
@@ -683,7 +689,16 @@ fn attachments_are_unavailable_while_the_vault_is_locked() {
 fn locking_the_vault_mid_upload_ends_every_upload() {
     let h = Harness::new();
     let bytes = vec![b'x'; UPLOAD_CHUNK_BYTES + 10];
-    for lock in ["vault.lock", "emergency.stop", "idle"] {
+    // Sessions the vault ends on its own are cleaned up in the background.
+    let await_cleanup = |lock: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while h.temporary_files() > 0 {
+            assert!(Instant::now() < deadline, "{lock} kept the partial file");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(h.services.vault().status().state, VaultState::Locked);
+    };
+    for lock in ["vault.lock", "emergency.stop", "idle", "uncertain commit"] {
         let upload = h.begin("big.txt", &bytes).unwrap();
         h.chunk(&upload, 0, &bytes[..UPLOAD_CHUNK_BYTES]).unwrap();
         assert!(h.temporary_files() > 0);
@@ -699,9 +714,25 @@ fn locking_the_vault_mid_upload_ends_every_upload() {
                 assert_eq!(report["vault_locked"], true);
                 assert_eq!(h.temporary_files(), 0, "{lock} deletes partial files");
             }
-            // The idle auto-lock only expires the vault session.
+            "idle" => {
+                let vault = h.services.vault();
+                vault.set_idle_timeout(Some(Duration::from_millis(50)));
+                await_cleanup(lock);
+                vault.set_idle_timeout(None);
+            }
+            // The vault drops its session after an uncertain header commit.
             _ => {
-                h.services.vault().lock();
+                h.call(
+                    "vault.secret.set",
+                    json!({"name": "dropped", "value": "v", "consumers": ["provider:openai"]}),
+                )
+                .unwrap();
+                fail_next_write(h.services.vault().dir(), WriteFailure::AfterRename);
+                let error = h
+                    .call("vault.secret.delete", json!({"name": "dropped"}))
+                    .unwrap_err();
+                assert_eq!(error.data.unwrap()["session_dropped"], true);
+                await_cleanup(lock);
             }
         }
         let next = h
@@ -870,7 +901,6 @@ fn sent_attachments_appear_on_their_message_run_and_history() {
         FakeProvider, FakeScript, FakeTurn, Locality, ModelDescriptor, ModelId, ModelRef,
         ProviderId,
     };
-    use std::time::{Duration, Instant};
     let h = Harness::new();
     let provider = ProviderId::new("fixture").unwrap();
     let fake = Arc::new(

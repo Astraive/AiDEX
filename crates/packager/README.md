@@ -28,16 +28,14 @@ See [`portable/packaging/README.md`](../../portable/packaging/README.md) for the
 - Builds the host's own targets only; cross-compilation is untested.
 - Does not build or sign the Tauri apps; `--desktop`/`--installer` copy prebuilt artifacts and refuse symbolic links.
 - No provenance attestation (SLSA/in-toto) and no signing of the Tauri apps or OS-level code signing (Authenticode, notarization).
-- The smoke's host-residue check lists the top level of the watched directories only; it does not detect writes inside existing directories or changes to existing entries. The macOS policies exclude only the exact OS-maintained entries below, with their required types. The same name in another fully watched directory or under the other macOS directory policy, an unexpected type or symlink at that name, and all other new entries (including unrelated and AiDEX names) remain audited. File types are captured with the snapshot without following symlinks; unreadable types are never excluded. The audit identifies new entries under these rules; it does not attribute every host write to a process or prove the absence of host writes.
+- The smoke's host-residue check lists the top level of the watched directories only; it does not detect writes inside existing directories or changes to existing entries. On macOS, three OS-managed directories skip new state in Apple's `com.apple.` namespace (below); every other new entry, including unrelated and AiDEX names, is audited. File types are captured with the snapshot without following symlinks; unreadable types are never excluded. The audit identifies new entries under these rules; it does not attribute every host write to a process or prove the absence of host writes.
 
-The finite macOS exceptions address background OS activity observed during package smoke runs:
+macOS services write their own state into the per-user Library on their own schedule, under Apple's reserved `com.apple.` reverse-DNS namespace. Four package smoke runs on `main` failed on GitHub's macOS runners within three days, each on Apple entries that no earlier exact-name exception covered (Siri, Apple Intelligence reporting, remote management, managed app distribution), so an exact-name list cannot keep up. The Windows and Linux jobs have never reported OS-owned entries. These directories skip that namespace with the type the OS keeps there:
 
-| Watched directory               | Exact entry name                                                         | Required type |
-| ------------------------------- | ------------------------------------------------------------------------ | ------------- |
-| `~/Library/Preferences`         | `com.apple.siri.ODDI.ExperimentationWorker.plist`                        | Regular file  |
-| `~/Library/Preferences`         | `com.apple.GenerativeFunctions.GenerativeFunctionsInstrumentation.plist` | Regular file  |
-| `~/Library/Preferences`         | `com.apple.appleintelligencereporting.plist`                             | Regular file  |
-| `~/Library/Application Support` | `com.apple.RemoteManagementAgent`                                        | Directory     |
-| `~/Library/Application Support` | `com.apple.appleintelligencereporting.processing`                        | Directory     |
+| Watched directory               | Skipped new entries                            |
+| ------------------------------- | ---------------------------------------------- |
+| `~/Library/Preferences`         | Regular files named `com.apple.<domain>.plist` |
+| `~/Library/Application Support` | Directories named `com.apple.<domain>`         |
+| `~/Library/Caches`              | Directories named `com.apple.<domain>`         |
 
-These rules match exact names and types, never an Apple namespace prefix. Other OS background entries can still fail the audit; a new exception requires evidence and regression coverage. The ignored entries and contents of their directories are outside this top-level audit's coverage.
+`<domain>` is one or more non-empty, dot-separated labels of ASCII letters, digits, `-`, and `_`; the `com.apple.` prefix is case-sensitive. Still audited: any name containing `aidex` in any case (including AiDEX's `dev.aidex.*` identifiers and `com.apple.aidex.plist`), every name outside the namespace, other types and symlinks at Apple names, and Apple names in the home directory, `~/Library/Logs`, or under the other directory policy. The Windows and Linux directories have no exceptions. Skipped entries count as host-controlled state ([spec §41](../../docs/spec.md)) even if an AiDEX action led an Apple service or tool to write them, and their contents are outside this top-level audit's coverage.

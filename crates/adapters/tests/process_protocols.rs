@@ -378,7 +378,10 @@ fn malformed_truncated_bounded_frames_and_cancellation_fail_closed() {
             &CancelToken::new().with_timeout(Duration::from_secs(1)),
         );
         assert!(result.is_err(), "{scenario}");
-        assert!(manager.process_registry().is_empty());
+        assert!(
+            manager.process_registry().is_empty(),
+            "{scenario}: {result:?}"
+        );
     }
 }
 #[test]
@@ -1645,4 +1648,25 @@ fn installer_refuses_missing_manifest_and_hash_mismatch_then_copies_verified_com
         manager.install(Driver::Codex, None).unwrap_err().code,
         "conflict"
     );
+}
+#[test]
+fn failed_run_returns_only_after_its_live_native_tree_left_the_registry() {
+    // The peer answers turn/start with an error and keeps running, so the run fails
+    // without the transport's own stop path. Several rounds make a stale entry, which
+    // used to linger until the monitor thread reaped the killed tree, near certain.
+    for _ in 0..5 {
+        let (_dir, manager, request) = setup(Driver::Codex, "auth");
+        let error = manager.executors().unwrap()[0]
+            .execute(
+                &request,
+                &mut |_| RuntimeControl::Continue,
+                &CancelToken::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "auth_required");
+        assert!(manager.process_registry().is_empty());
+        // Configuration changes are refused while a runtime is live; a failed run
+        // must not leave a registration that reports the runtime as still busy.
+        manager.save(manager.get("fixture").unwrap()).unwrap();
+    }
 }

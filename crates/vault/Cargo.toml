@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Development and test only: `testing::fail_next_write` injects filesystem failures
+# (for example an uncertain header commit). Enabled only through dependents'
+# dev-dependencies, so release builds never contain it.
+test-hooks = []
+
 [dependencies]
 aidex-core = { path = "../core" }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }

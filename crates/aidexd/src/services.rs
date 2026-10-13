@@ -11,6 +11,7 @@ mod inference;
 mod mcp;
 mod models;
 mod runtime;
+mod vault_lock;
 mod web;
 
 pub use extensions::DaemonExtensions;
@@ -195,6 +196,9 @@ impl Services {
             runtime.join("native-processes"),
             extensions,
         );
+        // Every end of the vault session (lock, idle auto-lock, a dropped session)
+        // cancels native runs, aborts uploads, and records `vault.locked`.
+        vault_lock::clean_up_on_lock(&vault, &native, &events);
         let inference = inference::open_inference(&paths, &models)?;
         // External runtimes are optional: the daemon starts without them and
         // `runtime.*` reports why they are unavailable.
@@ -256,7 +260,8 @@ impl Services {
     }
 
     /// The drive's encrypted vault (`aidex-vault`). Handle issuance/resolution for the
-    /// broker are Rust methods on [`VaultService`]; they are not RPC methods.
+    /// broker are Rust methods on [`VaultService`]; they are not RPC methods. Every
+    /// end of its unlocked session runs the daemon's lock cleanup (`vault_lock`).
     pub fn vault(&self) -> &Arc<VaultService> {
         &self.vault
     }

@@ -2,13 +2,12 @@
 //! and resume.
 
 use crate::{
-    methods::{approvals::broker_error, record_event},
+    methods::approvals::broker_error,
     router::{Router, RouterError},
     rpc::{expect_no_params, parse_params, to_result},
     services::Services,
 };
 use aidex_broker::Principal;
-use aidex_events::{EventKind, EventScope};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -53,19 +52,11 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             .emergency_stop(reason, &Principal::LocalUser)
             .map_err(|error| broker_error(&error))?;
         if params.lock_vault {
-            // Attachment uploads in flight end with the vault (files deleted).
-            shared.native().store().abort_all_uploads();
-            let vault_id = shared.vault().status().vault_id;
-            let outcome = shared.vault().lock();
+            // As `vault.lock`: native runs are cancelled, uploads in flight are
+            // aborted (files deleted), and `vault.locked` is recorded.
+            let outcome = super::vault::lock_vault(&shared);
             report.vault_locked = true;
             report.revoked_handles += outcome.revoked_handles;
-            if let (true, Some(vault_id)) = (outcome.was_unlocked, vault_id) {
-                record_event(
-                    &shared,
-                    EventScope::global(),
-                    EventKind::VaultLocked { vault_id },
-                )?;
-            }
         }
         to_result(&report)
     })?;

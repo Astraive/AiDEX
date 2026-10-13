@@ -6,14 +6,16 @@ mod common;
 
 use std::{
     fs,
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant, SystemTime},
 };
 
 use aidex_context::{
-    BuildOutcome, DropReason, Index, IndexOptions, IndexState, JobState, PackInclude, PackRequest,
-    Query, RecoveryKind, SearchMode, SymbolKind,
+    BuildOutcome, ContextService, DropReason, Index, IndexOptions, IndexState, JobState,
+    PackInclude, PackRequest, Query, RecoveryKind, SearchMode, SymbolKind,
 };
 use aidex_core::{CancelToken, WorkspacePath};
+use aidex_events::{Cursor, EventError, EventKind, EventScope, EventSink, MemoryEventSink};
 use common::*;
 
 fn wp(path: &str) -> WorkspacePath {
@@ -489,14 +491,83 @@ fn background_jobs_report_task_events_and_can_be_cancelled() {
         .service
         .wait_index(&fixture.workspace, Duration::from_secs(120))
         .unwrap();
-    assert!(
-        matches!(status.state, JobState::Cancelled | JobState::Completed),
-        "{status:?}"
-    );
-    let last = fixture.events.names().last().cloned().unwrap();
-    assert!(
-        last == "task.cancelled" || last == "task.completed",
-        "{last}"
+    // The cancel can land after the build finished; either way the recorded
+    // terminal event matches the state `wait_index` reports.
+    let expected = match status.state {
+        JobState::Cancelled => "task.cancelled",
+        JobState::Completed => "task.completed",
+        _ => panic!("{status:?}"),
+    };
+    assert_eq!(fixture.events.names().last(), Some(&expected));
+    assert_eq!(status.event_error, None);
+}
+
+/// Records events, holding the first terminal `task.*` event of a job until the
+/// test releases it (or drops the release sender).
+#[derive(Default)]
+struct GatedSink {
+    inner: MemoryEventSink,
+    gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+}
+
+impl EventSink for GatedSink {
+    fn emit(&self, scope: EventScope, event: EventKind) -> Result<Cursor, EventError> {
+        let terminal = matches!(
+            event,
+            EventKind::TaskCompleted { .. }
+                | EventKind::TaskCancelled { .. }
+                | EventKind::TaskFailed { .. }
+        );
+        let gate = if terminal {
+            self.gate.lock().unwrap().take()
+        } else {
+            None
+        };
+        if let Some((reached, release)) = gate {
+            let _ = reached.send(());
+            let _ = release.recv();
+        }
+        self.inner.emit(scope, event)
+    }
+}
+
+#[test]
+fn index_jobs_finish_only_after_their_terminal_event_is_recorded() {
+    let fixture = Fixture::new(&[("notes.md", "a note\n")]);
+    let sink = Arc::new(GatedSink::default());
+    let service = ContextService::open(&fixture.drive.paths(), sink.clone()).unwrap();
+    // Created after `service`, so a failing assertion drops the release sender
+    // (unblocking the worker) before the service joins its job.
+    let (reached_tx, reached) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *sink.gate.lock().unwrap() = Some((reached_tx, release_rx));
+
+    let started = service.start_index(fixture.target()).unwrap();
+    reached
+        .recv_timeout(Duration::from_secs(120))
+        .expect("the job reaches its terminal event");
+    // The build is over but `task.completed` is not recorded yet: every observer
+    // still sees the job running, and no second job can start and interleave.
+    let job = service.status(&fixture.workspace).unwrap().job.unwrap();
+    assert_eq!(job.state, JobState::Running, "{job:?}");
+    let waited = service
+        .wait_index(&fixture.workspace, Duration::ZERO)
+        .unwrap();
+    assert_eq!(waited.state, JobState::Running, "{waited:?}");
+    let again = service.start_index(fixture.target()).unwrap();
+    assert!(again.already_running);
+    assert_eq!(again.job_id, started.job_id);
+    assert_eq!(sink.inner.names(), ["task.created", "task.started"]);
+
+    release.send(()).unwrap();
+    let status = service
+        .wait_index(&fixture.workspace, Duration::from_secs(120))
+        .unwrap();
+    assert_eq!(status.state, JobState::Completed, "{status:?}");
+    assert_eq!(status.event_error, None);
+    assert_eq!(
+        sink.inner.names(),
+        ["task.created", "task.started", "task.completed"]
     );
 }
 

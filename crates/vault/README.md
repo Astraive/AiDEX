@@ -56,10 +56,21 @@ let locked = vault.lock();                                   // keys zeroized, h
 `put_secret`, `list_secrets`, `secret_meta`, `secret_version`, `delete_secret`,
 `change_passphrase(old: Option<_>, new)`, `issue_handle`, `resolve`,
 `resolve_versioned`, `revoke_handle`, `revoke_all_handles`, `backup_to`,
-`set_kdf_params`, `set_idle_timeout`. It locks itself after 30 minutes
-without secret operations (configurable), re-reads the disk while locked (so damage or
-an external restore is reported), and drops its session on a `Conflict` or an
-ambiguous post-rename commit to its own header.
+`set_kdf_params`, `set_idle_timeout`, `add_lock_observer`, `ends_session`.
+It locks itself after 30 minutes without secret operations (configurable), re-reads the
+disk while locked (so damage or an external restore is reported), and drops its session
+on a `Conflict` or an ambiguous post-rename commit to its own header (`ends_session`
+tells which errors did). Every end of an unlocked session (lock, idle auto-lock,
+`Conflict`, uncertain commit, panic) is delivered once to each lock observer as a
+`LockNotice { vault_id, reason, revoked_handles }`, never under the vault's own locks:
+`lock` delivers on its caller's thread before returning, every other end on the
+service's background thread, in order. `unlock` and `init` begin a new session only
+after every earlier end has been delivered (including one that happened on another
+thread while they waited for the vault), so an observer's cleanup never reaches the new
+session. One exception: `unlock` while a session is open whose `vault.json` changed on
+disk replaces that session without a notice, because the vault never locks. The
+`test-hooks` feature, for dependents' dev-dependencies only, adds
+`testing::fail_next_write` to inject a write failure (such as an uncertain header commit).
 
 Types:
 
@@ -99,8 +110,12 @@ Types:
 - Unauthenticated KDF parameters are capped at 64 MiB, three Argon2id iterations,
   and four lanes. Headers above that budget are rejected before key derivation,
   including vaults created with previously accepted oversized parameters.
-- Restore accepts at most 4096 well-named record files and rejects excess records
-  before collecting references or copying files into the destination.
+- Restore accepts at most `MAX_RECORD_FILES` (4096 + 64 for orphaned records) well-named
+  record files and rejects excess records before collecting references or copying files
+  into the destination. `put` still refuses a new secret past `MAX_SECRETS` (4096), but
+  restore does not hold the index to it, so a restored backup may hold a few more
+  indexed records than `put` allows; they stay usable, and no new name is accepted
+  until fewer than 4096 remain.
 
 ## Limitations
 

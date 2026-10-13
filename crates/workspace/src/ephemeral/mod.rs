@@ -248,8 +248,11 @@ mod tests {
     use super::*;
     use std::{sync::mpsc, thread, time::Duration};
 
-    #[test]
-    fn creation_waits_for_source_deletion_before_reading_or_copying() {
+    fn open_registry() -> (
+        tempfile::TempDir,
+        aidex_drive::DrivePaths,
+        WorkspaceRegistry,
+    ) {
         let drive = tempfile::tempdir().unwrap();
         aidex_drive::init_with(
             drive.path(),
@@ -260,6 +263,12 @@ mod tests {
         .unwrap();
         let paths = aidex_drive::DrivePaths::open(drive.path()).unwrap();
         let registry = WorkspaceRegistry::open(&paths).unwrap();
+        (drive, paths, registry)
+    }
+
+    #[test]
+    fn creation_waits_for_source_deletion_before_reading_or_copying() {
+        let (_drive, paths, registry) = open_registry();
         let source = registry.create_drive("source").unwrap();
         let tree = registry.confined_root(&source.id).unwrap();
         std::fs::write(tree.root().join("keep.txt"), "source data").unwrap();
@@ -299,5 +308,56 @@ mod tests {
         });
         assert!(registry.list().unwrap().is_empty());
         assert!(!tree.root().exists());
+    }
+
+    #[test]
+    fn unregistering_a_source_waits_for_ephemeral_creation() {
+        let (_drive, _paths, registry) = open_registry();
+        let source = registry.create_drive("source").unwrap();
+        // Holding the operation lock stands in for a creation in progress.
+        let guard = registry
+            .ephemeral_ops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        thread::scope(|scope| {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            let registry_ref = &registry;
+            let source_id = &source.id;
+            scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                result_tx.send(registry_ref.remove(source_id)).unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            assert!(registry.get(&source.id).is_ok());
+            // Finish the creation the way create_ephemeral does: register the copy
+            // (its source must still exist), then release the lock.
+            let id = generate_id().unwrap();
+            registry
+                .insert_record(&Record {
+                    id: id.clone(),
+                    name: ephemeral_name(&source.name, &id),
+                    kind: WorkspaceKind::Ephemeral {
+                        source: source.id.clone(),
+                    },
+                    root: WorkspaceRoot::Drive(
+                        RelativePath::new(format!("{EPHEMERAL_DIR}/{id}/{TREE_DIR}")).unwrap(),
+                    ),
+                    created_at: Timestamp::now(),
+                    last_opened_at: None,
+                })
+                .unwrap();
+            drop(guard);
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                Err(WorkspaceError::Conflict(_))
+            ));
+        });
+        assert_eq!(registry.list().unwrap().len(), 2);
     }
 }

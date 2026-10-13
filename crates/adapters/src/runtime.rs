@@ -1009,6 +1009,8 @@ impl RuntimeExecutor for ExternalRuntime {
                 ));
             }
             let mut live = guard.remove(&r.run_id).unwrap();
+            // Release the live map first: a failed send drops `live`, whose
+            // transport waits for the native tree to be reaped.
             drop(guard);
             // The decision continues under the credential the request was made with.
             if let Err(e) =

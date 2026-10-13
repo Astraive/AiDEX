@@ -134,6 +134,15 @@ handlers without sockets.
   `DrivePaths::vault()`, default 30 min idle auto-lock). A damaged vault does not stop
   the daemon; `vault.status` reports it as `unavailable`. Secret handles are issued and
   resolved through `VaultService` in-process (for the broker), never over IPC.
+  `services/vault_lock.rs` observes every end of the unlocked session (`vault.lock`,
+  emergency stop, idle auto-lock, or a session dropped after a `conflict` or an
+  uncertain header commit) and runs the lock cleanup once: native runs cancelled,
+  attachment uploads aborted, `vault.locked` recorded. `services/mcp.rs` stops MCP
+  servers on the same notice (its polling watchdog stays as a backstop). The next
+  unlock waits until that cleanup ran, so it never reaches the new session. The one
+  exception: `vault.unlock` while a session is open whose `vault.json` changed on
+  disk replaces that session without a notice or cleanup, because the vault never
+  locks. Errors that dropped the session carry `data.session_dropped: true`.
 - DTOs for daemon methods live in this crate (`methods::*`), not in the
   generated `aidex-core` contract schema yet.
 - No per-client authorization beyond the bearer capability; any process of the
@@ -237,6 +246,6 @@ the runtime uses its own default.
 
 ### Chat attachments and forks
 
-`methods/attachments.rs` adapts the `aidex-native-sessions` attachment store: chunked uploads (`attachment.upload.begin|chunk|commit|abort`), `attachment.from_workspace`, `attachment.list|get|read|delete|exclude`. The daemon never reads a host path for an attachment except a registered project's file, resolved through its `ConfinedRoot`: the requested path and the resolved link target must both pass the credential-name checks (`aidex_tools::looks_sensitive`, `aidex_context::exclude::is_secret_path`), the opened handle must be a regular file of at most 16 MiB, and the store reads it through a bounded, zeroizing reader. Upload chunks are decoded from base64 into zeroizing buffers and sealed by the store as they arrive; nothing keeps the record key between calls. `vault.lock` and `emergency.stop {lock_vault: true}` abort every upload in flight (deleting its partial file), and a chunk or commit after any lock, including the idle auto-lock, is `vault_locked`. Store refusals (`<reason>: <detail>`) become `invalid_params` with `data.reason` (`busy` is `unavailable`); messages never carry a name, a path, or content, and no attachment event is recorded.
+`methods/attachments.rs` adapts the `aidex-native-sessions` attachment store: chunked uploads (`attachment.upload.begin|chunk|commit|abort`), `attachment.from_workspace`, `attachment.list|get|read|delete|exclude`. The daemon never reads a host path for an attachment except a registered project's file, resolved through its `ConfinedRoot`: the requested path and the resolved link target must both pass the credential-name checks (`aidex_tools::looks_sensitive`, `aidex_context::exclude::is_secret_path`), the opened handle must be a regular file of at most 16 MiB, and the store reads it through a bounded, zeroizing reader. Upload chunks are decoded from base64 into zeroizing buffers and sealed by the store as they arrive; nothing keeps the record key between calls. Every lock (`vault.lock`, `emergency.stop {lock_vault: true}`, the idle auto-lock, or a dropped session) aborts every upload in flight (deleting its partial file) through the vault lock cleanup, and a chunk or commit after any lock is `vault_locked`. Store refusals (`<reason>: <detail>`) become `invalid_params` with `data.reason` (`busy` is `unavailable`); messages never carry a name, a path, or content, and no attachment event is recorded.
 
 `message.send` and `agent.start` pass `attachments` to the harness in `RunOptions`; the daemon itself refuses more than 20 ids and attachments with `parent_run_id` (`attachment_unavailable`), and maps the harness's `attachments_unsupported` and `context_too_large_for_runtime` refusals to `invalid_params`. `conversation.get` and session `history.list` add `attachments` to user messages from `SessionStore::message_attachments` (the attachments table is authoritative; `Run::attachments` is only a cache), and runs show the `mode`, `permission_mode` and `workspace_id` they began with. `conversation.fork` (`methods/native_fork.rs`) validates the new configuration like `conversation.create`, then calls `SessionStore::fork` and returns the new conversation's bounded view. `model.list` entries carry `input: {images, pdf}` from `ProviderRegistry::model_input`, computed per listing and never persisted.

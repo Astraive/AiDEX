@@ -32,6 +32,10 @@ pub const MAX_SECRET_BYTES: usize = 64 * 1024;
 pub const MAX_SECRETS: usize = 4096;
 /// Lifetime of the handle [`UnlockedVault::resolve_versioned`] revokes before returning.
 const VERSIONED_HANDLE_TTL: Duration = Duration::from_secs(5);
+/// Most well-formed record files a restore enumerates: [`MAX_SECRETS`] plus headroom
+/// for unreferenced records that a crash or an uncertain commit can leave beside a
+/// full vault until the next unlock collects them.
+pub const MAX_RECORD_FILES: usize = MAX_SECRETS + 64;
 
 /// An unlocked vault. The master key and derived keys are zeroized when it is
 /// dropped or [`locked`](UnlockedVault::lock); its handles die with it.

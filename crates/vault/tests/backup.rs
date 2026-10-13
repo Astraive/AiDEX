@@ -2,7 +2,7 @@
 
 mod common;
 
-use aidex_vault::{MAX_SECRETS, SecretBytes, SecretKind, Vault, VaultErrorKind};
+use aidex_vault::{MAX_RECORD_FILES, MAX_SECRETS, SecretBytes, SecretKind, Vault, VaultErrorKind};
 use common::*;
 use std::fs;
 
@@ -115,31 +115,47 @@ fn damaged_backups_are_detected_on_restore_or_unlock() {
 }
 
 #[test]
-fn restore_bounds_record_count_before_copying_any_files() {
+fn restore_allows_orphan_headroom_and_bounds_record_files_before_copying() {
     let root = tempfile::tempdir().unwrap();
-    let (_dir, vault, _) = create_with_secret(root.path());
-    let backup = root.path().join("backup");
-    vault.backup_to(&backup).unwrap();
+    // A raw live vault directory: one indexed secret, plus well-named files standing
+    // in for the rest of a full vault (MAX_SECRETS) and for the orphans interrupted
+    // commits preserved beside it (the remaining headroom).
+    let (dir, vault, _) = create_with_secret(root.path());
     drop(vault);
-    let original_header = fs::read(header_path(&backup)).unwrap();
-    let records = backup.join("records");
-    // Include the one real record: exactly MAX_SECRETS files remain acceptable.
-    for id in 0..MAX_SECRETS - 1 {
+    let original_header = fs::read(header_path(&dir)).unwrap();
+    let records = dir.join("records");
+    for id in 0..MAX_RECORD_FILES - 1 {
         fs::write(records.join(format!("{id:032x}.json")), b"orphan").unwrap();
     }
+    assert!(
+        record_files(&dir).len() > MAX_SECRETS + 1,
+        "beyond the old bound"
+    );
     let allowed = root.path().join("allowed");
-    Vault::restore_from(&backup, &allowed).unwrap();
-    assert_eq!(record_files(&allowed).len(), MAX_SECRETS);
+    Vault::restore_from(&dir, &allowed).unwrap();
+    assert_eq!(record_files(&allowed).len(), MAX_RECORD_FILES);
     assert_eq!(fs::read(header_path(&allowed)).unwrap(), original_header);
+    // The first unlock keeps the indexed secret and collects the orphans.
+    let unlocked = Vault::open(&allowed)
+        .unwrap()
+        .unlock(&passphrase(PASSPHRASE))
+        .unwrap();
+    assert_eq!(unlocked.verify().unwrap().records, 1);
+    assert_eq!(record_files(&allowed).len(), 1);
+    drop(unlocked);
 
-    fs::write(records.join(format!("{:032x}.json", MAX_SECRETS)), b"extra").unwrap();
+    fs::write(
+        records.join(format!("{:032x}.json", MAX_RECORD_FILES)),
+        b"extra",
+    )
+    .unwrap();
     let rejected = root.path().join("rejected");
     assert_eq!(
-        Vault::restore_from(&backup, &rejected).unwrap_err().kind(),
+        Vault::restore_from(&dir, &rejected).unwrap_err().kind(),
         VaultErrorKind::LimitExceeded
     );
     assert!(!Vault::exists(&rejected));
     assert!(files(&rejected).is_empty());
-    assert_eq!(fs::read(header_path(&backup)).unwrap(), original_header);
-    assert_eq!(record_files(&backup).len(), MAX_SECRETS + 1);
+    assert_eq!(fs::read(header_path(&dir)).unwrap(), original_header);
+    assert_eq!(record_files(&dir).len(), MAX_RECORD_FILES + 1);
 }

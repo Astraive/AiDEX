@@ -126,6 +126,20 @@ impl Transport {
         let _ = self.process.wait_timeout(Duration::from_secs(5));
     }
 }
+impl Drop for Transport {
+    // Dropping the `ManagedProcess` alone only requests the kill: the tree stays live in
+    // the process registry until its monitor reaps it. Error paths that return without
+    // `stop` (an error response, a missing native identity, a write that fails because
+    // the tree was killed by the cancel watcher) would then report failure while the
+    // native process is still registered, so emergency stop and configuration changes
+    // would see a busy runtime. Stopping here makes every exit path confirm the tree is
+    // gone (bounded like `stop`); a run that already ended skips it.
+    fn drop(&mut self) {
+        if self.process.is_running() {
+            self.stop();
+        }
+    }
+}
 fn scrub(value: Value, secrets: &[zeroize::Zeroizing<String>]) -> Value {
     match value {
         Value::String(s) => Value::String(scrub_text(s, secrets)),

@@ -7,8 +7,11 @@
 //! - Remote servers pass the offline switch, the emergency stop, and a
 //!   `network.request` intent under the drive's policy settings and documents
 //!   before every request.
-//! - A watchdog stops every server when the daemon shuts down, the vault locks,
-//!   or an emergency stop takes effect.
+//! - Every end of the vault session (a lock, the idle auto-lock, or a dropped
+//!   session) stops every server as it happens, through a vault lock observer,
+//!   so a lock followed at once by an unlock still stops them. A watchdog also
+//!   stops every server when the daemon shuts down, the vault is seen locked, or
+//!   an emergency stop takes effect.
 //! - Imported servers resolve their paths at launch: a plugin's bundled server
 //!   inside its folder under `DrivePaths::plugins()`, a workspace's server in
 //!   that workspace's registered root.
@@ -16,7 +19,10 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex, PoisonError, Weak},
+    sync::{
+        Arc, Mutex, PoisonError, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -37,6 +43,9 @@ use crate::lifecycle::ShutdownSignal;
 
 /// How often the watchdog checks shutdown, the vault, and the emergency stop.
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Logged for each server stopped because the vault session ended.
+const VAULT_LOCKED: &str = "stopped because the vault was locked";
 
 /// Open the supervisor over `DrivePaths::mcp()` and start its watchdog.
 pub fn open_mcp(
@@ -76,8 +85,36 @@ pub fn open_mcp(
         Some(root.root().to_path_buf())
     });
     let supervisor = Arc::new(McpSupervisor::new(store, Arc::new(host)));
-    spawn_watchdog(&supervisor, broker, vault, shutdown);
+    let locks_handled = Arc::new(AtomicU64::new(0));
+    stop_on_vault_lock(&supervisor, vault, &locks_handled);
+    spawn_watchdog(&supervisor, broker, vault, locks_handled, shutdown);
     Ok(supervisor)
+}
+
+/// Stop every server because the vault session ended: the secrets they were
+/// started with came from that session.
+fn stop_for_vault_lock(supervisor: &McpSupervisor) {
+    supervisor.stop_all(VAULT_LOCKED);
+}
+
+/// Stop the servers on every end of the vault session as it is reported, so a
+/// lock followed by an unlock within one watchdog interval still stops them (the
+/// watchdog stays as a backstop). Each handled end bumps `locks_handled`, so the
+/// watchdog does not stop again, later, a server started after that lock. The
+/// supervisor is held weakly because its host owns the vault.
+fn stop_on_vault_lock(
+    supervisor: &Arc<McpSupervisor>,
+    vault: &VaultService,
+    locks_handled: &Arc<AtomicU64>,
+) {
+    let supervisor = Arc::downgrade(supervisor);
+    let locks_handled = Arc::clone(locks_handled);
+    vault.add_lock_observer(move |_notice| {
+        locks_handled.fetch_add(1, Ordering::AcqRel);
+        if let Some(supervisor) = supervisor.upgrade() {
+            stop_for_vault_lock(&supervisor);
+        }
+    });
 }
 
 /// The daemon's policy checks for MCP servers.
@@ -220,11 +257,13 @@ impl McpGate for DaemonGate {
     }
 }
 
-/// Stop every server on shutdown, on a vault lock, and on an emergency stop.
+/// Stop every server on shutdown, on a vault lock the lock observer did not
+/// handle, and on an emergency stop.
 fn spawn_watchdog(
     supervisor: &Arc<McpSupervisor>,
     broker: &Arc<Broker>,
     vault: &Arc<VaultService>,
+    locks_handled: Arc<AtomicU64>,
     shutdown: &ShutdownSignal,
 ) {
     let supervisor = Arc::downgrade(supervisor);
@@ -237,6 +276,7 @@ fn spawn_watchdog(
         .name("aidexd-mcp-watchdog".into())
         .spawn(move || {
             let mut unlocked: Option<bool> = None;
+            let mut handled = locks_handled.load(Ordering::Acquire);
             loop {
                 std::thread::sleep(WATCH_INTERVAL);
                 let Some(supervisor) = supervisor.upgrade() else {
@@ -264,8 +304,16 @@ fn spawn_watchdog(
                 let now = vault
                     .upgrade()
                     .is_some_and(|vault| vault.status().state == VaultState::Unlocked);
+                let latest = locks_handled.load(Ordering::Acquire);
+                if latest != handled {
+                    // The lock observer stops what ran before that lock; what
+                    // runs now started since (without vault secrets if the
+                    // vault is still locked).
+                    handled = latest;
+                    unlocked = None;
+                }
                 if unlocked == Some(true) && !now {
-                    supervisor.stop_all("stopped because the vault was locked");
+                    stop_for_vault_lock(&supervisor);
                     unlocked = None;
                     continue;
                 }

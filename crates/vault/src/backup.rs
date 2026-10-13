@@ -6,7 +6,7 @@
 //! backup does not help when both the passphrase and the recovery key are lost.
 
 use crate::{
-    LockedVault, MAX_SECRETS, UnlockedVault, Vault, VaultError,
+    LockedVault, MAX_RECORD_FILES, UnlockedVault, Vault, VaultError,
     crypto::{sha256, verify_mac},
     error::IntegrityTarget,
     format::{
@@ -99,9 +99,10 @@ impl Vault {
     /// Restore a backup from `src` into `target` and return it locked.
     ///
     /// Refuses to overwrite: `target` must not hold vault data. All well-formed record
-    /// files and the header are copied (header last) and compared byte-for-byte with
-    /// the source. Cryptographic verification needs the passphrase or recovery key and
-    /// happens on unlock; call [`UnlockedVault::verify`] to check every record.
+    /// files (at most [`MAX_RECORD_FILES`], checked before anything is copied) and the
+    /// header are copied (header last) and compared byte-for-byte with the source.
+    /// Cryptographic verification needs the passphrase or recovery key and happens on
+    /// unlock; call [`UnlockedVault::verify`] to check every record.
     pub fn restore_from(src: &Path, target: &Path) -> Result<LockedVault, VaultError> {
         let source = Vault::open(src)?;
         let source_dir = VaultDir::existing(src)?;
@@ -113,7 +114,7 @@ impl Vault {
         if Header::parse(&header_bytes)?.vault_id != *source.vault_id() {
             return Err(VaultError::Conflict);
         }
-        let blobs = source_dir.record_blobs(Some(MAX_SECRETS))?;
+        let blobs = source_dir.record_blobs(Some(MAX_RECORD_FILES))?;
         let blob_refs: Vec<&BlobId> = blobs.iter().collect();
         let restored = copy_records(&source_dir, &destination, &blob_refs)
             .and_then(|()| destination.write_header(&header_bytes))

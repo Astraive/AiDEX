@@ -43,6 +43,8 @@ zeroize = "1.8"
 aidex-bundle = { path = "../bundle", features = ["archive", "dev-trust"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
+# Injected vault commit failures (an uncertain header commit drops the session).
+aidex-vault = { path = "../vault", features = ["test-hooks"] }
 
 [lints]
 workspace = true
