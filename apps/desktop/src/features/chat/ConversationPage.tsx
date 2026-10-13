@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AttachmentTray,
-  CodeBlock,
   Composer,
   Dialog,
   FileDropZone,
@@ -17,11 +16,11 @@ import {
   FolderIcon,
   GitBranchIcon,
   LayersIcon,
+  SlidersIcon,
   StopIcon,
 } from "@aidex/ui/icons";
 import {
   Button,
-  Card,
   IconButton,
   Select,
   Stack,
@@ -48,6 +47,8 @@ import {
 } from "../model-manager/catalog/modelKeys";
 import { LOCAL_PROVIDER_ID } from "../model-manager/catalog/providerAccounts";
 import { LocalInferenceNotice } from "../model-manager/LocalInferenceNotice";
+import { ApprovalRequestCard } from "../approvals/ApprovalRequestCard";
+import { approvalDecision } from "../approvals/approvalDecision";
 import { HistoryMessages } from "../sessions/HistoryMessages";
 import { ArtifactsDialog } from "./artifacts/ArtifactsDialog";
 import { useArtifactDownload } from "./artifacts/useArtifactDownload";
@@ -66,7 +67,10 @@ import {
   type AgentContinuation,
 } from "./continuation/agentContinuation";
 import { ContinueAsAgentDialog } from "./continuation/ContinueAsAgentDialog";
-import { useShellNeedsFullAccess } from "./continuation/engineCapabilities";
+import {
+  useRuntimeDescriptor,
+  useShellNeedsFullAccess,
+} from "./continuation/engineCapabilities";
 import { PERMISSION_LABELS, permissionDescription } from "./continuation/permissions";
 import { transcriptDividers } from "./continuation/transcriptDividers";
 import type { SlashCommandId } from "./composer/slashCommands";
@@ -81,7 +85,9 @@ import {
 } from "./transcript/TranscriptContext";
 import { useOpenLink } from "./transcript/useOpenLink";
 import { useConversationExtensions } from "./useConversationExtensions";
+import { canResume } from "./canResume";
 import { ConversationModelPicker } from "./ConversationModelPicker";
+import { ConversationSettingsDialog } from "./ConversationSettingsDialog";
 import { describeCurrentModel } from "./currentModel";
 import { ModelStateNotice } from "./ModelStateNotice";
 import {
@@ -93,6 +99,7 @@ import {
   configurationChanged,
   sessionTargetOf,
 } from "./sessionConfig";
+import { fallbackModelOptions, type SessionSettings } from "./sessionSettings";
 import styles from "./ConversationPage.module.css";
 const permissionOptions = (
   ["supervised", "auto_accept_edits", "auto", "full_access"] as const
@@ -136,7 +143,7 @@ export function ConversationPage({
   // A new chat's own model choice; existing conversations use their configuration.
   const [draftKey, setDraftKey] = useState<string | null>(null);
   const [popup, setPopup] = useState<
-    "mode" | "project" | "attach" | "continue" | null
+    "mode" | "project" | "attach" | "continue" | "settings" | null
   >(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -225,6 +232,13 @@ export function ConversationPage({
     ["pending", "running", "waiting_approval"].includes(latestRun.status);
   const lastMessage = session.data?.messages.at(-1);
   const external = target?.kind === "runtime";
+  // "Resume task" needs the engine's word that an external runtime can resume; it is asked only
+  // once such a run is interrupted.
+  const runtimeDescriptor = useRuntimeDescriptor(
+    target?.kind === "runtime" ? target.runtimeId : null,
+    external && latestRun?.status === "interrupted",
+  );
+  const resumable = canResume(latestRun, external, runtimeDescriptor);
   const attachmentBlock = attachmentSendBlock({
     items: attachments.items,
     external,
@@ -413,6 +427,8 @@ export function ConversationPage({
       workspaceId?: string;
       target?: ModelTarget;
       permission?: PermissionMode;
+      /** New instructions, fallback, or limits (Conversation settings). */
+      settings?: SessionSettings;
     } = {},
   ): SessionConfig => {
     if (route.id && !session.data)
@@ -434,6 +450,7 @@ export function ConversationPage({
         !!workspaces.data?.workspaces.some((w) => w.id === id),
       target: nextTarget,
       permission: external ? "full_access" : (changes.permission ?? permission),
+      overrides: changes.settings,
     });
   };
   const act = async (operation: () => Promise<unknown>) => {
@@ -717,6 +734,16 @@ export function ConversationPage({
         setWorkspaceId(value);
       });
     else setWorkspaceId(value);
+  };
+  /** Conversation settings: one `agent.configuration.set` with the new values; throws for the dialog. */
+  const saveSettings = async (settings: SessionSettings) => {
+    const id = route.id;
+    if (!id) return;
+    await call("agent.configuration.set", {
+      session_id: id,
+      configuration: configuration({ settings }),
+    });
+    session.refetch();
   };
   /** The command id of a continuation step: reused while the same request is retried. */
   const continuationCommandId = (request: string) => {
@@ -1067,6 +1094,14 @@ export function ConversationPage({
                 )}
                 <IconButton
                   size="sm"
+                  label="Conversation settings"
+                  icon={<SlidersIcon />}
+                  aria-haspopup="dialog"
+                  disabled={!session.data}
+                  onClick={() => setPopup("settings")}
+                />
+                <IconButton
+                  size="sm"
                   label="Artifacts"
                   icon={<LayersIcon />}
                   aria-haspopup="dialog"
@@ -1134,66 +1169,31 @@ export function ConversationPage({
           {latestRun?.error && (!session.data?.workspace_id || project) && (
             <Notice tone="danger">{latestRun.error}</Notice>
           )}
-          {latestRun &&
-            ["interrupted", "cancelled"].includes(latestRun.status) && (
-              <Button
-                variant="ghost"
-                disabled={busy}
-                onClick={() =>
-                  void act(() => call("run.resume", { id: latestRun.id }))
-                }
-              >
-                Resume task
-              </Button>
-            )}
+          {latestRun && resumable && (
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() =>
+                void act(() => call("run.resume", { id: latestRun.id }))
+              }
+            >
+              Resume task
+            </Button>
+          )}
           {pendingApprovals.map((approval) => (
-            <Card key={approval.id} padding="md">
-              <Stack gap={3}>
-                <Text>Approval: {approval.tool_name}</Text>
-                <CodeBlock
-                  language="json"
-                  code={JSON.stringify(approval.arguments, null, 2)}
-                />
-                {approval.preview != null && (
-                  <CodeBlock
-                    title="Change preview"
-                    language="json"
-                    code={JSON.stringify(approval.preview, null, 2)}
-                  />
-                )}
-                {(approval.arguments_truncated || approval.preview_truncated) && (
-                  <Notice tone="warning">
-                    Request a smaller action to review it completely.
-                  </Notice>
-                )}
-                <Stack direction="row" gap={2}>
-                  {[true, false].map((approved) => (
-                    <Button
-                      key={String(approved)}
-                      variant={approved ? "primary" : "outline"}
-                      disabled={
-                        busy ||
-                        (approved &&
-                          (approval.arguments_truncated ||
-                            approval.preview_truncated))
-                      }
-                      onClick={() =>
-                        void act(() =>
-                          call("approval.respond", {
-                            id: approval.id,
-                            fingerprint: approval.fingerprint,
-                            approved,
-                            command_id: crypto.randomUUID(),
-                          }),
-                        )
-                      }
-                    >
-                      {approved ? "Approve once" : "Deny"}
-                    </Button>
-                  ))}
-                </Stack>
-              </Stack>
-            </Card>
+            <ApprovalRequestCard
+              key={approval.id}
+              approval={approval}
+              busy={busy}
+              onDecide={(approved) =>
+                void act(() =>
+                  call(
+                    "approval.respond",
+                    approvalDecision(approval, approved, crypto.randomUUID()),
+                  ),
+                )
+              }
+            />
           ))}
           <div ref={endRef} />
         </div>
@@ -1294,6 +1294,33 @@ export function ConversationPage({
           onContinueHere={continueHere}
           onContinueInNewChat={continueInNewChat}
         />
+        {session.data && (
+          <ConversationSettingsDialog
+            open={popup === "settings"}
+            onClose={() => setPopup(null)}
+            settings={{
+              instructions: session.data.instructions ?? "",
+              fallback_model: session.data.fallback_model ?? null,
+              max_steps: session.data.max_steps ?? preferences.settings.max_steps,
+              max_tokens: session.data.max_tokens ?? preferences.settings.max_tokens,
+            }}
+            external={external}
+            fallbackOptions={
+              popup === "settings" && !external
+                ? fallbackModelOptions({
+                    models: catalog.models,
+                    findModel: catalog.findModel,
+                    providerName: (key) => catalog.providerFor(key)?.name,
+                    agent: mode === "agent",
+                    primaryKey: resolved.key,
+                    current: session.data.fallback_model ?? null,
+                  })
+                : []
+            }
+            locked={running}
+            onSave={saveSettings}
+          />
+        )}
         <ProjectFileDialog
           open={popup === "attach"}
           onClose={() => setPopup(null)}

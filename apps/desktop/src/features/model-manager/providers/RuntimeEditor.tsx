@@ -7,6 +7,7 @@ import { useProviderCatalog } from "../catalog/ProviderCatalog";
 import { supportsModelDiscovery } from "../catalog/runtimes";
 import { EditorHeader } from "./EditorHeader";
 import type { RuntimeItem } from "./providerItems";
+import { RuntimeAccountSection, managesAccount } from "./RuntimeAccountSection";
 import { RuntimeConnectionSection } from "./RuntimeConnectionSection";
 import { runtimeConsumerValid } from "./runtimeSecret";
 import { authFlowText, runtimeAuthAdapter, useAuthFlow } from "./useAuthFlow";
@@ -27,6 +28,7 @@ export function RuntimeEditor({ item }: { item: RuntimeItem }) {
         error={actions.error}
       />
       <RuntimeSetupSection item={item} />
+      <RuntimeAccountSection item={item} />
       <RuntimeConnectionSection item={item} />
       <RuntimeModelsSection item={item} />
     </Stack>
@@ -68,6 +70,8 @@ function RuntimeSetupSection({ item }: { item: RuntimeItem }) {
         </>
       ) : auth.kind === "vault" ? (
         <RuntimeKeySetup item={item} secretName={auth.secret_name} envName={auth.env_name} />
+      ) : runtime.profile && managesAccount(item) ? (
+        <Text>{item.title} uses the account AiDEX keeps encrypted on this drive (Account below).</Text>
       ) : (
         <Text>This runtime uses its own sign-in on this computer; AiDEX passes it no credentials.</Text>
       )}

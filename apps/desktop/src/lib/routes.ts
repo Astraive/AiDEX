@@ -20,14 +20,11 @@ export type PageId =
   | "settings";
 
 /**
- * Pages whose content is still sample data because their backend has not landed (workspaces #11,
- * sessions #12, models #14/#15, agents #19/#23, remote #29). The shell labels them.
- * Home, Settings, and Security mix live Core data with labelled samples and say so themselves.
+ * Pages whose whole content is sample data because their backend has not landed; the shell labels
+ * them. None is left: pages read AiDEX Core, and a part still sampled (workspace memory) or a page
+ * whose backend has not landed (Remote access, #29) says so itself.
  */
-export const samplePages: ReadonlySet<PageId> = new Set<PageId>([
-  "agents",
-  "agent-config",
-]);
+export const samplePages: ReadonlySet<PageId> = new Set<PageId>();
 
 /** `tab` selects a section within a page; `id` names the record a page shows (workspace, agent, model). */
 export type Route = { page: PageId; tab?: string; id?: string };

@@ -1,24 +1,24 @@
 # Desktop features
 
-Each folder owns one area of the desktop UI: its pages, its contextual sidebar, and its data. Screens are composed only from `@aidex/ui`. Screens whose backend exists read live data through `../hooks` (`useAidexStatus`, `useRpc`, `useBridgeQuery`); the rest keep labelled sample data (the shell badges every page in `samplePages`, `../lib/routes.ts`), and actions that need a missing backend say so with a "Preview" toast. See `../services/README.md` for wiring a new daemon-backed screen.
+Each folder owns one area of the desktop UI: its pages, its contextual sidebar, and its data. Screens are composed only from `@aidex/ui`. Screens read live data through `../hooks` (`useAidexStatus`, `useRpc`, `useBridgeQuery`). No page is sample data now, so `samplePages` (`../lib/routes.ts`), which the shell badges, is empty; a part still sampled (workspace memory) and actions that need a missing backend say so with a "Preview" toast, and Remote access says it is coming soon. See `../services/README.md` for wiring a new daemon-backed screen.
 
-Live today: `launch` (drive, AiDEX Core, vault create and unlock, host and sandbox detection), the Home system status with the workspace registry and live events, conversations with the model picker, Models (providers, agent runtimes, local models, model details), Plugins (skills, MCP servers, plugins, web search), Settings Diagnostics and Drive, and the Security sandbox capability report.
+Live today: `launch` (drive, AiDEX Core, vault create and unlock, host and sandbox detection), the Home system status with the workspace registry and live events, conversations with the model picker, approvals, Resume, and per-conversation settings, Agents (AiDEX Native defaults and the configured runtimes), Models (providers, agent runtimes with their managed accounts, local models, model details), Plugins (skills, MCP servers, plugins, web search), Session history, Checkpoints, execution details, Security (vault, sandbox, audit, approvals), and Settings (Updates, Diagnostics, Drive).
 
 - `system`: shared live-status pieces: `CoreStatusNotice` (no drive, AiDEX Core stopped with Start, incompatible, outside the app), `RecentEvents` (`events.latest` + `events.replay`), `LiveEvents` (`events.subscribe`), and labels for host, sandbox, drive, and event data.
 - `launch`: drive selection, drive and vault check, and host/runtime detection, shown before the workspace.
 - `home`: the welcome dashboard, composer, and live system status.
 - `workspace`: workspace list, add or import, overview (files, git, environment, sessions), and context and memory.
-- `chat`: conversations with attachments, mode switch, and the provider-aware model picker (`Mod+Shift+M`).
-- `agent`: agent runs (plan, activity, docked instructions) and the execution and task graph.
-- `diffs`: change review with per-file decisions and verification results.
-- `sessions`: session history with kind and workspace filters.
-- `checkpoints`: checkpoint timeline with resume, restore, branch, and compare.
-- `agent-center`: built-in agents, external runtimes, and per-agent configuration.
-- `model-manager`: the shared provider and model catalog, the Providers screen (accounts, agent runtimes, add wizard), local models, and model details.
+- `chat`: conversations with attachments, mode switch, the provider-aware model picker (`Mod+Shift+M`), inline approvals, Resume for interrupted runs, and per-conversation settings.
+- `agent`: Agent mode (the live conversation) and execution details: each run and child run with its status, limits, tool calls, output, and history.
+- `diffs`: the Review changes route, which renders the live Checkpoints page until AiDEX Core exposes workspace diffs and test runs; `sample.ts` and `VerificationSection` are unused leftovers.
+- `sessions`: session history (saved conversations, paged, with search, pin, and delete) and the shared live session list.
+- `checkpoints`: a conversation's checkpoints, paged, with compare against the current file, the original content, and restore.
+- `agent-center`: AiDEX Native and the configured agent runtimes with their status and the default for new chats, and AiDEX Native's defaults (model, permission, instructions, limits); runtime settings open in Models → Providers.
+- `model-manager`: the shared provider and model catalog, the Providers screen (accounts, agent runtimes and their managed accounts, add wizard), local models, and model details.
 - `extensions`: live skills (search, scope filter, enable, author drive skills), MCP servers (status, start and stop, tools, secrets, logs, `.mcp.json` import), plugins (install, review, trust, enable, uninstall), and web search settings with a test search.
-- `security`: security overview, vault and secrets, and sandbox and policies.
-- `approvals`: pending and past approvals of sensitive actions.
-- `remote-sessions`: device pairing and active remote sessions.
+- `security`: security overview, vault and secrets, sandbox and policies, the audit log, and the approval center.
+- `approvals`: the approval center (pending and past requests) and the approval card conversations share.
+- `remote-sessions`: remote access, shown as coming soon until its backend lands.
 - `settings`: appearance, shortcuts, updates, diagnostics, and drive health and cleanup.
 - `editor`, `tasks`, `terminal`: reserved for later screens.
 

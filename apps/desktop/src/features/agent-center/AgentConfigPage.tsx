@@ -1,42 +1,45 @@
-import { PageHeader } from "@aidex/ui/components";
+import { useEffect } from "react";
+import { Notice, PageHeader } from "@aidex/ui/components";
 import { PageFrame } from "@aidex/ui/desktop";
-import { DownloadIcon } from "@aidex/ui/icons";
-import { Badge, Button, Stack, Text } from "@aidex/ui/primitives";
+import { Text } from "@aidex/ui/primitives";
 import { useNavigation } from "../../app/providers/navigation";
+import { usePreferences } from "../../app/providers/preferences";
+import { providerSelectionId } from "../model-manager/providers/selection";
+import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import { AgentConfigForm } from "./AgentConfigForm";
-import { agentById, statusLabel } from "./sample";
-import { useAgentActions } from "./useAgentActions";
+import { NATIVE_AGENT_ID } from "./nativeDefaults";
 
-/** Settings for one agent; the route `id` names it (unknown ids fall back to AiDEX Native). */
+/**
+ * Agent configuration: AiDEX Native's defaults for new conversations (route id `native`, or none). A
+ * runtime id opens that runtime in Models → Providers, which owns runtime settings.
+ */
 export function AgentConfigPage() {
   const { route, back, canGoBack, replace } = useNavigation();
-  const actions = useAgentActions();
-  const agent = agentById(route.id);
-  const installed = agent.status !== "not-installed";
+  const preferences = usePreferences();
+  const runtimeId = route.id && route.id !== NATIVE_AGENT_ID ? route.id : null;
+  useEffect(() => {
+    if (runtimeId)
+      replace({ page: "models", tab: "providers", id: providerSelectionId("runtime", runtimeId) });
+  }, [runtimeId, replace]);
+  if (runtimeId) return null;
 
   return (
     <PageFrame width="narrow">
       <PageHeader
         back={{ label: "Agents", onClick: () => (canGoBack ? back() : replace({ page: "agents" })) }}
-        title={agent.name}
-        description={agent.description}
-        meta={
-          <Stack direction="row" gap={3} align="center" wrap>
-            <Badge tone={installed ? "success" : "neutral"}>{statusLabel[agent.status]}</Badge>
-            <Text as="span" tone="secondary">
-              {agent.runtime}
-            </Text>
-          </Stack>
-        }
-        actions={
-          installed ? undefined : (
-            <Button variant="outline" size="md" icon={<DownloadIcon />} onClick={() => actions.install(agent)}>
-              Install
-            </Button>
-          )
-        }
+        title="AiDEX Native"
+        description="Defaults for new conversations. Each conversation keeps its own copy, which you can change in its Conversation settings."
       />
-      <AgentConfigForm key={agent.id} agent={agent} />
+      <CoreStatusNotice requires="daemon" />
+      {preferences.loaded ? (
+        <AgentConfigForm />
+      ) : preferences.error ? (
+        <Notice tone="danger" role="alert">
+          {preferences.error}
+        </Notice>
+      ) : (
+        <Text tone="muted">Loading the saved defaults…</Text>
+      )}
     </PageFrame>
   );
 }
