@@ -15,9 +15,11 @@
     "./themes": "./src/themes/index.ts"
   },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "bun test src"
   },
   "dependencies": {
+    "@base-ui/react": "1.4.1",
     "@pierre/diffs": "^1.5.2"
   },
   "peerDependencies": {
