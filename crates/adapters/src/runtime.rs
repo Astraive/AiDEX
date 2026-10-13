@@ -1,6 +1,9 @@
 use crate::{
     Driver, RuntimeAuth, RuntimeConfig,
+    binding::CredentialBinding,
+    profiles,
     protocol::{Protocol, prompt},
+    snapshot::Capture,
     state::{State, error},
     transport::Transport,
 };
@@ -10,11 +13,10 @@ use aidex_native_sessions::*;
 use aidex_sandbox::{
     CommandSpec, Mount, NetworkMode, ResourceLimits, Sandbox, SandboxLevel, SandboxRequest,
 };
-use aidex_vault::{ConsumerScope, SecretName};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -28,16 +30,46 @@ struct Pending {
     allow: Value,
     deny: Value,
 }
+/// What a resume reference binds: the native branch and its encrypted snapshot,
+/// the account and auth configuration, and the credential the launch used.
+/// Every field is value-free resume metadata that `aidex_events::redact_text`
+/// leaves unchanged; the harness refuses a reference it would alter.
+struct Evidence {
+    snapshot: String,
+    /// Digest of the last snapshot this launch saved; `None` while none of its
+    /// snapshots can be resumed (the reference is then not resumable).
+    snapshot_digest: Option<String>,
+    /// Closed code of the last snapshot failure.
+    snapshot_error: Option<&'static str>,
+    run_id: String,
+    session_id: String,
+    account_revision: Option<String>,
+    /// Digest of the driver, profile and auth configuration.
+    config_digest: String,
+    credential_binding: CredentialBinding,
+    native_branch_id: String,
+}
 struct Live {
     transport: Transport,
     protocol: Protocol,
     profile: tempfile::TempDir,
-    snapshot: String,
+    evidence: Evidence,
+    /// Snapshot name daemons before branch-scoped snapshots used for this
+    /// session; removed after the first new snapshot.
+    legacy_snapshot: String,
+    /// Whether this launch already tried its first checkpoint.
+    checkpointed: bool,
+    /// Digest of the managed account credential this launch restored, to save
+    /// a credential the vendor refreshed; `None` without a managed profile.
+    credential: Option<String>,
     pending: Option<Pending>,
     text: String,
     tools: BTreeSet<String>,
-    run_id: String,
-    session_id: String,
+}
+impl Live {
+    fn home(&self) -> PathBuf {
+        self.profile.path().join("home")
+    }
 }
 pub struct ExternalRuntime {
     pub(crate) config: RuntimeConfig,
@@ -46,6 +78,28 @@ pub struct ExternalRuntime {
     sandbox: Sandbox,
     network: NetworkGate,
     live: Mutex<BTreeMap<String, Live>>,
+}
+fn resume_unavailable(message: &str) -> RuntimeError {
+    error("resume_unavailable", message)
+}
+/// Recovery failures are refusals to resume (the harness then starts a new
+/// native session with the transcript); a locked vault stays a locked vault.
+fn as_resume_refusal(e: RuntimeError) -> RuntimeError {
+    if e.code == "vault_locked" {
+        e
+    } else {
+        resume_unavailable("Encrypted native snapshot evidence is unavailable")
+    }
+}
+/// The closed code a reference records when its snapshot could not be saved.
+fn snapshot_failure(e: &RuntimeError) -> &'static str {
+    match e.code.as_str() {
+        "state_limit" => "state_limit",
+        "state_busy" => "state_busy",
+        "state_corrupt" => "state_corrupt",
+        "vault_locked" => "vault_locked",
+        _ => "state_unavailable",
+    }
 }
 impl ExternalRuntime {
     pub(crate) fn new(
@@ -64,41 +118,260 @@ impl ExternalRuntime {
             live: Mutex::new(BTreeMap::new()),
         }
     }
+    /// Pi and OMP have no native restore: their homes are never snapshotted
+    /// and their references are never resumable.
+    fn resumable(&self) -> bool {
+        !matches!(self.config.driver, Driver::Pi | Driver::Omp)
+    }
+    /// Codex profile mode: the encrypted account profile is the only credential.
+    fn managed_account(&self) -> bool {
+        self.config.driver == Driver::Codex
+            && self.config.profile.is_some()
+            && matches!(self.config.auth, RuntimeAuth::None)
+    }
+    fn capture(&self) -> Capture<'static> {
+        match self.config.driver {
+            // Codex regenerates `.tmp` (argv0 tool copies, Windows byte-range
+            // locked files) every launch; the account profile record is the one
+            // authoritative copy of its managed credential.
+            Driver::Codex if self.config.profile.is_some() => {
+                Capture::skipping(&[".tmp", "auth.json"])
+            }
+            Driver::Codex => Capture::skipping(&[".tmp"]),
+            _ => Capture::skipping(&[]),
+        }
+    }
+    /// Encrypt `home` as the branch snapshot. A failure never fails the turn:
+    /// the caller continues with a reference that is not resumable.
+    fn save_snapshot(&self, name: &str, legacy: &str, home: &Path) -> Result<String, &'static str> {
+        let saved = self
+            .state
+            .snapshot_native(name, home, self.capture())
+            .and_then(|()| self.state.snapshot_digest(name));
+        match saved {
+            Ok(evidence) => {
+                // Nothing resumes from the pre-branch name any more.
+                let _ = self.state.remove(legacy);
+                Ok(evidence)
+            }
+            Err(e) => {
+                // A snapshot that cannot be refreshed is not left resumable.
+                let _ = self.state.remove(name);
+                Err(snapshot_failure(&e))
+            }
+        }
+    }
+    fn refresh_snapshot(&self, live: &mut Live) {
+        if !self.resumable() {
+            // Nothing resumes this driver's sessions, so no snapshot is kept;
+            // one an older daemon saved is never restored either.
+            let _ = self.state.remove(&live.legacy_snapshot);
+            return;
+        }
+        match self.save_snapshot(&live.evidence.snapshot, &live.legacy_snapshot, &live.home()) {
+            Ok(evidence) => {
+                live.evidence.snapshot_digest = Some(evidence);
+                live.evidence.snapshot_error = None;
+            }
+            Err(code) => {
+                live.evidence.snapshot_digest = None;
+                live.evidence.snapshot_error = Some(code);
+            }
+        }
+    }
+    /// Keep a credential the vendor refreshed during the turn. Best effort: a
+    /// failure leaves the stored profile as it was, and a changed account is
+    /// never overwritten.
+    fn persist_credentials(&self, live: &mut Live) {
+        let (Some(profile), Some(restored)) = (&self.config.profile, &live.credential) else {
+            return;
+        };
+        let home = live.home();
+        let Ok(current) = profiles::credential_digest(&home) else {
+            return;
+        };
+        if current == *restored {
+            return;
+        }
+        if profiles::persist_native_credentials(
+            &self.state,
+            profile,
+            &home,
+            &live.evidence.account_revision,
+        )
+        .is_ok()
+        {
+            live.credential = Some(current);
+        }
+    }
+    fn reference(&self, protocol: &Protocol, e: &Evidence) -> Value {
+        let resumable = e.snapshot_digest.is_some();
+        let mut reference = json!({"runtime_id":self.config.id,"native_session_id":protocol.session,"native_turn_id":protocol.turn,"snapshot_id":e.snapshot,"snapshot_digest":e.snapshot_digest,"run_id":e.run_id,"session_id":e.session_id,"account_revision":e.account_revision,"config_digest":e.config_digest,"credential_binding":e.credential_binding.evidence(),"native_branch_id":if resumable {json!(e.native_branch_id)} else {Value::Null}});
+        if let Some(code) = e.snapshot_error {
+            reference["snapshot_error"] = json!(code);
+        }
+        reference
+    }
+    /// The native branch a Resume continues, from a reference bound to one.
+    fn resume_branch(&self, r: &RuntimeRequest) -> Result<String, RuntimeError> {
+        r.runtime_ref
+            .as_ref()
+            .filter(|reference| is_resumable_reference(reference))
+            .and_then(|reference| reference["native_branch_id"].as_str())
+            .filter(|branch| branch.len() <= 128)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                resume_unavailable(
+                    "No bound native branch to resume; continue with a transcript handoff",
+                )
+            })
+    }
+    /// Every check runs before a process starts: a refusal leaves nothing to
+    /// clean up, so the harness can start a new native session instead.
+    fn verify_resume(
+        &self,
+        r: &RuntimeRequest,
+        evidence: &Evidence,
+        home: &Path,
+    ) -> Result<(), RuntimeError> {
+        let reference = r
+            .runtime_ref
+            .as_ref()
+            .ok_or_else(|| resume_unavailable("A native session reference is required"))?;
+        if reference["runtime_id"] != self.config.id
+            || reference["session_id"] != r.session_id
+            || reference["run_id"].as_str().is_none_or(str::is_empty)
+            || reference["snapshot_id"] != evidence.snapshot
+            || reference["account_revision"] != json!(evidence.account_revision)
+            || reference["config_digest"] != evidence.config_digest
+            || reference["credential_binding"] != evidence.credential_binding.evidence()
+            || reference["native_session_id"]
+                .as_str()
+                .is_none_or(str::is_empty)
+        {
+            return Err(resume_unavailable(
+                "Native reference does not match this runtime, session, account or credential",
+            ));
+        }
+        let saved = self
+            .state
+            .snapshot_digest(&evidence.snapshot)
+            .map_err(as_resume_refusal)?;
+        if reference["snapshot_digest"].as_str() != Some(saved.as_str()) {
+            return Err(resume_unavailable(
+                "Encrypted native snapshot evidence changed",
+            ));
+        }
+        // A snapshot removed since its digest was read is missing evidence too.
+        if !self
+            .state
+            .restore(&evidence.snapshot, home)
+            .map_err(as_resume_refusal)?
+        {
+            return Err(resume_unavailable(
+                "Encrypted native snapshot evidence is missing",
+            ));
+        }
+        Ok(())
+    }
     fn launch(
         &self,
         r: &RuntimeRequest,
         cancel: &CancelToken,
         begin: bool,
+        on_event: Option<&mut dyn FnMut(&RuntimeEvent) -> RuntimeControl>,
     ) -> Result<Live, RuntimeError> {
         if !(self.network)() {
             return Err(error(
                 "offline_refused",
-                "External runtime network use is disabled",
+                "External runtimes are paused: offline mode, a locked vault or an emergency stop",
             ));
         }
         if cancel.is_stopped() {
             return Err(error("cancelled", "Runtime cancelled"));
         }
+        let resume = r.operation == RuntimeOperation::Resume;
+        // A binding that changed is a refusal to resume; for a new launch it is
+        // an ordinary account change.
+        let binding_refusal = |e: RuntimeError| {
+            if resume && e.code == "account_changed" {
+                resume_unavailable("Runtime credential changed since the native session started")
+            } else {
+                e
+            }
+        };
+        let native_branch_id = if resume {
+            self.resume_branch(r)?
+        } else {
+            r.run_id.clone()
+        };
         let profile = tempfile::Builder::new()
             .prefix("aidex-runtime-")
             .tempdir()
             .map_err(|_| error("state_unavailable", "Runtime temporary profile unavailable"))?;
-        let snapshot = format!(
-            "runtime-{}.sealed",
-            digest(format!("{}:{}", self.config.id, r.session_id).as_bytes())
-        );
         let home = profile.path().join("home");
         std::fs::create_dir_all(&home)
             .map_err(|_| error("state_unavailable", "Runtime home unavailable"))?;
-        // A selected managed profile is encrypted input, never a raw host login home.
-        if let Some(selected) = &self.config.profile {
-            self.state.restore(
-                &format!("profile-{}.sealed", digest(selected.as_bytes())),
-                &home,
-            )?;
+        let account_revision = self
+            .config
+            .profile
+            .as_ref()
+            .map(|profile| self.state.account_revision(profile))
+            .transpose()?
+            .flatten();
+        let mut evidence = Evidence {
+            snapshot: format!(
+                "runtime-{}-{}.sealed",
+                digest(self.config.id.as_bytes()),
+                digest(format!("{}:{}", r.session_id, native_branch_id).as_bytes())
+            ),
+            snapshot_digest: None,
+            snapshot_error: None,
+            run_id: r.run_id.clone(),
+            session_id: r.session_id.clone(),
+            account_revision,
+            config_digest: digest(
+                json!({"driver":self.config.driver,"profile":self.config.profile,"auth":self.config.auth})
+                    .to_string()
+                    .as_bytes(),
+            ),
+            credential_binding: CredentialBinding::capture(
+                &self.config.auth,
+                &self.state,
+                &self.auth,
+            )?,
+            native_branch_id,
+        };
+        let legacy_snapshot = format!(
+            "runtime-{}.sealed",
+            digest(format!("{}:{}", self.config.id, r.session_id).as_bytes())
+        );
+        if resume {
+            self.verify_resume(r, &evidence, &home)?;
+            evidence.snapshot_digest = r
+                .runtime_ref
+                .as_ref()
+                .and_then(|reference| reference["snapshot_digest"].as_str().map(str::to_owned));
         }
-        if r.operation == RuntimeOperation::Resume {
-            self.state.restore(&snapshot, &home)?;
+        // A selected managed profile is encrypted input, never a raw host login
+        // home, and it outranks a credential inside an older session snapshot.
+        let mut credential = None;
+        if let Some(selected) = &self.config.profile {
+            if self.config.driver == Driver::Codex {
+                let _ = std::fs::remove_file(home.join("auth.json"));
+            }
+            let restored = self
+                .state
+                .restore(&profiles::profile_record(selected), &home)?;
+            if !restored && self.managed_account() {
+                return Err(error(
+                    "auth_required",
+                    "Managed account is signed out; connect it before using this runtime",
+                ));
+            }
+            if restored && self.config.driver == Driver::Codex {
+                credential = profiles::credential_digest(&home).ok();
+            }
         }
         let cwd = PathBuf::from(&r.workspace.as_ref().unwrap().root);
         let mut request = SandboxRequest::new(SandboxLevel::Brokered, &cwd, profile.path())
@@ -112,6 +385,14 @@ impl ExternalRuntime {
         let mut args = self.config.argv.clone();
         args.extend(self.config.driver.info().command);
         let mut secrets: Vec<Zeroizing<String>> = vec![];
+        if self.config.driver == Driver::Codex {
+            // Codex never reaches the host keyring: credentials stay in the
+            // app-owned home that AiDEX encrypts.
+            args.extend(["-c".into(), "cli_auth_credentials_store=\"file\"".into()]);
+            if credential.is_some() {
+                secrets.extend(profiles::credential_secrets(&home)?);
+            }
+        }
         match &self.config.auth {
             RuntimeAuth::None => {}
             RuntimeAuth::CodexOauth { provider_id } => {
@@ -142,24 +423,10 @@ impl ExternalRuntime {
                 secret_name,
                 env_name,
             } => {
-                let consumer = ConsumerScope::process(format!("runtime-{}", self.config.id))
-                    .map_err(|_| error("invalid_config", "Invalid runtime secret consumer"))?;
-                let name = SecretName::new(secret_name)
-                    .map_err(|_| error("invalid_config", "Invalid secret reference"))?;
-                let handle = self
-                    .state
-                    .vault
-                    .issue_handle(&name, &consumer, Duration::from_secs(5))
-                    .map_err(|_| {
-                        error(
-                            "auth_required",
-                            "Runtime credential is unavailable or consumer denied",
-                        )
-                    })?;
-                let secret = self.state.vault.resolve(&handle, &consumer);
-                self.state.vault.revoke_handle(&handle.handle_id);
-                let secret =
-                    secret.map_err(|_| error("auth_required", "Runtime credential unavailable"))?;
+                let secret = evidence
+                    .credential_binding
+                    .vault_secret(&self.state, &self.config.id, secret_name)
+                    .map_err(binding_refusal)?;
                 let token = Zeroizing::new(
                     String::from_utf8(secret.expose().to_vec())
                         .map_err(|_| error("auth_required", "Credential must be UTF-8"))?,
@@ -208,7 +475,7 @@ impl ExternalRuntime {
             if let Some(model) = &r.model {
                 args.extend(["--model".into(), model.clone()]);
             }
-            if r.operation == RuntimeOperation::Resume
+            if resume
                 && let Some(id) = r
                     .runtime_ref
                     .as_ref()
@@ -216,10 +483,7 @@ impl ExternalRuntime {
             {
                 args.extend(["--resume".into(), id.into()]);
             }
-            args.push(prompt(
-                r,
-                r.operation == RuntimeOperation::Resume && r.runtime_ref.is_none(),
-            ));
+            args.push(prompt(r, resume && r.runtime_ref.is_none()));
         }
         let plan = self.sandbox.negotiate(&request).map_err(|_| {
             error(
@@ -236,6 +500,14 @@ impl ExternalRuntime {
                 .unwrap()
                 .join(&self.config.executable)
         };
+        // The credential the process receives is the one the reference binds.
+        evidence
+            .credential_binding
+            .verify(&self.config.auth, &self.state, &self.auth)
+            .map_err(binding_refusal)?;
+        if cancel.is_stopped() || !(self.network)() {
+            return Err(error("cancelled", "Runtime launch cancelled"));
+        }
         let process = self
             .sandbox
             .spawn_interactive(&plan, CommandSpec::new(executable).args(args))
@@ -245,10 +517,22 @@ impl ExternalRuntime {
                     "Configured runtime executable could not be launched",
                 )
             })?;
-        let mut transport = Transport::new(process, secrets);
+        let mut live = Live {
+            transport: Transport::new(process, secrets),
+            protocol: Protocol::new(self.config.driver),
+            profile,
+            evidence,
+            legacy_snapshot,
+            checkpointed: false,
+            credential,
+            pending: None,
+            text: String::new(),
+            tools: BTreeSet::new(),
+        };
         // The original cancellation token remains effective while execute has returned
-        // WaitingApproval. The watcher owns only a weak process handle.
-        let weak = Arc::downgrade(&transport.process);
+        // WaitingApproval. The watcher owns only a weak process handle, and the
+        // gate also closes when the vault locks or an emergency stop begins.
+        let weak = Arc::downgrade(&live.transport.process);
         let watched = cancel.clone();
         let network = self.network.clone();
         std::thread::spawn(move || {
@@ -264,25 +548,70 @@ impl ExternalRuntime {
                 std::thread::sleep(Duration::from_millis(25));
             }
         });
-        let mut protocol = Protocol::new(self.config.driver);
-        protocol.initialize(&mut transport, cancel)?;
-        if begin {
-            protocol.begin(&mut transport, r, cancel)?;
+        if let Err(e) = self.start_turn(&mut live, r, cancel, begin, on_event) {
+            self.abandon(&mut live);
+            return Err(e);
         }
-        Ok(Live {
+        Ok(live)
+    }
+    /// Initialize the protocol and, for a turn, open the native session: its
+    /// checkpoint is saved and reported before the turn is sent.
+    fn start_turn(
+        &self,
+        live: &mut Live,
+        r: &RuntimeRequest,
+        cancel: &CancelToken,
+        begin: bool,
+        mut on_event: Option<&mut dyn FnMut(&RuntimeEvent) -> RuntimeControl>,
+    ) -> Result<(), RuntimeError> {
+        live.protocol.initialize(&mut live.transport, cancel)?;
+        if !begin {
+            return Ok(());
+        }
+        let home = live.home();
+        let Live {
             transport,
             protocol,
-            profile,
-            snapshot,
-            pending: None,
-            text: String::new(),
-            tools: BTreeSet::new(),
-            run_id: r.run_id.clone(),
-            session_id: r.session_id.clone(),
+            evidence,
+            legacy_snapshot,
+            checkpointed,
+            ..
+        } = live;
+        protocol.begin(transport, r, cancel, &mut |protocol| {
+            *checkpointed = true;
+            if !self.resumable() {
+                return Ok(());
+            }
+            match self.save_snapshot(&evidence.snapshot, legacy_snapshot, &home) {
+                Ok(saved) => {
+                    evidence.snapshot_digest = Some(saved);
+                    evidence.snapshot_error = None;
+                    let reference = self.reference(protocol, evidence);
+                    if on_event.as_mut().is_some_and(|callback| {
+                        callback(&RuntimeEvent::SessionStarted {
+                            runtime_ref: reference,
+                        }) == RuntimeControl::Pause
+                    }) {
+                        return Err(error(
+                            "interrupted",
+                            "Native session checkpoint was refused before turn execution",
+                        ));
+                    }
+                }
+                // Continue without a checkpoint; the reference is not resumable.
+                Err(code) => {
+                    evidence.snapshot_digest = None;
+                    evidence.snapshot_error = Some(code);
+                }
+            }
+            Ok(())
         })
     }
-    fn reference(&self, live: &Live) -> Value {
-        json!({"runtime_id":self.config.id,"native_session_id":live.protocol.session,"native_turn_id":live.protocol.turn,"snapshot_id":live.snapshot,"run_id":live.run_id,"session_id":live.session_id})
+    /// End a launch that will not continue: stop its tree, then keep a
+    /// credential the vendor refreshed before it ended.
+    fn abandon(&self, live: &mut Live) {
+        live.transport.stop();
+        self.persist_credentials(live);
     }
     fn approval(
         &self,
@@ -290,18 +619,10 @@ impl ExternalRuntime {
         r: &RuntimeRequest,
         v: &Value,
     ) -> Result<Option<Pending>, RuntimeError> {
-        let method = v["method"].as_str().unwrap_or("");
-        if v.get("id").is_none()
-            || !matches!(
-                method,
-                "item/commandExecution/requestApproval"
-                    | "item/fileChange/requestApproval"
-                    | "session/request_permission"
-                    | "approval/request"
-            )
-        {
+        if !is_approval_request(v) {
             return Ok(None);
         }
+        let method = v["method"].as_str().unwrap_or("");
         let params = &v["params"];
         if !live.protocol.owns(params) {
             return Err(error(
@@ -326,7 +647,7 @@ impl ExternalRuntime {
             method
         };
         let tool = aidex_events::redact_text(tool).into_owned();
-        let mut reference = self.reference(live);
+        let mut reference = self.reference(&live.protocol, &live.evidence);
         reference["native_request_id"] = wire.clone();
         reference["approval_digest"] = json!(digest(params.to_string().as_bytes()));
         let arguments = sanitize_json(params.clone());
@@ -367,9 +688,34 @@ impl ExternalRuntime {
             deny,
         }))
     }
+    /// Run the turn to completion or to an approval pause. A paused launch
+    /// stays live for the decision; a failed one is stopped, and a credential
+    /// the vendor refreshed before it failed is kept.
     fn drive(
         &self,
         mut live: Live,
+        r: &RuntimeRequest,
+        on_event: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+        cancel: &CancelToken,
+    ) -> Result<RuntimeResponse, RuntimeError> {
+        match self.turn(&mut live, r, on_event, cancel) {
+            Ok(response) if response.status == RuntimeStatus::WaitingApproval => {
+                self.live
+                    .lock()
+                    .map_err(|_| error("state_unavailable", "Runtime lock unavailable"))?
+                    .insert(r.run_id.clone(), live);
+                Ok(response)
+            }
+            Ok(response) => Ok(response),
+            Err(e) => {
+                self.abandon(&mut live);
+                Err(e)
+            }
+        }
+    }
+    fn turn(
+        &self,
+        live: &mut Live,
         r: &RuntimeRequest,
         on_event: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
         cancel: &CancelToken,
@@ -379,13 +725,38 @@ impl ExternalRuntime {
                 live.transport.stop();
                 return Err(error(
                     "offline_refused",
-                    "External runtime network use disabled",
+                    "External runtimes were paused: offline mode, a locked vault or an emergency stop",
                 ));
             }
             let v = live.protocol.next(&mut live.transport, cancel)?;
             if matches!(self.config.driver, Driver::ClaudeCode | Driver::Cursor) {
-                if let Some(id) = v["session_id"].as_str() {
-                    live.protocol.session = id.into();
+                // Only the root session identity is the native session; it is
+                // fixed by its first frame, and subagent frames never replace it.
+                if v["parent_tool_use_id"].is_null() && v["session_id"].is_string() {
+                    let id = crate::protocol::required(&v, "/session_id")?;
+                    if !live.protocol.session.is_empty() && live.protocol.session != id {
+                        live.transport.stop();
+                        return Err(error(
+                            "protocol_error",
+                            "Runtime changed the root native session identity",
+                        ));
+                    }
+                    live.protocol.session = id;
+                    if !live.checkpointed {
+                        live.checkpointed = true;
+                        self.refresh_snapshot(live);
+                        if live.evidence.snapshot_digest.is_some()
+                            && on_event(&RuntimeEvent::SessionStarted {
+                                runtime_ref: self.reference(&live.protocol, &live.evidence),
+                            }) == RuntimeControl::Pause
+                        {
+                            live.transport.stop();
+                            return Err(error(
+                                "interrupted",
+                                "Native session checkpoint was refused",
+                            ));
+                        }
+                    }
                 }
                 if v["type"] == "assistant"
                     && v["parent_tool_use_id"].is_null()
@@ -401,7 +772,12 @@ impl ExternalRuntime {
                     }
                 }
             }
-            if let Some(pending) = self.approval(&live, r, &v)? {
+            if is_approval_request(&v) {
+                // The paused reference covers the native state the decision continues.
+                self.refresh_snapshot(live);
+                self.persist_credentials(live);
+            }
+            if let Some(pending) = self.approval(live, r, &v)? {
                 let method = v["method"].as_str().unwrap();
                 let tool_name = if method == "session/request_permission" {
                     v.pointer("/params/toolCall/title")
@@ -419,12 +795,8 @@ impl ExternalRuntime {
                 };
                 let control = on_event(&event);
                 if control == RuntimeControl::Pause {
-                    let reference = self.reference(&live);
+                    let reference = self.reference(&live.protocol, &live.evidence);
                     live.pending = Some(pending);
-                    self.live
-                        .lock()
-                        .map_err(|_| error("state_unavailable", "Runtime lock unavailable"))?
-                        .insert(r.run_id.clone(), live);
                     return Ok(RuntimeResponse {
                         status: RuntimeStatus::WaitingApproval,
                         runtime_ref: Some(reference),
@@ -479,14 +851,18 @@ impl ExternalRuntime {
                 {
                     live.text = aidex_events::redact_text(text).into_owned();
                 }
-                let reference = self.reference(&live);
                 live.transport.stop();
-                self.state
-                    .snapshot(&live.snapshot, &live.profile.path().join("home"))?;
+                // The vendor's work already ran: a snapshot that cannot be saved
+                // leaves the turn completed with a reference that is not resumable.
+                self.refresh_snapshot(live);
+                self.persist_credentials(live);
+                let reference = self.reference(&live.protocol, &live.evidence);
                 return Ok(RuntimeResponse {
                     status: RuntimeStatus::Completed,
                     runtime_ref: Some(reference),
-                    message: Some(aidex_providers::ChatMessage::assistant(live.text)),
+                    message: Some(aidex_providers::ChatMessage::assistant(std::mem::take(
+                        &mut live.text,
+                    ))),
                 });
             }
         }
@@ -501,12 +877,23 @@ impl ExternalRuntime {
         probe.messages.clear();
         let mut live = self.launch_probe(&probe, &cancel)?;
         let result = live.protocol.models(&mut live.transport, &cancel);
-        live.transport.stop();
+        // The CLI may refresh its credential while it starts.
+        self.abandon(&mut live);
         result
     }
     fn launch_probe(&self, r: &RuntimeRequest, cancel: &CancelToken) -> Result<Live, RuntimeError> {
-        self.launch(r, cancel, false)
+        self.launch(r, cancel, false, None)
     }
+}
+fn is_approval_request(v: &Value) -> bool {
+    v.get("id").is_some()
+        && matches!(
+            v["method"].as_str().unwrap_or(""),
+            "item/commandExecution/requestApproval"
+                | "item/fileChange/requestApproval"
+                | "session/request_permission"
+                | "approval/request"
+        )
 }
 impl RuntimeExecutor for ExternalRuntime {
     fn descriptor(&self) -> RuntimeDescriptor {
@@ -516,7 +903,7 @@ impl RuntimeExecutor for ExternalRuntime {
             name: info.name,
             modes: info.modes,
             permission_modes: info.permission_modes,
-            supports_resume: !matches!(self.config.driver, Driver::Pi | Driver::Omp),
+            supports_resume: self.resumable(),
             supports_approvals: !matches!(
                 self.config.driver,
                 Driver::Pi | Driver::Omp | Driver::ClaudeCode | Driver::Cursor | Driver::Muse
@@ -524,6 +911,12 @@ impl RuntimeExecutor for ExternalRuntime {
         }
     }
     fn validate(&self, r: &RuntimeRequest) -> Result<(), RuntimeError> {
+        if self.state.login_pending(&self.config.id)? {
+            return Err(error(
+                "auth_pending",
+                "Complete or cancel the pending official login before starting a native turn",
+            ));
+        }
         if !self.config.enabled {
             return Err(error("runtime_disabled", "Runtime is disabled"));
         }
@@ -600,8 +993,8 @@ impl RuntimeExecutor for ExternalRuntime {
                 })?;
             if decision.runtime_ref != pending.reference
                 || decision.fingerprint != pending.fingerprint
-                || r.runtime_ref != Some(self.reference(live))
-                || live.session_id != r.session_id
+                || r.runtime_ref != Some(self.reference(&live.protocol, &live.evidence))
+                || live.evidence.session_id != r.session_id
             {
                 return Err(error(
                     "approval_mismatch",
@@ -616,6 +1009,16 @@ impl RuntimeExecutor for ExternalRuntime {
                 ));
             }
             let mut live = guard.remove(&r.run_id).unwrap();
+            drop(guard);
+            // The decision continues under the credential the request was made with.
+            if let Err(e) =
+                live.evidence
+                    .credential_binding
+                    .verify(&self.config.auth, &self.state, &self.auth)
+            {
+                self.abandon(&mut live);
+                return Err(e);
+            }
             let pending = live.pending.take().unwrap();
             live.transport.send(json!({"jsonrpc":"2.0","id":pending.wire,"result":if decision.approved{pending.allow}else{pending.deny}}))?;
             live
@@ -631,7 +1034,7 @@ impl RuntimeExecutor for ExternalRuntime {
                     "Native run already waits for approval",
                 ));
             }
-            self.launch(r, cancel, true)?
+            self.launch(r, cancel, true, Some(on_event))?
         };
         self.drive(live, r, on_event, cancel)
     }
@@ -761,6 +1164,12 @@ mod live_tests {
             "scope_unsupported"
         );
         live.transport.stop();
+        // An actual encrypted native-home snapshot of the installed CLI's home
+        // (its regenerated `.tmp` excluded) stays within the recovery bounds.
+        runtime
+            .state
+            .snapshot_native("probe.sealed", &live.home(), runtime.capture())
+            .unwrap();
         assert!(runtime.sandbox.registry().is_empty());
     }
 }

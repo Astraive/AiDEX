@@ -1,4 +1,5 @@
 use crate::{
+    profiles::Accounts,
     runtime::NetworkGate,
     state::{State, error},
     *,
@@ -13,17 +14,69 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 use zeroize::Zeroizing;
 pub struct RuntimeManager {
     root: PathBuf,
     state: Arc<State>,
+    configs: Arc<Configs>,
     auth: Arc<AuthService>,
     sandbox: Sandbox,
     network: NetworkGate,
-    changes: Mutex<()>,
     executors: Mutex<BTreeMap<String, (String, Arc<ExternalRuntime>)>>,
+    accounts: Accounts,
+}
+const CONFIG_RECORD: &str = "runtime-config.sealed";
+/// The sealed runtime configuration list. Account logins switch a runtime to
+/// its profile through it once they connect, outside any manager call.
+pub(crate) struct Configs {
+    state: Arc<State>,
+    changes: Mutex<()>,
+}
+impl Configs {
+    fn lock(&self) -> Result<MutexGuard<'_, ()>, RuntimeError> {
+        self.changes.lock().map_err(|_| {
+            error(
+                "state_unavailable",
+                "Runtime configuration lock unavailable",
+            )
+        })
+    }
+    fn list(&self) -> Result<Vec<RuntimeConfig>, RuntimeError> {
+        let Some(bytes) = self.state.read(CONFIG_RECORD)? else {
+            return Ok(vec![]);
+        };
+        serde_json::from_slice(&bytes)
+            .map_err(|_| error("state_corrupt", "Encrypted runtime config is invalid"))
+    }
+    fn write(&self, configs: &[RuntimeConfig]) -> Result<(), RuntimeError> {
+        let bytes = Zeroizing::new(
+            serde_json::to_vec(configs)
+                .map_err(|_| error("invalid_config", "Runtime config cannot be encoded"))?,
+        );
+        if bytes.len() > 64 * 1024 {
+            return Err(error(
+                "config_limit",
+                "Runtime configuration exceeds 64 KiB",
+            ));
+        }
+        self.state.write(CONFIG_RECORD, &bytes)
+    }
+    /// Point a runtime at its managed account profile, which then is its only
+    /// credential. Called only after that profile was encrypted.
+    pub(crate) fn use_profile(&self, id: &str, profile: &str) -> Result<(), RuntimeError> {
+        let _guard = self.lock()?;
+        let mut configs = self.list()?;
+        let config = configs
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| error("not_found", "Runtime configuration not found"))?;
+        config.profile = Some(profile.to_owned());
+        config.auth = RuntimeAuth::None;
+        validate_config(config)?;
+        self.write(&configs)
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,14 +108,25 @@ impl RuntimeManager {
             .canonicalize()
             .map_err(|_| error("state_unavailable", "Runtime drive unavailable"))?;
         let state = Arc::new(State::new(root.join("private"), vault)?);
+        let configs = Arc::new(Configs {
+            state: state.clone(),
+            changes: Mutex::new(()),
+        });
+        let accounts = Accounts::new(
+            state.clone(),
+            configs.clone(),
+            sandbox.clone(),
+            network_gate.clone(),
+        );
         Ok(Self {
             root,
             state,
+            configs,
             auth,
             sandbox,
             network: network_gate,
-            changes: Mutex::new(()),
             executors: Mutex::new(BTreeMap::new()),
+            accounts,
         })
     }
     pub fn catalog(&self) -> Vec<DriverInfo> {
@@ -72,14 +136,10 @@ impl RuntimeManager {
     /// only file metadata: no vault access, so it never creates the runtime
     /// encryption key and works while the vault is locked.
     pub fn has_saved_configuration(&self) -> bool {
-        self.state.root.join("runtime-config.sealed").is_file()
+        self.state.root.join(CONFIG_RECORD).is_file()
     }
     pub fn list(&self) -> Result<Vec<RuntimeConfig>, RuntimeError> {
-        let Some(bytes) = self.state.read("runtime-config.sealed")? else {
-            return Ok(vec![]);
-        };
-        serde_json::from_slice(&bytes)
-            .map_err(|_| error("state_corrupt", "Encrypted runtime config is invalid"))
+        self.configs.list()
     }
     pub fn get(&self, id: &str) -> Result<RuntimeConfig, RuntimeError> {
         self.list()?
@@ -88,12 +148,7 @@ impl RuntimeManager {
             .ok_or_else(|| error("not_found", "Runtime configuration not found"))
     }
     pub fn save(&self, mut config: RuntimeConfig) -> Result<RuntimeConfig, RuntimeError> {
-        let _guard = self.changes.lock().map_err(|_| {
-            error(
-                "state_unavailable",
-                "Runtime configuration lock unavailable",
-            )
-        })?;
+        let _guard = self.configs.lock()?;
         if !self.sandbox.registry().is_empty() {
             return Err(error(
                 "runtime_busy",
@@ -119,17 +174,7 @@ impl RuntimeManager {
             }
             configs.push(config.clone());
         }
-        let bytes = Zeroizing::new(
-            serde_json::to_vec(&configs)
-                .map_err(|_| error("invalid_config", "Runtime config cannot be encoded"))?,
-        );
-        if bytes.len() > 64 * 1024 {
-            return Err(error(
-                "config_limit",
-                "Runtime configuration exceeds 64 KiB",
-            ));
-        }
-        self.state.write("runtime-config.sealed", &bytes)?;
+        self.configs.write(&configs)?;
         self.executors
             .lock()
             .map_err(|_| error("state_unavailable", "Runtime registry unavailable"))?
@@ -143,19 +188,13 @@ impl RuntimeManager {
                 "Stop active external runtimes before removing configuration",
             ));
         }
-        let _guard = self
-            .changes
-            .lock()
-            .map_err(|_| error("state_unavailable", "Runtime config lock unavailable"))?;
+        let _guard = self.configs.lock()?;
         let mut configs = self.list()?;
         let before = configs.len();
         configs.retain(|c| c.id != id);
         let changed = configs.len() != before;
         if changed {
-            self.state.write(
-                "runtime-config.sealed",
-                &serde_json::to_vec(&configs).unwrap(),
-            )?;
+            self.configs.write(&configs)?;
             self.executors
                 .lock()
                 .map_err(|_| error("state_unavailable", "Runtime registry unavailable"))?
@@ -230,6 +269,23 @@ impl RuntimeManager {
         }
         .to_owned();
         let mut authenticated = false;
+        // A managed account's evidence is the official CLI's cached status. A
+        // missing binary has none to give, and an account whose status cannot
+        // be read stays unverified rather than failing the health check.
+        if installed
+            && config.driver == Driver::Codex
+            && config.profile.is_some()
+            && matches!(config.auth, RuntimeAuth::None)
+        {
+            match self.account_status(id) {
+                Ok(native) => {
+                    authenticated = native.authenticated;
+                    status = native.status;
+                }
+                Err(e) if e.code == "vault_locked" => return Err(e),
+                Err(_) => {}
+            }
+        }
         if let RuntimeAuth::CodexOauth { provider_id } = &config.auth {
             authenticated = self
                 .auth
@@ -244,6 +300,7 @@ impl RuntimeManager {
         let mut protocol_ready = false;
         if installed
             && config.enabled
+            && !self.state.login_pending(id)?
             && matches!(
                 config.driver,
                 Driver::Codex | Driver::Pi | Driver::Omp | Driver::Muse
@@ -327,65 +384,111 @@ impl RuntimeManager {
                     "Requested runtime artifact is not declared by the bundle",
                 )
             })?;
-        let path = self.root.join(portable(Path::new(&component.path))?);
-        let canonical = path.canonicalize().map_err(|_| {
-            error(
-                "installer_unavailable",
-                "Bundled runtime artifact is absent",
-            )
-        })?;
-        if !canonical.starts_with(&self.root) {
-            return Err(error("integrity_failed", "Runtime artifact escapes bundle"));
-        }
-        let bytes = std::fs::read(&canonical)
-            .map_err(|_| error("installer_unavailable", "Runtime artifact cannot be read"))?;
-        if bytes.len() > 256 * 1024 * 1024 {
-            return Err(error(
-                "integrity_failed",
-                "Runtime artifact exceeds package limit",
-            ));
-        }
-        let digest = aidex_native_sessions::digest(&bytes);
-        if digest != component.sha256 {
-            return Err(error(
-                "integrity_failed",
-                "Bundled runtime artifact hash does not match verified component manifest",
-            ));
-        }
-        let name = canonical
-            .file_name()
-            .ok_or_else(|| error("installer_unavailable", "Runtime artifact filename invalid"))?;
-        let dir = self
-            .root
-            .join("runtimes")
-            .join(format!("{:?}", driver).to_lowercase());
-        std::fs::create_dir_all(&dir).map_err(|_| {
-            error(
-                "installer_unavailable",
-                "Runtime installation directory unavailable",
-            )
-        })?;
-        let dest = dir.join(name);
-        if dest.exists() {
-            return Err(error(
-                "conflict",
-                "Runtime component already exists; update requires explicit replacement",
-            ));
-        }
-        std::fs::copy(&canonical, &dest).map_err(|_| {
-            error(
-                "installer_unavailable",
-                "Runtime component cannot be copied",
-            )
-        })?;
-        Ok(InstallResult {
-            driver,
-            executable: portable(dest.strip_prefix(&self.root).unwrap())?,
-            verified_sha256: digest,
-        })
+        let relative = portable(Path::new(&component.path))?;
+        // Hashes while it stages the copy, so the verified bytes are the ones placed.
+        crate::install::place(&self.root, driver, &relative, &component.sha256)
     }
     pub fn auth(&self) -> &Arc<AuthService> {
         &self.auth
+    }
+    /// A configuration with its executable resolved, for account commands.
+    fn resolved(&self, id: &str) -> Result<RuntimeConfig, RuntimeError> {
+        let mut config = self.get(id)?;
+        config.executable = self
+            .executable(&config.executable)?
+            .to_string_lossy()
+            .into_owned();
+        Ok(config)
+    }
+    /// Whether an official CLI login is pending for any runtime.
+    pub fn has_pending_logins(&self) -> bool {
+        self.state.has_pending_logins()
+    }
+    /// Cancel every pending official login (vault lock, emergency stop, going
+    /// offline). The manager stays usable: later logins and launches work.
+    pub fn cancel_logins(&self) -> Result<(), RuntimeError> {
+        self.accounts.cancel(None)
+    }
+    /// Daemon shutdown: cancel logins, then terminate and close the runtime
+    /// process registry. No runtime process starts afterwards.
+    pub fn shutdown(&self) -> Result<(), RuntimeError> {
+        let cancelled = self.cancel_logins();
+        let report = self
+            .sandbox
+            .registry()
+            .shutdown(aidex_sandbox::StopReason::DaemonShutdown);
+        self.executors
+            .lock()
+            .map_err(|_| error("state_unavailable", "Runtime registry unavailable"))?
+            .clear();
+        if !report.is_clean() {
+            return Err(error(
+                "process_shutdown_failed",
+                "A native runtime tree could not be confirmed terminated",
+            ));
+        }
+        cancelled
+    }
+    /// The managed account of a Codex runtime; other drivers fail `auth_unsupported`.
+    pub fn account_status(&self, id: &str) -> Result<RuntimeAccountStatus, RuntimeError> {
+        self.accounts.status(&self.resolved(id)?)
+    }
+    /// Import an explicitly selected absolute `auth.json` (or its directory) as
+    /// the runtime's managed account, once the official CLI confirms it.
+    pub fn import_profile(
+        &self,
+        id: &str,
+        source: &Path,
+    ) -> Result<RuntimeAccountStatus, RuntimeError> {
+        let config = self.resolved(id)?;
+        self.accounts.supported(&config)?;
+        if !self.sandbox.registry().is_empty() {
+            return Err(error(
+                "runtime_busy",
+                "Stop active external runtimes before importing an account",
+            ));
+        }
+        let profile = crate::profiles::profile_id(&config);
+        let status = self.accounts.import(&config, &profile, source)?;
+        self.configs.use_profile(id, &profile)?;
+        Ok(status)
+    }
+    /// Start the official CLI's browser login. The saved configuration is
+    /// unchanged until the login connects; a failed or cancelled login leaves
+    /// the runtime's previous authentication as it was.
+    pub fn login_start(&self, id: &str) -> Result<RuntimeLoginStatus, RuntimeError> {
+        let config = self.resolved(id)?;
+        self.accounts.supported(&config)?;
+        self.accounts.start(config)
+    }
+    pub fn login_status(
+        &self,
+        id: &str,
+        flow_id: &str,
+    ) -> Result<RuntimeLoginStatus, RuntimeError> {
+        self.get(id)?;
+        self.accounts.flow(id, flow_id, false)
+    }
+    pub fn login_cancel(
+        &self,
+        id: &str,
+        flow_id: &str,
+    ) -> Result<RuntimeLoginStatus, RuntimeError> {
+        self.accounts.flow(id, flow_id, true)
+    }
+    /// Sign out and remove the managed account profile and every session
+    /// snapshot of the runtime.
+    pub fn logout(&self, id: &str) -> Result<RuntimeAccountStatus, RuntimeError> {
+        let config = self.resolved(id)?;
+        self.accounts.supported(&config)?;
+        self.accounts.cancel(Some(id))?;
+        if !self.sandbox.registry().is_empty() {
+            return Err(error(
+                "runtime_busy",
+                "Stop active runtimes before signing out",
+            ));
+        }
+        self.accounts.logout(&config)
     }
 }
 fn portable(path: &Path) -> Result<String, RuntimeError> {

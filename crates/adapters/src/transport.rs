@@ -11,7 +11,13 @@ pub(crate) struct Transport {
     frames: VecDeque<Value>,
     total: u64,
     secrets: Vec<zeroize::Zeroizing<String>>,
+    /// The first 16 KiB of stderr, kept only to name a closed failure category.
+    stderr: zeroize::Zeroizing<Vec<u8>>,
+    stderr_bytes: u64,
+    stderr_truncated: bool,
 }
+/// Stderr kept for diagnostics; never returned or logged.
+const STDERR_SAMPLE: usize = 16 * 1024;
 impl Transport {
     pub fn new(process: ManagedProcess, secrets: Vec<zeroize::Zeroizing<String>>) -> Self {
         Self {
@@ -20,6 +26,9 @@ impl Transport {
             frames: VecDeque::new(),
             total: 0,
             secrets,
+            stderr: zeroize::Zeroizing::new(Vec::new()),
+            stderr_bytes: 0,
+            stderr_truncated: false,
         }
     }
     pub fn send(&self, value: Value) -> Result<(), RuntimeError> {
@@ -43,6 +52,13 @@ impl Transport {
                 return Ok(frame);
             }
             let output = self.process.take_output();
+            self.stderr_bytes = output.stderr.total_bytes;
+            self.stderr_truncated |= output.stderr.truncated;
+            let room = STDERR_SAMPLE.saturating_sub(self.stderr.len());
+            let kept = room.min(output.stderr.bytes.len());
+            self.stderr.extend_from_slice(&output.stderr.bytes[..kept]);
+            self.stderr_truncated |= kept < output.stderr.bytes.len();
+            drop(zeroize::Zeroizing::new(output.stderr.bytes));
             self.total = self.total.saturating_add(output.stdout.bytes.len() as u64);
             if output.stdout.truncated || self.total > 16 * 1024 * 1024 {
                 self.stop();
@@ -84,13 +100,22 @@ impl Transport {
                 continue;
             }
             if !self.process.is_running() {
+                let exit = self.process.try_wait().ok().flatten();
+                let reason = if self.pending.is_empty() {
+                    "Runtime exited before root completion"
+                } else {
+                    "Truncated runtime protocol frame"
+                };
+                // Exit code, counts and a closed category: never vendor output.
                 return Err(error(
                     "process_closed",
-                    if self.pending.is_empty() {
-                        "Runtime exited before root completion"
-                    } else {
-                        "Truncated runtime protocol frame"
-                    },
+                    &format!(
+                        "{reason} (exit={:?}; stderr={}; bytes={}; truncated={})",
+                        exit.and_then(|status| status.code),
+                        crate::diagnostics::stderr_category(&self.stderr),
+                        self.stderr_bytes,
+                        self.stderr_truncated
+                    ),
                 ));
             }
             thread::sleep(Duration::from_millis(10));
@@ -103,18 +128,51 @@ impl Transport {
 }
 fn scrub(value: Value, secrets: &[zeroize::Zeroizing<String>]) -> Value {
     match value {
-        Value::String(mut s) => {
-            for secret in secrets {
-                if !secret.is_empty() {
-                    s = s.replace(secret.as_str(), "[REDACTED]");
-                }
-            }
-            Value::String(s)
-        }
+        Value::String(s) => Value::String(scrub_text(s, secrets)),
         Value::Array(v) => Value::Array(v.into_iter().map(|v| scrub(v, secrets)).collect()),
-        Value::Object(v) => {
-            Value::Object(v.into_iter().map(|(k, v)| (k, scrub(v, secrets))).collect())
+        // A vendor can reflect a credential as an object key or as a number.
+        Value::Object(v) => Value::Object(
+            v.into_iter()
+                .map(|(k, v)| (scrub_text(k, secrets), scrub(v, secrets)))
+                .collect(),
+        ),
+        Value::Number(_) | Value::Bool(_) | Value::Null => {
+            let text = value.to_string();
+            if secrets
+                .iter()
+                .any(|s| !s.is_empty() && text.contains(s.as_str()))
+            {
+                Value::String("[REDACTED]".into())
+            } else {
+                value
+            }
         }
-        v => v,
+    }
+}
+fn scrub_text(mut s: String, secrets: &[zeroize::Zeroizing<String>]) -> String {
+    for secret in secrets {
+        if !secret.is_empty() {
+            s = s.replace(secret.as_str(), "[REDACTED]");
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn credential_reflections_are_scrubbed_from_keys_and_non_string_values() {
+        let protected = vec![
+            zeroize::Zeroizing::new("opaque-key-marker".into()),
+            zeroize::Zeroizing::new("48199273".into()),
+        ];
+        let input = serde_json::json!({"opaque-key-marker":{"nested":[48199273,"opaque-key-marker"]},"numeric":48199273,"flag":true});
+        let output = scrub(input, &protected);
+        let text = output.to_string();
+        assert!(!text.contains("opaque-key-marker"));
+        assert!(!text.contains("48199273"));
+        assert_eq!(output["numeric"], "[REDACTED]");
+        assert_eq!(output["flag"], true);
     }
 }

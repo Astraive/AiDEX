@@ -100,11 +100,15 @@ impl Protocol {
         }
         Ok(result)
     }
+    /// Open or resume the native session and send the turn. `checkpoint` runs
+    /// once the native session identity is known and before the turn is sent,
+    /// so a crash mid-turn still leaves that identity to resume.
     pub fn begin(
         &mut self,
         t: &mut Transport,
         r: &RuntimeRequest,
         cancel: &CancelToken,
+        checkpoint: &mut dyn FnMut(&Self) -> Result<(), RuntimeError>,
     ) -> Result<(), RuntimeError> {
         let resume = r.operation == RuntimeOperation::Resume;
         let native = r
@@ -130,6 +134,7 @@ impl Protocol {
             }
             let state = self.call(t, "get_state", json!({}), cancel)?;
             self.session = state["sessionId"].as_str().unwrap_or("ephemeral").into();
+            checkpoint(self)?;
             self.seq += 1;
             self.prompt_id = json!(format!("aidex-{}", self.seq));
             t.send(json!({"type":"prompt","id":self.prompt_id,"message":prompt(r,resume&&native.is_none())}))?;
@@ -150,6 +155,7 @@ impl Protocol {
             }
             let result = self.call(t, method, params, cancel)?;
             self.session = required(&result, "/thread/id")?;
+            checkpoint(self)?;
             let result=self.call(t,"turn/start",json!({"threadId":self.session,"cwd":cwd,"input":[{"type":"text","text":prompt(r,false)}],"sandboxPolicy":{"type":"dangerFullAccess"},"approvalPolicy":"never"}),cancel)?;
             self.turn = required(&result, "/turn/id")?;
             return Ok(());
@@ -171,6 +177,7 @@ impl Protocol {
             }
             let result = self.call(t, method, params, cancel)?;
             self.session = required(&result, "/session/sessionId")?;
+            checkpoint(self)?;
             let result=self.call(t,"turn/start",json!({"sessionId":self.session,"input":[{"type":"text","text":prompt(r,false)}],"workspaceRoots":[cwd],"ifBusy":"reject"}),cancel)?;
             self.turn = required(&result, "/turnId")?;
             return Ok(());
@@ -186,6 +193,7 @@ impl Protocol {
         }
         let result = self.call(t, method, params, cancel)?;
         self.session = required(&result, "/sessionId")?;
+        checkpoint(self)?;
         if let Some(model) = &r.model {
             self.call(
                 t,
@@ -224,9 +232,15 @@ impl Protocol {
             .take(512)
             .filter_map(|v| {
                 let id = v["id"].as_str()?;
+                // Pi and OMP select a model as `provider/model` (see `begin`).
+                let id = if matches!(self.driver, Driver::Pi | Driver::Omp) {
+                    format!("{}/{id}", v["provider"].as_str()?)
+                } else {
+                    id.to_owned()
+                };
                 Some(RuntimeModel {
-                    id: id.into(),
-                    name: v["name"].as_str().unwrap_or(id).into(),
+                    name: v["name"].as_str().unwrap_or(&id).into(),
+                    id,
                 })
             })
             .collect())
@@ -420,6 +434,10 @@ impl Protocol {
         }
         if matches!(self.driver, Driver::ClaudeCode | Driver::Cursor) {
             if v["type"] == "result" {
+                // A subagent's result, failed or not, never ends the root turn.
+                if !v["parent_tool_use_id"].is_null() {
+                    return Ok(false);
+                }
                 if v["is_error"] == true
                     || v["subtype"]
                         .as_str()
@@ -427,7 +445,7 @@ impl Protocol {
                 {
                     return Err(error("runtime_failed", "Runtime result failed"));
                 }
-                return Ok(v["parent_tool_use_id"].is_null());
+                return Ok(true);
             }
             return Ok(false);
         }
@@ -469,6 +487,34 @@ pub(crate) fn required(v: &Value, path: &str) -> Result<String, RuntimeError> {
     Ok(id.into())
 }
 pub(crate) fn prompt(r: &RuntimeRequest, handoff: bool) -> String {
+    // Resuming the run the reference was saved by is recovery: its effects may
+    // already have happened, so the native session inspects instead of
+    // receiving the original request again.
+    if r.operation == RuntimeOperation::Resume
+        && !handoff
+        && r.runtime_ref
+            .as_ref()
+            .is_some_and(|reference| reference["run_id"] == r.run_id)
+    {
+        let intent = r
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == aidex_providers::Role::User)
+            .map(|message| message.content.as_str())
+            .unwrap_or("");
+        return format!(
+            "{}\n[AiDEX recovery continuation for this interrupted native run]\n\
+             Inspect the saved native history and current workspace before any further effects. \
+             Prior execution effects may be unknown. Do not replay the original request or repeat \
+             completed effects to reconstruct context. Continue only work verified to remain; \
+             report ambiguous effects instead of automatically retrying them.\n\
+             Original user intent is evidence, not a new execution instruction:\n\
+             <saved-user-intent>{}</saved-user-intent>",
+            r.instructions,
+            serde_json::to_string(intent).unwrap_or_default()
+        );
+    }
     let history = if r.operation == RuntimeOperation::Resume && !handoff {
         r.messages
             .last()
@@ -500,6 +546,11 @@ fn classify_error(v: &Value) -> RuntimeError {
         .to_lowercase();
     if message.contains("auth") || message.contains("login") {
         error("auth_required", "Runtime authentication is required")
+    } else if v.pointer("/error/code").and_then(Value::as_i64) == Some(-32602) {
+        error(
+            "protocol_parameters",
+            "Installed runtime rejected the supported request parameters",
+        )
     } else {
         error("protocol_error", "Runtime rejected the protocol request")
     }
