@@ -187,4 +187,59 @@ mod tests {
         let error = router.call(&context, ROLLBACK, Value::Null).unwrap_err();
         assert_eq!(error.kind(), Some(ErrorCode::NotFound));
     }
+
+    /// `update.status` has exactly the keys of `UpdateStatus` and
+    /// `IntegrityReport` in packages/client/src/dto/updates.ts.
+    #[test]
+    fn status_keys_match_the_client_types() {
+        let root = crate::services::testing::temp_drive();
+        let shutdown = ShutdownSignal::new();
+        let services = Arc::new(Services::open(root.path(), shutdown.clone()).unwrap());
+        let mut router = Router::new();
+        register(&mut router, &services).unwrap();
+        let context = CallContext::detached(ClientInfo::new("test", "1"), shutdown);
+        let keys = |value: &Value| {
+            let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        let status = router.call(&context, STATUS, Value::Null).unwrap();
+        assert_eq!(
+            keys(&status),
+            [
+                "current",
+                "daemon_version",
+                "integrity",
+                "journal",
+                "pending",
+                "previous",
+                "recovery",
+                "recovery_error",
+                "restart_required",
+                "running_dir",
+                "target",
+                "versions",
+            ]
+        );
+        assert_eq!(
+            keys(&status["integrity"]),
+            [
+                "dir",
+                "error",
+                "installed",
+                "manifest_sha256",
+                "pending_update",
+                "previous",
+                "reason",
+                "sbom",
+                "scope",
+                "signature",
+                "signer_key_id",
+                "target",
+                "verified",
+                "verified_files",
+                "version",
+            ]
+        );
+    }
 }

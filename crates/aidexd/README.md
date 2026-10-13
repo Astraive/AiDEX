@@ -137,9 +137,23 @@ handlers without sockets.
   `services/vault_lock.rs` observes every end of the unlocked session (`vault.lock`,
   emergency stop, idle auto-lock, or a session dropped after a `conflict` or an
   uncertain header commit) and runs the lock cleanup once: native runs cancelled,
-  attachment uploads aborted, `vault.locked` recorded. `services/mcp.rs` stops MCP
+  attachment uploads aborted, official runtime logins cancelled, external runtime
+  processes terminated, `vault.locked` recorded. `services/mcp.rs` stops MCP
   servers on the same notice (its polling watchdog stays as a backstop). The next
-  unlock waits until that cleanup ran, so it never reaches the new session. The one
+  unlock waits until that cleanup ran, so it never reaches the new session;
+  `vault.init`/`vault.unlock` then call `NativeEngine::reconcile_after_unlock` (best
+  effort) to settle runs the lock left without a final state as `interrupted`.
+  `vault.secret.set|delete` refuse the records AiDEX owns
+  (`methods::vault::managed_secret`) with `policy_denied`/`managed_secret`, and
+  `vault.secret.list` names them in `managed`. A keep-alive thread
+  (`services/keep_alive.rs`) counts agent work as vault use: while
+  `NativeEngine::has_active()`, a runtime process runs, or the session store's
+  plaintext run index lists a run of this vault session waiting for an approval
+  (native or external), it calls `VaultService::keep_alive` at least four times
+  per idle period (at most once a second), so the idle auto-lock follows the end
+  of the work. It never reads the vault file. The lock cleanup records the runs
+  still listed as active when a session ends; one the next unlock could not
+  settle keeps that status and so never holds the vault open. The one
   exception: `vault.unlock` while a session is open whose `vault.json` changed on
   disk replaces that session without a notice or cleanup, because the vault never
   locks. Errors that dropped the session carry `data.session_dropped: true`.
@@ -173,7 +187,7 @@ and `agent.*` services rather than a raw provider-chat RPC.
 | `model.default`         | none                                                                                                         | `{default_model}`                                                                                                                              |
 | `model.preferences.get` | none                                                                                                         | `{favorite_models, hidden_models}`                                                                                                             |
 | `model.preferences.set` | `{favorite_models?, hidden_models?}`                                                                         | the saved record; omitted lists are unchanged                                                                                                  |
-| `network.offline`       | `{enabled}`                                                                                                  | `{offline, network}`                                                                                                                           |
+| `network.offline`       | `{enabled}`                                                                                                  | `{offline, network}`; on also cancels runtime runs and logins                                                                                  |
 | `network.status`        | none                                                                                                         | `{offline, network}`                                                                                                                           |
 
 Provider kinds are `openai-compatible`, `openai-responses`, `anthropic`, `gemini`,
@@ -227,15 +241,38 @@ are not wired yet.
 Code, Cursor, Grok, OpenCode, Antigravity, Pi, Oh My Pi, Muse, and ACP drivers) or
 why it failed to open; a failure never stops the daemon, and `runtime.*` then
 reports `unavailable` (`data.reason = "runtime_unavailable"`). `methods/runtime.rs`
-serves `runtime.catalog|list|add|update|config.save|remove|config.get|health|models|install`
-and `runtime.auth.start|status|cancel`. The configuration is sealed with a vault
+serves `runtime.catalog|list|add|update|config.save|remove|config.get|health|models|install`,
+`runtime.auth.start|status|cancel`, and the managed accounts
+`runtime.account.status`, `runtime.profile.import`, and
+`runtime.login.start|status|cancel|logout` (Codex only; errors carry the adapter's
+code as `data.reason`, and results never carry credential bytes, file contents, or
+CLI output). Import, login start, and logout run like configuration changes
+(`conflict` while an external run is active); `runtime.login.status` of a
+connected login re-syncs the engine best effort, so it never fails because a run
+is active. The manager's gate (`services/runtime.rs`) admits vendor processes and
+logins only while the drive is online, the vault is unlocked, and no emergency
+stop is in effect; adapters stop running processes and logins within about 25 ms
+once it closes. `emergency.stop` also cancels every run, pending login, and vendor
+process; `network.offline {enabled: true}` cancels the active runs of runtime
+conversations and pending logins; daemon shutdown calls `RuntimeManager::shutdown`.
+While the gate is closed the account methods start no official CLI:
+`runtime.account.status` and the managed-account path of `runtime.health`
+answer from the status the CLI last confirmed for the runtime's profile (kept
+in memory by `methods/runtime.rs`, never credential text), and import, login
+start, and logout are refused with `offline_refused`.
+The configuration is sealed with a vault
 key, so the native engine only learns the configured runtimes through
 `sync_runtimes`, which loads the enabled executors when the vault is unlocked (a
 no-op while it is locked, and on a drive that never saved a runtime
 configuration, so unlocking never creates the runtime encryption key). It runs after `vault.init`/`vault.unlock`, on
-`runtime.list`, and before `conversation.create`, `message.send`, and `agent.start`
-of a runtime conversation whose runtime the engine does not have yet; adding,
-updating, or removing a runtime swaps the engine's executors directly. Runtime
+`runtime.list`, and before `conversation.create`, `message.send`, `agent.start`,
+`run.resume`, and `approval.respond` of a runtime conversation whose runtime the
+engine does not have yet (when an active external run refuses the swap, just that
+runtime is added); adding, updating, or removing a runtime swaps the engine's
+executors directly. `agent.configuration.set` that changes the runtime, project,
+mode, permission mode, or instructions drops the conversation's and its runs'
+`runtime_ref`, and a run's `has_runtime_ref` reports only a reference
+`run.resume` can continue (`aidex_native_sessions::is_resumable_reference`). Runtime
 conversations record `provider_id: "runtime"`; `model_id: "default"`
 (`aidex_native_sessions::RUNTIME_DEFAULT_MODEL`) makes the harness send no model so
 the runtime uses its own default.

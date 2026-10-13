@@ -5,6 +5,11 @@
 //! containers and never appear in results, error messages, or logs: parameter
 //! errors are reported without serde's value-echoing detail. Handle issuance and
 //! resolution are deliberately not RPC methods (the broker calls `VaultService`).
+//!
+//! Records AiDEX itself owns (the native record key, the runtime state key,
+//! preferences, and `oauth.*` sign-ins) are listed under `managed` and refused by
+//! `vault.secret.set` and `vault.secret.delete`: deleting the native record key,
+//! for example, would make every native conversation undecryptable.
 
 use crate::{
     errors::{ErrorCode, RpcError},
@@ -101,11 +106,43 @@ struct PassphraseChangeParams {
     new_passphrase: String,
 }
 
-/// Result of `vault.secret.list`.
+/// Result of `vault.secret.list`. `managed` names the listed records AiDEX owns
+/// ([`managed_secret`]); `vault.secret.set` and `vault.secret.delete` refuse them.
+/// It is always serialized (empty when none is stored).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SecretList {
     pub secrets: Vec<SecretMeta>,
+    #[serde(default)]
+    pub managed: Vec<SecretName>,
+}
+
+/// Prefix of the account sign-in records `aidex-auth` keeps
+/// (`oauth.<provider>.access`, `oauth.<provider>.profile`, `oauth.hosts`).
+const OAUTH_SECRET_PREFIX: &str = "oauth.";
+
+/// Whether `name` is a record AiDEX itself owns: the native record encryption
+/// key, the external runtime state key, the app and model preferences, or an
+/// `oauth.*` account sign-in. Only the owning services write or remove these.
+pub fn managed_secret(name: &str) -> bool {
+    [
+        aidex_native_sessions::NATIVE_RECORD_KEY_SECRET,
+        aidex_adapters::RUNTIME_STATE_KEY_SECRET,
+        aidex_preferences::PREFERENCES_SECRET,
+        aidex_preferences::MODEL_PREFERENCES_SECRET,
+    ]
+    .contains(&name)
+        || name.starts_with(OAUTH_SECRET_PREFIX)
+}
+
+/// The refusal of a generic write or delete of a managed record, before the
+/// vault is touched: `policy_denied` with `data.reason = "managed_secret"`.
+fn managed_refusal() -> RpcError {
+    RpcError::new(
+        ErrorCode::PolicyDenied,
+        "This vault record is managed by AiDEX and cannot be changed or deleted here",
+    )
+    .with_data(json!({"reason": "managed_secret"}))
 }
 
 /// Result of `vault.secret.delete`.
@@ -162,11 +199,26 @@ fn wire_error(error: &VaultError, session_dropped: bool) -> RpcError {
 /// Lock the vault on the user's request (`vault.lock`, `emergency.stop` with
 /// `lock_vault`). Native runs are cancelled first, while the record key is still
 /// available, so they are recorded as cancelled. Ending the session then runs the
-/// daemon's lock cleanup (`services/vault_lock.rs`: uploads aborted, `vault.locked`
-/// recorded once) before this returns.
+/// daemon's lock cleanup (`services/vault_lock.rs`: uploads aborted, runtime
+/// logins cancelled and vendor processes ended, `vault.locked` recorded once)
+/// before this returns.
 pub(crate) fn lock_vault(services: &Services) -> LockOutcome {
     services.native().cancel_all();
     services.vault().lock()
+}
+
+/// After `vault.init` or `vault.unlock`: settle runs a lock left without a
+/// final state (cancelled while the record key was gone, or waiting on an
+/// approval whose plan the lock dropped) as `interrupted`, then load the
+/// configured runtimes. Both are best effort and never fail the unlock: an
+/// unsettled run is settled by the next unlock or the next daemon start, and
+/// runtime conversations also load their runtime lazily.
+fn after_unlock(services: &Services) {
+    if services.native().reconcile_after_unlock().is_err() {
+        // Only a fixed line: the error can name run content.
+        eprintln!("aidexd: some runs could not be settled after the vault unlocked");
+    }
+    let _ = super::runtime::sync_runtimes(services);
 }
 
 /// Decode params whose fields may hold secrets: serde messages such as
@@ -220,8 +272,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                 vault_id: outcome.vault_id.clone(),
             },
         )?;
-        // Best effort: runtime sessions also load their runtime lazily.
-        let _ = super::runtime::sync_runtimes(&shared);
+        after_unlock(&shared);
         to_result(&InitResult {
             state: VaultState::Unlocked,
             vault_id: outcome.vault_id.to_string(),
@@ -260,9 +311,8 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             )?;
         }
         // The runtime configuration is sealed with a vault key, so the native
-        // engine learns the configured runtimes only now. Best effort: runtime
-        // sessions also load their runtime lazily.
-        let _ = super::runtime::sync_runtimes(&shared);
+        // engine learns the configured runtimes only now.
+        after_unlock(&shared);
         to_result(&status)
     })?;
 
@@ -285,6 +335,9 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             "{name: string, value: string, consumers?: [string], kind?: string}",
         )?;
         let value = SecretBytes::from(params.value);
+        if managed_secret(&params.name) {
+            return Err(managed_refusal());
+        }
         let name = SecretName::new(params.name).map_err(|error| vault_error(&error))?;
         let kind = match params.kind.as_deref() {
             Some(kind) => SecretKind::parse(kind).map_err(|error| vault_error(&error))?,
@@ -311,12 +364,20 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             .vault()
             .list_secrets()
             .map_err(|error| vault_session_error(shared.vault(), &error))?;
-        to_result(&SecretList { secrets })
+        let managed = secrets
+            .iter()
+            .filter(|meta| managed_secret(meta.name.as_str()))
+            .map(|meta| meta.name.clone())
+            .collect();
+        to_result(&SecretList { secrets, managed })
     })?;
 
     let shared = Arc::clone(services);
     router.register(SECRET_DELETE, move |_context, params| {
         let params: DeleteParams = secret_params(SECRET_DELETE, params, "{name: string}")?;
+        if managed_secret(&params.name) {
+            return Err(managed_refusal());
+        }
         let name = SecretName::new(params.name).map_err(|error| vault_error(&error))?;
         let deleted = shared
             .vault()
@@ -717,6 +778,157 @@ mod tests {
         assert_eq!(services.vault().status().state, VaultState::Locked);
         let locked = call(&router, &context, SECRET_LIST, Value::Null).unwrap_err();
         assert_eq!(locked.data, Some(json!({"reason": "locked"})));
+    }
+
+    /// The managed records the test seeds as their owners would (besides the
+    /// native record key, which a conversation creates).
+    const SEEDED: [&str; 5] = [
+        "external-runtime-encryption-key",
+        "aidex-preferences",
+        "aidex-model-preferences",
+        "oauth.openai.access",
+        "oauth.hosts",
+    ];
+
+    fn listed(router: &Router, context: &CallContext) -> SecretList {
+        serde_json::from_value(call(router, context, SECRET_LIST, Value::Null).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn managed_records_are_listed_and_refused_by_set_and_delete() {
+        let (_root, services, mut router, context) = fixture();
+        crate::methods::native::register(&mut router, &services).unwrap();
+        init(&router, &context);
+        let owner = ConsumerScope::process("fixture-owner").unwrap();
+        for name in SEEDED {
+            services
+                .vault()
+                .put_secret(
+                    &SecretName::new(name).unwrap(),
+                    SecretKind::Generic,
+                    SecretBytes::from(format!("{VALUE}-{name}")),
+                    SecretPolicy::new([owner.clone()]).unwrap(),
+                )
+                .unwrap();
+        }
+        // A conversation creates the native record key and seals its history.
+        let session = services
+            .native()
+            .store()
+            .create(
+                serde_json::from_value(json!({"provider_id": "fixture", "model_id": "small"}))
+                    .unwrap(),
+            )
+            .unwrap();
+        services
+            .native()
+            .store()
+            .update(&session.id, |detail| {
+                detail
+                    .messages
+                    .push(aidex_providers::ChatMessage::user("sealed history"));
+                Ok(())
+            })
+            .unwrap();
+        call(
+            &router,
+            &context,
+            SECRET_SET,
+            json!({"name": "openai", "value": VALUE, "consumers": ["provider:openai"]}),
+        )
+        .unwrap();
+
+        let list = listed(&router, &context);
+        let mut expected: Vec<&str> = SEEDED.to_vec();
+        expected.push(aidex_native_sessions::NATIVE_RECORD_KEY_SECRET);
+        expected.sort_unstable();
+        let mut managed: Vec<&str> = list.managed.iter().map(SecretName::as_str).collect();
+        managed.sort_unstable();
+        assert_eq!(managed, expected);
+        assert_eq!(list.secrets.len(), expected.len() + 1);
+        assert!(managed.iter().all(|name| managed_secret(name)));
+        assert!(!managed_secret("openai"));
+
+        let before = list.secrets.clone();
+        // Also a managed name that does not exist yet.
+        for name in expected.iter().copied().chain(["oauth.other.access"]) {
+            for (method, params) in [
+                (
+                    SECRET_SET,
+                    json!({"name": name, "value": VALUE, "consumers": ["provider:openai"]}),
+                ),
+                (SECRET_DELETE, json!({"name": name})),
+            ] {
+                let error = call(&router, &context, method, params).unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    Some(ErrorCode::PolicyDenied),
+                    "{method} {name}"
+                );
+                assert_eq!(error.data, Some(json!({"reason": "managed_secret"})));
+                assert!(!serde_json::to_string(&error).unwrap().contains(VALUE));
+            }
+        }
+        assert_eq!(listed(&router, &context).secrets, before, "nothing changed");
+        // History sealed with the record key still decrypts.
+        let view = router
+            .call(&context, "conversation.get", json!({"id": session.id}))
+            .unwrap();
+        assert_eq!(view["messages"][0]["content"], "sealed history");
+
+        // Ordinary secrets still change and delete.
+        call(
+            &router,
+            &context,
+            SECRET_SET,
+            json!({"name": "openai", "value": "replacement value", "consumers": []}),
+        )
+        .unwrap();
+        call(&router, &context, SECRET_DELETE, json!({"name": "openai"})).unwrap();
+        let after = listed(&router, &context);
+        assert_eq!(after.secrets.len(), expected.len());
+        assert_eq!(after.managed.len(), expected.len());
+    }
+
+    /// `vault.secret.list` has exactly the keys of `SecretList` and `SecretMeta`
+    /// in packages/client/src/dto/vault.ts.
+    #[test]
+    fn secret_list_keys_match_the_client_types() {
+        let (_root, _services, router, context) = fixture();
+        init(&router, &context);
+        let keys = |value: &Value| {
+            let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(
+            call(&router, &context, SECRET_LIST, Value::Null).unwrap(),
+            json!({"secrets": [], "managed": []}),
+            "both lists are always present"
+        );
+        call(
+            &router,
+            &context,
+            SECRET_SET,
+            json!({"name": "openai", "value": VALUE, "consumers": ["provider:openai"]}),
+        )
+        .unwrap();
+        let list = call(&router, &context, SECRET_LIST, Value::Null).unwrap();
+        assert_eq!(keys(&list), ["managed", "secrets"]);
+        let meta = &list["secrets"][0];
+        assert_eq!(
+            keys(meta),
+            [
+                "created_at",
+                "kind",
+                "name",
+                "policy",
+                "secret_ref",
+                "updated_at"
+            ]
+        );
+        assert_eq!(keys(&meta["secret_ref"]), ["secret_id", "vault_id"]);
+        assert_eq!(keys(&meta["policy"]), ["allowed_consumers"]);
     }
 
     #[test]

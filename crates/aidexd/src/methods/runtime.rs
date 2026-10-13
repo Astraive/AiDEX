@@ -4,18 +4,34 @@
 //! *names*. Credentials never enter these DTOs. The configuration is sealed
 //! with a vault key, so everything except `runtime.catalog` needs the vault
 //! unlocked; the native engine only runs runtimes [`sync_runtimes`] loaded.
+//!
+//! Managed accounts (`runtime.account.status`, `runtime.profile.import`,
+//! `runtime.login.*`) run the runtime's official CLI in an app-owned temporary
+//! home and keep only an encrypted profile. Their results are status codes and
+//! the login's authorization URL: never credential bytes, file contents, or CLI
+//! output. While the runtime gate is closed (offline, a locked vault, or an
+//! emergency stop) none of them starts the official CLI: `runtime.account.status`
+//! and `runtime.health` answer from what the CLI last confirmed, and an import,
+//! login or sign-out is refused with `offline_refused`.
 use crate::{
     errors::{ErrorCode, RpcError},
     router::{Router, RouterError},
     rpc::{expect_no_params, parse_params, to_result},
     services::Services,
 };
-use aidex_adapters::{Driver, RuntimeAuth, RuntimeConfig, RuntimeError, RuntimeManager};
+use aidex_adapters::{
+    Driver, RuntimeAccountStatus, RuntimeAuth, RuntimeConfig, RuntimeError, RuntimeHealth,
+    RuntimeManager,
+};
 use aidex_native_sessions::SessionConfig;
 use aidex_vault::VaultState;
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 pub const RUNTIME_CATALOG: &str = "runtime.catalog";
 pub const RUNTIME_LIST: &str = "runtime.list";
@@ -30,6 +46,12 @@ pub const RUNTIME_INSTALL: &str = "runtime.install";
 pub const RUNTIME_AUTH_START: &str = "runtime.auth.start";
 pub const RUNTIME_AUTH_STATUS: &str = "runtime.auth.status";
 pub const RUNTIME_AUTH_CANCEL: &str = "runtime.auth.cancel";
+pub const RUNTIME_ACCOUNT_STATUS: &str = "runtime.account.status";
+pub const RUNTIME_PROFILE_IMPORT: &str = "runtime.profile.import";
+pub const RUNTIME_LOGIN_START: &str = "runtime.login.start";
+pub const RUNTIME_LOGIN_STATUS: &str = "runtime.login.status";
+pub const RUNTIME_LOGIN_CANCEL: &str = "runtime.login.cancel";
+pub const RUNTIME_LOGIN_LOGOUT: &str = "runtime.login.logout";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,19 +73,67 @@ struct Auth {
     flow_id: Option<String>,
 }
 
+/// Params of `runtime.profile.import`: an absolute `auth.json` or its directory.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Import {
+    id: String,
+    source: PathBuf,
+}
+/// Params of `runtime.login.status` and `runtime.login.cancel`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Flow {
+    id: String,
+    flow_id: String,
+}
+
+/// Map a runtime error: `data.reason` is always the adapter's stable code, and
+/// the message is the adapter's fixed text (never credential or file content).
 fn error(e: RuntimeError) -> RpcError {
     RpcError::new(
         match e.code.as_str() {
             "vault_locked" => ErrorCode::VaultLocked,
-            "invalid_config" | "invalid_request" => ErrorCode::InvalidArgument,
+            "invalid_config" | "invalid_request" | "profile_invalid" => ErrorCode::InvalidArgument,
             "not_found" => ErrorCode::NotFound,
-            "conflict" | "runtime_busy" => ErrorCode::Conflict,
+            "conflict" | "runtime_busy" | "auth_pending" | "account_changed" => ErrorCode::Conflict,
             "cancelled" => ErrorCode::Cancelled,
+            // `auth_unsupported`, `auth_required`, `offline_refused`,
+            // `login_failed`, `logout_failed`, `auth_probe_failed`,
+            // `process_shutdown_failed`, `resume_unavailable`, `state_limit`,
+            // `protocol_parameters`, `state_unavailable`, ...
             _ => ErrorCode::Unavailable,
         },
         e.message,
     )
     .with_data(json!({"reason":e.code}))
+}
+
+/// Run an account change that the native engine must not see mid-run: refused
+/// (`conflict`) while an external run is active, and the engine reloads the
+/// runtimes afterwards (an account change rebuilds the runtime's executor).
+fn mutate_account<T>(
+    services: &Services,
+    change: impl FnOnce(&RuntimeManager) -> Result<T, RuntimeError>,
+) -> Result<T, RpcError> {
+    let manager = manager(services)?;
+    let mut domain_error = None;
+    services
+        .native()
+        .mutate_runtimes(|| {
+            let value = change(manager).map_err(|e| {
+                domain_error = Some(error(e));
+                "Runtime account change refused".to_owned()
+            })?;
+            let executors = manager.executors().map_err(|e| {
+                domain_error = Some(error(e));
+                "Runtime registry unavailable".to_owned()
+            })?;
+            Ok((value, executors))
+        })
+        .map_err(|message| {
+            domain_error.unwrap_or_else(|| RpcError::new(ErrorCode::Conflict, message))
+        })
 }
 
 /// The runtime manager, or `unavailable` when it failed to open at startup.
@@ -107,21 +177,49 @@ pub(crate) fn sync_runtimes(services: &Services) -> Result<(), String> {
 }
 
 /// Load runtimes before a session that needs `config`'s external runtime is
-/// created or started, unless the engine already has it. Best effort: the
-/// engine reports a runtime it still lacks.
+/// created, started or continued, unless the engine already has it. Best
+/// effort: the engine reports a runtime it still lacks.
 pub(crate) fn ensure_session_runtime(services: &Services, config: &SessionConfig) {
     if !uses_external_runtime(config) {
         return;
     }
-    let registered = config.runtime_id.as_deref().is_some_and(|id| {
-        services
-            .native()
-            .runtime_descriptors()
-            .iter()
-            .any(|descriptor| descriptor.id == id)
-    });
-    if !registered {
-        let _ = sync_runtimes(services);
+    let Some(id) = config.runtime_id.as_deref() else {
+        return;
+    };
+    if engine_has_runtime(services, id) {
+        return;
+    }
+    let _ = sync_runtimes(services);
+    if !engine_has_runtime(services, id) {
+        add_missing_runtime(services, id);
+    }
+}
+
+fn engine_has_runtime(services: &Services, id: &str) -> bool {
+    services
+        .native()
+        .runtime_descriptors()
+        .iter()
+        .any(|descriptor| descriptor.id == id)
+}
+
+/// Add just runtime `id` to the engine when a full swap was refused because an
+/// external run is active (for example the run an `approval.respond` answers).
+/// Adding a missing runtime leaves every executor a run holds in place.
+fn add_missing_runtime(services: &Services, id: &str) {
+    let Ok(manager) = services.runtime() else {
+        return;
+    };
+    if services.vault().status().state != VaultState::Unlocked || !manager.has_saved_configuration()
+    {
+        return;
+    }
+    if let Some(executor) = manager.executors().ok().and_then(|executors| {
+        executors
+            .into_iter()
+            .find(|executor| executor.descriptor().id == id)
+    }) {
+        let _ = services.native().register_runtime(id, executor);
     }
 }
 
@@ -136,7 +234,150 @@ fn provider(services: &Services, id: &str) -> Result<String, RpcError> {
     }
 }
 
+/// What the official CLI last confirmed about each managed account (never
+/// credential bytes), answered while the runtime gate keeps the CLI from
+/// starting. An entry applies only while the runtime keeps the profile it was
+/// confirmed for.
+#[derive(Default)]
+struct AccountStatuses(Mutex<HashMap<String, RuntimeAccountStatus>>);
+
+impl AccountStatuses {
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, RuntimeAccountStatus>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Keep a status the CLI just gave (a pending login is not kept: it ends
+    /// with the gate).
+    fn remember(&self, status: &RuntimeAccountStatus) {
+        if status.status != "auth_pending" {
+            self.entries().insert(status.id.clone(), status.clone());
+        }
+    }
+
+    fn forget(&self, id: &str) {
+        self.entries().remove(id);
+    }
+
+    /// The last confirmed status of `config`'s current profile.
+    fn confirmed(&self, config: &RuntimeConfig) -> Option<RuntimeAccountStatus> {
+        self.entries()
+            .get(&config.id)
+            .filter(|status| config.profile.is_some() && status.profile == config.profile)
+            .cloned()
+    }
+
+    /// `runtime.account.status` while the CLI may not start: a runtime without
+    /// a profile has no credential (as the adapter reports it, without running
+    /// anything); one with a profile gives what the CLI last confirmed for it,
+    /// or `offline_refused` when it never did in this daemon.
+    fn paused(&self, config: &RuntimeConfig) -> Result<RuntimeAccountStatus, RpcError> {
+        if config.profile.is_none() {
+            return Ok(RuntimeAccountStatus {
+                id: config.id.clone(),
+                driver: config.driver,
+                profile: None,
+                authenticated: false,
+                credential_present: false,
+                evidence: "native_credential_missing".into(),
+                status: "auth_required".into(),
+            });
+        }
+        self.confirmed(config).ok_or_else(cli_paused)
+    }
+}
+
+/// The refusal of an account command that needs the official CLI while the
+/// runtime gate is closed.
+fn cli_paused() -> RpcError {
+    error(RuntimeError {
+        code: "offline_refused".into(),
+        message: "The official CLI does not run while offline, while the vault is locked, or \
+                  during an emergency stop"
+            .into(),
+    })
+}
+
+/// Only Codex has a verified official login, as the adapter checks it.
+fn account_supported(config: &RuntimeConfig) -> Result<(), RpcError> {
+    if config.driver == Driver::Codex {
+        return Ok(());
+    }
+    Err(error(RuntimeError {
+        code: "auth_unsupported".into(),
+        message: "Official portable login commands have only been verified for Codex".into(),
+    }))
+}
+
+/// `Some(config)` when runtime `id`'s official CLI may not start now (the
+/// runtime gate is closed), `None` when it may. The runtime must exist with a
+/// supported driver either way, so `not_found`, `vault_locked` and
+/// `auth_unsupported` come first, as when the gate is open.
+fn account_paused(
+    services: &Services,
+    manager: &RuntimeManager,
+    id: &str,
+) -> Result<Option<RuntimeConfig>, RpcError> {
+    if services.runtime_gate_open() {
+        return Ok(None);
+    }
+    let config = manager.get(id).map_err(error)?;
+    account_supported(&config)?;
+    Ok(Some(config))
+}
+
+/// Whether the adapter's health check of `config` asks the official CLI for
+/// the managed account's status.
+fn managed_account(config: &RuntimeConfig) -> bool {
+    config.driver == Driver::Codex
+        && config.profile.is_some()
+        && matches!(config.auth, RuntimeAuth::None)
+}
+
+/// Whether the runtime's executable exists: an absolute path, or a path
+/// relative to the drive root without traversal (as the adapter resolves it).
+fn executable_installed(root: &Path, executable: &str) -> bool {
+    let path = Path::new(executable);
+    if path.is_absolute() {
+        return path.is_file();
+    }
+    !executable.contains(':')
+        && path.components().all(|c| matches!(c, Component::Normal(_)))
+        && root.join(path).is_file()
+}
+
+/// `runtime.health` of a managed account while the runtime gate is closed:
+/// what the adapter reports then (the model probe is refused, so the protocol
+/// is not ready), with the account's last confirmed status instead of a new
+/// `login status` from the official CLI.
+fn paused_health(
+    services: &Services,
+    config: &RuntimeConfig,
+    statuses: &AccountStatuses,
+) -> RuntimeHealth {
+    let installed = executable_installed(services.paths().root(), &config.executable);
+    let (authenticated, status) = match statuses.confirmed(config) {
+        _ if !installed => (false, "binary_missing".to_owned()),
+        Some(account) => (account.authenticated, account.status),
+        None => (false, "installed_auth_unverified".to_owned()),
+    };
+    RuntimeHealth {
+        id: config.id.clone(),
+        installed,
+        protocol_ready: false,
+        authenticated,
+        status,
+        limitations: aidex_adapters::catalog()
+            .into_iter()
+            .find(|info| info.driver == config.driver)
+            .map(|info| info.limitations)
+            .unwrap_or_default(),
+    }
+}
+
 pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<(), RouterError> {
+    let statuses = Arc::new(AccountStatuses::default());
     // The driver catalog is static: it is served even without the manager.
     router.register(RUNTIME_CATALOG, move |_, p| {
         expect_no_params(&p)?;
@@ -220,9 +461,19 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         to_result(&manager(&s)?.get(&p.id).map_err(error)?)
     })?;
     let s = services.clone();
+    let accounts = Arc::clone(&statuses);
     router.register(RUNTIME_HEALTH, move |_, p| {
         let p: Id = parse_params(p)?;
-        to_result(&manager(&s)?.health(&p.id).map_err(error)?)
+        let manager = manager(&s)?;
+        // Otherwise the adapter starts nothing: its model probe is refused
+        // while the gate is closed.
+        if !s.runtime_gate_open() {
+            let config = manager.get(&p.id).map_err(error)?;
+            if managed_account(&config) {
+                return to_result(&paused_health(&s, &config, &accounts));
+            }
+        }
+        to_result(&manager.health(&p.id).map_err(error)?)
     })?;
     let s = services.clone();
     router.register(RUNTIME_MODELS, move |_, p| {
@@ -289,8 +540,88 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                 .map_err(|e| RpcError::new(ErrorCode::Unavailable, e.to_string()))?,
         )
     })?;
+    register_accounts(router, services, &statuses)
+}
+
+/// `runtime.account.status`, `runtime.profile.import` and `runtime.login.*`:
+/// the runtime's own account, signed in by its official CLI (Codex only; other
+/// drivers are `unavailable` with `data.reason = "auth_unsupported"`).
+fn register_accounts(
+    router: &mut Router,
+    services: &Arc<Services>,
+    statuses: &Arc<AccountStatuses>,
+) -> Result<(), RouterError> {
+    let s = services.clone();
+    let accounts = Arc::clone(statuses);
+    router.register(RUNTIME_ACCOUNT_STATUS, move |_, p| {
+        let p: Id = parse_params(p)?;
+        let manager = manager(&s)?;
+        if let Some(config) = account_paused(&s, manager, &p.id)? {
+            return to_result(&accounts.paused(&config)?);
+        }
+        let status = manager.account_status(&p.id).map_err(error)?;
+        accounts.remember(&status);
+        to_result(&status)
+    })?;
+    let s = services.clone();
+    let accounts = Arc::clone(statuses);
+    router.register(RUNTIME_PROFILE_IMPORT, move |_, p| {
+        let p: Import = parse_params(p)?;
+        if account_paused(&s, manager(&s)?, &p.id)?.is_some() {
+            return Err(cli_paused());
+        }
+        let status = mutate_account(&s, |manager| manager.import_profile(&p.id, &p.source))?;
+        accounts.remember(&status);
+        to_result(&status)
+    })?;
+    let s = services.clone();
+    router.register(RUNTIME_LOGIN_START, move |_, p| {
+        let p: Id = parse_params(p)?;
+        to_result(&mutate_account(&s, |manager| manager.login_start(&p.id))?)
+    })?;
+    let s = services.clone();
+    let accounts = Arc::clone(statuses);
+    router.register(RUNTIME_LOGIN_STATUS, move |_, p| {
+        let p: Flow = parse_params(p)?;
+        let status = manager(&s)?
+            .login_status(&p.id, &p.flow_id)
+            .map_err(error)?;
+        // A connected login switched the runtime to its profile. Best effort:
+        // while an external run is active the engine keeps its executors and a
+        // later sync loads the new one; the poll itself never fails for it.
+        if status.state == "connected" {
+            accounts.forget(&p.id);
+            let _ = sync_runtimes(&s);
+        }
+        to_result(&status)
+    })?;
+    let s = services.clone();
+    router.register(RUNTIME_LOGIN_CANCEL, move |_, p| {
+        let p: Flow = parse_params(p)?;
+        let manager = manager(&s)?;
+        // The runtime must exist (and the vault be unlocked), as for `status`.
+        manager.get(&p.id).map_err(error)?;
+        to_result(&manager.login_cancel(&p.id, &p.flow_id).map_err(error)?)
+    })?;
+    let s = services.clone();
+    let accounts = Arc::clone(statuses);
+    router.register(RUNTIME_LOGIN_LOGOUT, move |_, p| {
+        let p: Id = parse_params(p)?;
+        // Signing out runs the official CLI's `logout` before the encrypted
+        // profile is removed, so it waits until the CLI may run again.
+        if account_paused(&s, manager(&s)?, &p.id)?.is_some() {
+            return Err(cli_paused());
+        }
+        let status = mutate_account(&s, |manager| manager.logout(&p.id))?;
+        accounts.remember(&status);
+        to_result(&status)
+    })?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "runtime_wiring_tests.rs"]
+mod wiring_tests;
 
 #[cfg(test)]
 mod tests {
@@ -477,7 +808,7 @@ mod tests {
             router
                 .call(&context, "vault.secret.list", Value::Null)
                 .unwrap(),
-            json!({"secrets":[]})
+            json!({"secrets":[],"managed":[]})
         );
         assert!(engine_runtimes(&services).is_empty());
     }

@@ -7,29 +7,58 @@
 //! reaches the session that follows. Each end gets the cleanup `vault.lock`
 //! always did: native runs are cancelled, attachment uploads in flight are
 //! aborted (their partial sealed files are deleted and later chunks are
-//! refused), and `vault.locked` is recorded. MCP servers are stopped by their own
-//! lock observer, with a polling watchdog as a backstop (`services/mcp.rs`).
-//! Further cleanups that must follow the vault (for example runtime sign-ins or
-//! external runtime processes) belong here.
+//! refused), and `vault.locked` is recorded. External runtimes lose their
+//! credentials with the vault: pending official logins are cancelled and every
+//! vendor process still running is terminated (the runtime gate, which needs an
+//! unlocked vault, already refuses new launches). MCP servers are stopped by
+//! their own lock observer, with a polling watchdog as a backstop
+//! (`services/mcp.rs`). The runs still listed as active once the native runs
+//! were cancelled are recorded as left over from this session, so none of them
+//! holds the next session open (`keep_alive`). Further cleanups that must
+//! follow the vault belong here.
 //!
 //! One replacement is not reported: `vault.unlock` while a session is open whose
 //! `vault.json` changed on disk swaps in a session for the new header, because
 //! the vault never locks in between. Nothing here runs then.
 
+use super::keep_alive::RunActivity;
+use aidex_adapters::RuntimeManager;
 use aidex_events::{EventKind, EventLog, EventScope};
 use aidex_harness::NativeEngine;
+use aidex_sandbox::StopReason;
 use aidex_vault::VaultService;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-/// Run the lock cleanup for every session end of `vault`. The engine is held
-/// weakly because its session store owns the vault.
-pub fn clean_up_on_lock(vault: &VaultService, native: &Arc<NativeEngine>, events: &EventLog) {
+/// How long the lock cleanup waits for vendor processes to exit. The runtime
+/// gate closed with the vault, so most have already gone.
+const RUNTIME_TERMINATION_GRACE: Duration = Duration::from_secs(2);
+
+/// Run the lock cleanup for every session end of `vault`. The engine and the
+/// runtime manager are held weakly because both own the vault.
+pub fn clean_up_on_lock(
+    vault: &VaultService,
+    native: &Arc<NativeEngine>,
+    runtime: Option<&Arc<RuntimeManager>>,
+    activity: &Arc<RunActivity>,
+    events: &EventLog,
+) {
     let native = Arc::downgrade(native);
+    let runtime = runtime.map(Arc::downgrade);
+    let activity = Arc::clone(activity);
     let events = events.clone();
     vault.add_lock_observer(move |notice| {
         if let Some(native) = native.upgrade() {
             native.cancel_all();
             native.store().abort_all_uploads();
+            activity.session_ended(native.store());
+        }
+        if let Some(runtime) = runtime.as_ref().and_then(|runtime| runtime.upgrade()) {
+            // Best effort: a login whose process cannot be confirmed ended is
+            // reported by its own `runtime.login.status`.
+            let _ = runtime.cancel_logins();
+            runtime
+                .process_registry()
+                .terminate_all_within(StopReason::Cancelled, RUNTIME_TERMINATION_GRACE);
         }
         // Best effort by design: the session has already ended, and nothing
         // waits for this notice to report a failure to.

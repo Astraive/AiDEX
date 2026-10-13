@@ -240,6 +240,25 @@ impl VaultService {
         }
     }
 
+    /// Count now as use of the unlocked session, as a secret operation does: the
+    /// idle auto-lock starts its period again. For work that needs the vault later
+    /// without using it now (the daemon calls this while agent runs are active).
+    /// Returns whether the vault is unlocked. It never unlocks and never reads the
+    /// vault file, and a session already past its idle period still ends here.
+    pub fn keep_alive(&self) -> bool {
+        let idle = self.config().idle_timeout;
+        let mut session = self.session();
+        let now = Instant::now();
+        self.inner.expire_if_idle(&mut session, idle, now);
+        match session.as_mut() {
+            Some(current) => {
+                current.last_used = now;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Create the vault and leave it unlocked (after every earlier session end has
     /// reached the lock observers, as for [`VaultService::unlock`]).
     pub fn init(
@@ -875,6 +894,40 @@ mod tests {
             wait_for(&seen, 2),
             [(VaultState::Locked, false), (VaultState::Locked, false)]
         );
+    }
+
+    #[test]
+    fn keep_alive_holds_off_the_idle_lock_only_while_it_is_called() {
+        let (_root, service, _name, _scope, _handle) = service_with_secret();
+        let notices = observe(&service);
+        service.set_idle_timeout(Some(Duration::from_millis(600)));
+        // Kept alive well past the idle period: the session stays.
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            assert!(service.keep_alive());
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(service.status().state, VaultState::Unlocked);
+        assert!(notices.lock().unwrap().is_empty());
+        // Once the calls stop, the idle lock happens as usual.
+        assert_eq!(
+            wait_for(&notices, 1)
+                .iter()
+                .map(|notice| notice.reason)
+                .collect::<Vec<_>>(),
+            [LockReason::Idle]
+        );
+        // A keep-alive never unlocks a locked vault.
+        assert!(!service.keep_alive());
+        assert_eq!(service.status().state, VaultState::Locked);
+
+        // A session already past its idle period ends instead of being revived.
+        service.set_idle_timeout(None);
+        service.unlock(&passphrase(PASSPHRASE)).unwrap();
+        thread::sleep(Duration::from_millis(60));
+        service.set_idle_timeout(Some(Duration::from_millis(50)));
+        assert!(!service.keep_alive());
+        assert_eq!(wait_for(&notices, 2)[1].reason, LockReason::Idle);
     }
 
     #[test]

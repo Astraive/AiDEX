@@ -26,7 +26,7 @@ use aidex_router::{
 };
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 pub const MODEL_LIST: &str = "model.list";
 pub const MODEL_PROVIDERS: &str = "model.providers";
@@ -564,6 +564,33 @@ fn open_link_error(error: AuthError) -> RpcError {
     RpcError::new(code, message).with_data(json!({ "reason": reason }))
 }
 
+/// Going offline stops network work already admitted that no per-request
+/// check would catch: active runs of conversations on an external runtime (a
+/// vendor process makes its own network calls) and pending official runtime
+/// logins. Native runs keep going: their remote model calls pass the offline
+/// switch on each request, and runs on local models are unaffected. Best
+/// effort: a run that cannot be cancelled is also stopped by the runtime gate,
+/// which closes with the switch.
+fn stop_external_work(services: &Services) {
+    let native = services.native();
+    if let Ok(runs) = native.store().run_summaries() {
+        let mut external = HashMap::new();
+        for run in runs.into_iter().filter(|run| run.status.active()) {
+            let on_runtime = *external.entry(run.session_id.clone()).or_insert_with(|| {
+                native.store().get(&run.session_id).is_ok_and(|detail| {
+                    super::runtime::uses_external_runtime(&detail.configuration)
+                })
+            });
+            if on_runtime {
+                let _ = native.cancel(&run.id);
+            }
+        }
+    }
+    if let Ok(runtime) = services.runtime() {
+        let _ = runtime.cancel_logins();
+    }
+}
+
 fn network_status(services: &Services) -> NetworkStatus {
     let models = services.models();
     NetworkStatus {
@@ -671,6 +698,9 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         models.observer().observe(&ModelEvent::NetworkModeChanged {
             offline: params.enabled,
         });
+        if params.enabled {
+            stop_external_work(&shared);
+        }
         to_result(&network_status(&shared))
     })?;
     let shared = Arc::clone(services);

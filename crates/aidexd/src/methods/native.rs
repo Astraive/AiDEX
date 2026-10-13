@@ -147,6 +147,52 @@ pub(crate) fn native_error(message: String) -> RpcError {
     };
     RpcError::new(code, aidex_events::redact_text(&message).into_owned())
 }
+/// Load the runtime of the conversation `run_id` belongs to before the engine
+/// continues that run (`run.resume`, `approval.respond`), as `message.send`
+/// does: an unlock whose runtime sync was refused leaves the engine without it.
+/// Best effort: the engine reports a runtime it still lacks.
+fn ensure_run_runtime(services: &Services, run_id: &str) {
+    let store = services.native().store();
+    if let Ok(run) = store.run(run_id)
+        && let Ok(detail) = store.get(&run.session_id)
+    {
+        super::runtime::ensure_session_runtime(services, &detail.configuration);
+    }
+}
+/// The configuration of the conversation whose run waits on approval `id`.
+/// Only conversations with a run waiting for an approval are decrypted (the
+/// run index is plaintext), each at most once; an approval of any other run
+/// cannot be answered, so its runtime needs no loading.
+fn approval_configuration(services: &Services, id: &str) -> Option<SessionConfig> {
+    let store = services.native().store();
+    let mut sessions = Vec::new();
+    for run in store.run_summaries().ok()? {
+        if run.status == aidex_native_sessions::RunStatus::WaitingApproval
+            && !sessions.contains(&run.session_id)
+        {
+            sessions.push(run.session_id);
+        }
+    }
+    sessions.iter().find_map(|session| {
+        store
+            .get(session)
+            .ok()
+            .filter(|detail| detail.approvals.iter().any(|approval| approval.id == id))
+            .map(|detail| detail.configuration)
+    })
+}
+/// Whether a configuration change ends the conversation's external runtime
+/// thread: a different runtime or project, or a different mode, permission mode
+/// or instructions, which the vendor thread was started with. Its next message
+/// then starts a new thread with the transcript instead of continuing the old
+/// one (a Chat-mode thread is never continued as an Agent run).
+fn ends_runtime_thread(old: &SessionConfig, new: &SessionConfig) -> bool {
+    old.runtime_id != new.runtime_id
+        || old.workspace_id != new.workspace_id
+        || old.mode != new.mode
+        || old.permission_mode != new.permission_mode
+        || old.instructions != new.instructions
+}
 pub(crate) fn validate_workspace(
     services: &Services,
     config: &SessionConfig,
@@ -278,6 +324,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let s = services.clone();
     router.register("run.resume", move |_, p| {
         let p: IdParams = parse_params(p)?;
+        ensure_run_runtime(&s, &p.id);
         to_result(&view::run(&s.native().resume(&p.id).map_err(native_error)?))
     })?;
     let s = services.clone();
@@ -295,6 +342,13 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let s = services.clone();
     router.register("approval.respond", move |_, p| {
         let p: RespondParams = parse_params(p)?;
+        // Only on a drive that has runtimes to load.
+        if s.runtime()
+            .is_ok_and(|manager| manager.has_saved_configuration())
+            && let Some(configuration) = approval_configuration(&s, &p.id)
+        {
+            super::runtime::ensure_session_runtime(&s, &configuration);
+        }
         to_result(&view::run(
             &s.native()
                 .respond(&p.id, &p.fingerprint, p.approved, &p.command_id)
@@ -331,10 +385,14 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                             .into(),
                     );
                 }
-                if detail.configuration.runtime_id != p.configuration.runtime_id
-                    || detail.configuration.workspace_id != p.configuration.workspace_id
-                {
+                if ends_runtime_thread(&detail.configuration, &p.configuration) {
+                    // No run is active here, so none of these references is
+                    // in use: an interrupted run cannot resume the old thread
+                    // either.
                     detail.runtime_ref = None;
+                    for run in &mut detail.runs {
+                        run.runtime_ref = None;
+                    }
                 }
                 detail.configuration = p.configuration.clone();
                 Ok(())
