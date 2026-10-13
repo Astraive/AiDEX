@@ -1523,7 +1523,7 @@ fn a_retried_last_step_completes_without_another_turn_for_child_results() {
 
 #[test]
 fn file_effects_publish_diff_events_and_one_tool_lifecycle() {
-    let (_drive, ws, e, s, _p, events) = fixture(
+    let (_drive, ws, e, s, p, events) = fixture(
         vec![
             FakeTurn::tool_call("fs_write", r#"{"path":"result.txt","content":"written"}"#),
             FakeTurn::text("done"),
@@ -1543,7 +1543,7 @@ fn file_effects_publish_diff_events_and_one_tool_lifecycle() {
     assert!(names.contains(&"diff.created"));
     assert_eq!(count(&events, "tool.started"), 1);
     assert_eq!(count(&events, "tool.completed"), 1);
-    // The model reads the whole output, applied diff included.
+    // Encrypted history keeps the whole output, applied diff included.
     let result = done
         .transcript
         .iter()
@@ -1553,6 +1553,154 @@ fn file_effects_publish_diff_events_and_one_tool_lifecycle() {
     assert!(output["content"].is_object());
     assert!(!output["diff"].is_null());
     assert_eq!(output["changes"][0]["path"], "result.txt");
+    // The model reads the content with diff statistics in its place.
+    let sent = p.requests()[1]
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .map(|m| serde_json::from_str::<serde_json::Value>(&m.content).unwrap())
+        .unwrap();
+    assert_eq!(sent["content"], output["content"]);
+    assert_eq!(sent["changes"], output["changes"]);
+    assert!(sent.get("diff").is_none());
+    assert_eq!(sent["diff_stats"]["files"][0]["path"], "result.txt");
+    assert_eq!(sent["diff_stats"]["files"][0]["kind"], "created");
+    assert_eq!(sent["diff_stats"]["files"][0]["additions"], 1);
+}
+
+#[test]
+fn applied_diffs_reach_the_model_only_as_statistics() {
+    let (drive, ws, e, s, p, events) = fixture(
+        vec![
+            FakeTurn::tool_call(
+                "fs_write",
+                r#"{"path":"private.txt","content":"replacement\n"}"#,
+            ),
+            FakeTurn::tool_call("fs_delete", r#"{"path":"gone.txt"}"#),
+            FakeTurn::text("done"),
+        ],
+        Mode::Agent,
+    );
+    std::fs::write(ws.path().join("private.txt"), "EARLIER_WRITTEN_LINE\n").unwrap();
+    std::fs::write(ws.path().join("gone.txt"), "EARLIER_DELETED_LINE\n").unwrap();
+    // The model may change these files but never read them.
+    policy(
+        &drive,
+        "deny-private-reads",
+        "fs.read",
+        "deny",
+        Some("paths=[\"private.txt\", \"gone.txt\"]"),
+    );
+    set_permission(&e, &s, PermissionMode::FullAccess);
+    let r = e.start(&s, "replace and remove", "diffs", None).unwrap();
+    // Deletion always asks.
+    let paused = wait(&e, &r.id);
+    assert_eq!(
+        paused.status,
+        RunStatus::WaitingApproval,
+        "{:?}",
+        paused.error
+    );
+    let a = e.approvals(Some(&r.id)).unwrap().remove(0);
+    e.respond(&a.id, &a.fingerprint, true, "allow").unwrap();
+    let done = wait(&e, &r.id);
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+    assert!(!ws.path().join("gone.txt").exists());
+    // Encrypted history, which the desktop shows, keeps both applied diffs.
+    let history = serde_json::to_string(&e.store().get(&s).unwrap().messages).unwrap();
+    assert!(history.contains("EARLIER_WRITTEN_LINE"));
+    assert!(history.contains("EARLIER_DELETED_LINE"));
+    // No request, nor any event, carries the earlier lines.
+    let requests = p.requests();
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        let text = all_text(request);
+        assert!(!text.contains("EARLIER_WRITTEN_LINE"));
+        assert!(!text.contains("EARLIER_DELETED_LINE"));
+    }
+    let published = serde_json::to_string(&events.events()).unwrap();
+    assert!(!published.contains("EARLIER_"));
+    let results: Vec<serde_json::Value> = requests[2]
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| serde_json::from_str(&m.content).unwrap())
+        .collect();
+    assert_eq!(results.len(), 2);
+    let stats: Vec<_> = results
+        .iter()
+        .map(|r| {
+            let file = &r["diff_stats"]["files"][0];
+            (
+                file["path"].as_str().unwrap().to_owned(),
+                file["kind"].as_str().unwrap().to_owned(),
+                file["additions"].as_u64().unwrap(),
+                file["deletions"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stats,
+        [
+            ("private.txt".into(), "modified".into(), 1, 1),
+            ("gone.txt".into(), "deleted".into(), 0, 1),
+        ]
+    );
+    assert_eq!(results[1]["content"]["files_deleted"], 1);
+}
+
+#[test]
+fn a_write_sharing_its_call_id_with_an_mcp_call_still_hides_its_diff() {
+    let call = |name: &str, arguments: &str| ToolCall {
+        id: "dup".into(),
+        name: name.into(),
+        arguments: arguments.into(),
+        provider_metadata: None,
+    };
+    let (drive, ws, e, s, p, _events) = fixture(
+        vec![
+            FakeTurn::tool_calls(vec![
+                call(
+                    "fs_write",
+                    r#"{"path":"private.txt","content":"replacement\n"}"#,
+                ),
+                call("mcp__x__y", "{}"),
+            ]),
+            FakeTurn::text("done"),
+        ],
+        Mode::Agent,
+    );
+    std::fs::write(ws.path().join("private.txt"), "EARLIER_SHARED_ID_LINE\n").unwrap();
+    policy(
+        &drive,
+        "deny-private-reads",
+        "fs.read",
+        "deny",
+        Some("paths=[\"private.txt\"]"),
+    );
+    set_permission(&e, &s, PermissionMode::FullAccess);
+    let r = e.start(&s, "replace", "shared-id", None).unwrap();
+    let done = wait(&e, &r.id);
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+    assert_eq!(
+        std::fs::read_to_string(ws.path().join("private.txt")).unwrap(),
+        "replacement\n"
+    );
+    // History keeps the write's applied diff and both results.
+    let results: Vec<_> = done
+        .transcript
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert!(results[0].content.contains("EARLIER_SHARED_ID_LINE"));
+    // The MCP name the id also carries never passes the diff on.
+    let requests = p.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert!(!all_text(request).contains("EARLIER_SHARED_ID_LINE"));
+    }
+    assert!(all_text(&requests[1]).contains("diff_stats"));
 }
 
 #[test]
@@ -1643,6 +1791,19 @@ fn shell_runs_publish_session_process_events_without_the_command_line() {
     );
 }
 
+/// Settle a run that may start a real process (slower than the fake model).
+fn wait_long(e: &NativeEngine, id: &str) -> aidex_native_sessions::Run {
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let run = e.store().run(id).unwrap();
+        if !run.status.active() {
+            return run;
+        }
+        assert!(Instant::now() < until, "run did not settle");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn public_events_never_contain_tool_arguments_or_results() {
     let (_drive, ws, e, s, _p, events) = fixture(
@@ -1656,28 +1817,147 @@ fn public_events_never_contain_tool_arguments_or_results() {
                 "fs_patch",
                 r#"{"path":"private.txt","edits":[{"old":"PRIVATE_EDIT_MARKER","new":"y"}]}"#,
             ),
+            // A process: its command line is an argument, its output a result.
+            FakeTurn::tool_call(
+                "shell_exec",
+                r#"{"program":"git","args":["-c","aidex.marker=PROCESS_ARGUMENT_MARKER","grep","--no-index","-h","key","private.cfg"]}"#,
+            ),
             FakeTurn::text("done"),
+            // A tool that fails while it runs: its program cannot be started.
+            FakeTurn::tool_call(
+                "shell_exec",
+                r#"{"program":"aidex-missing-FAILURE_ARGUMENT_MARKER","args":["FAILURE_ARGUMENT_MARKER"]}"#,
+            ),
         ],
         Mode::Agent,
     );
     std::fs::write(ws.path().join("private.txt"), "PRIVATE_RESULT_MARKER").unwrap();
-    set_permission(&e, &s, PermissionMode::AutoAcceptEdits);
+    std::fs::write(
+        ws.path().join("private.cfg"),
+        "[section]\n\tkey = PROCESS_OUTPUT_MARKER\n",
+    )
+    .unwrap();
+    // Full access runs the processes without asking (brokered on Windows).
+    set_permission(&e, &s, PermissionMode::FullAccess);
     let r = e.start(&s, "work privately", "private", None).unwrap();
-    let done = wait(&e, &r.id);
+    let done = wait_long(&e, &r.id);
     assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
-    let published = serde_json::to_string(&events.events()).unwrap();
+    let failing = e.start(&s, "fail privately", "failing", None).unwrap();
+    let failed = wait_long(&e, &failing.id);
+    assert_eq!(failed.status, RunStatus::Failed, "{:?}", failed.error);
+    let all = events.events();
+    let published = serde_json::to_string(&all).unwrap();
     for marker in [
         "PRIVATE_ARGUMENT_MARKER",
         "PRIVATE_RESULT_MARKER",
         "PRIVATE_EDIT_MARKER",
+        "PROCESS_ARGUMENT_MARKER",
+        "FAILURE_ARGUMENT_MARKER",
     ] {
         assert!(!published.contains(marker), "{marker} reached an event");
     }
-    // Encrypted history keeps both.
+    // Process output is only ever live (`process.output`, not stored); no
+    // durable event carries it.
+    let durable: Vec<_> = all.iter().filter(|e| e.event.is_durable()).collect();
+    assert!(!durable.is_empty());
+    assert!(
+        !serde_json::to_string(&durable)
+            .unwrap()
+            .contains("PROCESS_OUTPUT_MARKER")
+    );
+    for event in &all {
+        if serde_json::to_string(event)
+            .unwrap()
+            .contains("PROCESS_OUTPUT_MARKER")
+        {
+            assert!(matches!(event.event, EventKind::ProcessOutput { .. }));
+        }
+    }
+    // The failure is announced with fixed text.
+    let failures: Vec<_> = all
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::ToolFailed { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        failures,
+        ["native tool failed; details in encrypted history"]
+    );
+    // Encrypted history keeps arguments and results.
     let history = serde_json::to_string(&done.transcript).unwrap();
-    assert!(history.contains("PRIVATE_ARGUMENT_MARKER"));
-    assert!(history.contains("PRIVATE_RESULT_MARKER"));
-    assert_eq!(count(&events, "tool.started"), 2);
-    assert_eq!(count(&events, "tool.completed"), 2);
+    for marker in [
+        "PRIVATE_ARGUMENT_MARKER",
+        "PRIVATE_RESULT_MARKER",
+        "PROCESS_ARGUMENT_MARKER",
+        "PROCESS_OUTPUT_MARKER",
+    ] {
+        assert!(history.contains(marker), "{marker} missing from history");
+    }
+    assert!(
+        serde_json::to_string(&failed.transcript)
+            .unwrap()
+            .contains("FAILURE_ARGUMENT_MARKER")
+    );
+    assert_eq!(count(&events, "tool.started"), 4);
+    assert_eq!(count(&events, "tool.completed"), 3);
+    assert_eq!(count(&events, "tool.failed"), 1);
     assert_eq!(count(&events, "diff.created"), 1);
+    assert_eq!(count(&events, "process.started"), 1);
+    assert_eq!(count(&events, "process.exited"), 1);
+}
+
+#[test]
+fn approvals_are_listed_oldest_first_across_conversations() {
+    let (_drive, _ws, e, first, _p, _events) = fixture(vec![], Mode::Agent);
+    let configuration = e.store().get(&first).unwrap().configuration;
+    let second = e.store().create(configuration).unwrap().id;
+    let approval = |id: &str, run: &str| aidex_native_sessions::Approval {
+        id: id.into(),
+        run_id: run.into(),
+        tool_name: "fs_write".into(),
+        arguments: serde_json::json!({}),
+        fingerprint: "fingerprint".into(),
+        status: "pending".into(),
+        preview: None,
+        runtime_id: None,
+        runtime_request_id: None,
+        runtime_ref: None,
+    };
+    // Created in this order, in alternating conversations.
+    let ids: Vec<String> = (0..4)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(3));
+            aidex_native_sessions::id("approval").unwrap()
+        })
+        .collect();
+    for (index, id) in ids.iter().enumerate() {
+        let (session, run) = if index % 2 == 0 {
+            (&first, "run_first")
+        } else {
+            (&second, "run_second")
+        };
+        e.store()
+            .update(session, |s| {
+                s.approvals.push(approval(id, run));
+                Ok(())
+            })
+            .unwrap();
+    }
+    let listed: Vec<String> = e
+        .approvals(None)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
+    assert_eq!(listed, ids);
+    // One run's approvals keep that order too.
+    let listed: Vec<String> = e
+        .approvals(Some("run_second"))
+        .unwrap()
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
+    assert_eq!(listed, [ids[1].clone(), ids[3].clone()]);
 }

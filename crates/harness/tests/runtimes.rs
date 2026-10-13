@@ -268,6 +268,68 @@ fn a_runtime_without_resume_continues_with_the_transcript() {
 }
 
 #[test]
+fn native_tool_diffs_in_the_transcript_reach_a_runtime_as_statistics() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Recorder::new("Pi", false);
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    // The conversation ran a native write before switching to this runtime.
+    let output = json!({
+        "summary": "wrote notes.txt",
+        "content": {"path": "notes.txt", "created": false, "changed": true},
+        "diff": {"files": [{
+            "path": "notes.txt",
+            "kind": "modified",
+            "additions": 1,
+            "deletions": 1,
+            "unified": "--- a/notes.txt\n+++ b/notes.txt\n-EARLIER_LINE\n+new\n",
+            "binary": false,
+            "truncated": false,
+            "before_sha256": "before",
+            "after_sha256": "after",
+        }], "files_omitted": 0},
+        "changes": [{"path": "notes.txt", "change": "modified"}],
+        "warnings": [],
+    })
+    .to_string();
+    let mut call = ChatMessage::assistant("");
+    call.tool_calls.push(aidex_providers::ToolCall {
+        id: "call_1".into(),
+        name: "fs_write".into(),
+        arguments: r#"{"path":"notes.txt","content":"new\n"}"#.into(),
+        provider_metadata: None,
+    });
+    e.store()
+        .update(&s, |session| {
+            session.messages.push(ChatMessage::user("edit"));
+            session.messages.push(call.clone());
+            session
+                .messages
+                .push(ChatMessage::tool_result("call_1", output.clone()));
+            Ok(())
+        })
+        .unwrap();
+    let run = e.start(&s, "continue", "continue", None).unwrap();
+    assert_eq!(wait(&e, &run.id).status, RunStatus::Completed);
+    let request = runtime.requests().remove(0);
+    let result = request
+        .messages
+        .iter()
+        .find(|m| m.tool_call_id.as_deref() == Some("call_1"))
+        .unwrap();
+    assert!(!result.content.contains("EARLIER_LINE"));
+    let view: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(view["diff_stats"]["files"][0]["deletions"], 1);
+    assert_eq!(view["content"]["path"], "notes.txt");
+    // History keeps the applied diff.
+    assert!(
+        e.store().get(&s).unwrap().messages[2]
+            .content
+            .contains("EARLIER_LINE")
+    );
+}
+
+#[test]
 fn a_refused_resume_starts_the_followup_over_with_the_transcript() {
     let (_d, _ws, e, s) = fixture();
     let runtime = Arc::new(Recorder {

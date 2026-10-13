@@ -38,6 +38,14 @@ impl PendingPlan {
             Self::Extension(plan) => &plan.call_id,
         }
     }
+    /// Whether the run was stopped since this plan was held: a workspace
+    /// tool plan keeps the tool token of the thread that planned it.
+    fn stopped(&self) -> bool {
+        match self {
+            Self::Tool(prepared) => prepared.context.cancel.is_cancelled(),
+            Self::Extension(_) => false,
+        }
+    }
 }
 /// Per-request options of [`NativeEngine::start_with`].
 pub use aidex_native_sessions::RunOptions;
@@ -354,6 +362,7 @@ impl NativeEngine {
             });
             crate::attachments::placeholders_only(&mut messages, &turn, &runtime.name);
         }
+        crate::tool_view::tool_results_for_model(&mut messages);
         if operation == RuntimeOperation::Resume {
             resume_messages(&mut messages);
         }
@@ -511,7 +520,11 @@ impl NativeEngine {
                 // it no longer executing before the pause was saved), without
                 // reading the store again: a vault locked meanwhile must not
                 // drop a process that may still hold credentials. A cancel
-                // that wins the race removes it once the run is cancelled.
+                // that wins the race removes it once the run is cancelled. A
+                // native run that paused for approval (marked the same way
+                // before its pause was saved) has no process left, so its
+                // entry goes now, unless an approval already relaunched the
+                // run under a new generation.
                 let mut live = relock(&engine.live);
                 if !paused
                     && live
@@ -545,26 +558,39 @@ impl NativeEngine {
     /// Move an active run to `status`. A run that is no longer active keeps
     /// its state and emits nothing: only [`resume`](Self::resume) moves an
     /// interrupted run on. Failing, cancelling, or interrupting a run expires
-    /// its pending approvals and answers its pending tool calls, and a failing
-    /// parent cancels its active children first.
+    /// its pending approvals (dropping their held plans) and answers its
+    /// pending tool calls, and a failing parent cancels its active children
+    /// first.
     pub(crate) fn transition(
         &self,
         id: &str,
         status: RunStatus,
         error: Option<String>,
     ) -> Result<Run, String> {
+        self.settle(id, status, error).map(|(run, _)| run)
+    }
+    /// [`transition`](Self::transition), also telling whether this call saved
+    /// the new state (`false`: the run was no longer active and kept its
+    /// state).
+    pub(crate) fn settle(
+        &self,
+        id: &str,
+        status: RunStatus,
+        error: Option<String>,
+    ) -> Result<(Run, bool), String> {
         let r = self.store.run(id)?;
         if status == RunStatus::Failed && r.status.active() {
             self.cancel_children(&r.session_id, id)?;
         }
-        let (result, changed) = self.store.update(&r.session_id, |s| {
+        let (result, changed, expired) = self.store.update(&r.session_id, |s| {
+            let mut expired = Vec::new();
             let r = s
                 .runs
                 .iter_mut()
                 .find(|r| r.id == id)
                 .ok_or("run not found")?;
             if !r.status.active() {
-                return Ok((r.clone(), false));
+                return Ok((r.clone(), false, expired));
             }
             r.status = status;
             r.error = error;
@@ -576,6 +602,7 @@ impl NativeEngine {
                 for approval in &mut s.approvals {
                     if approval.run_id == id && approval.status == "pending" {
                         approval.status = "expired".into();
+                        expired.push(approval.id.clone());
                     }
                 }
                 for call in r.pending_calls.drain(..) {
@@ -590,10 +617,14 @@ impl NativeEngine {
                     }
                 }
             }
-            Ok((r.clone(), true))
+            Ok((r.clone(), true, expired))
         })?;
         if !changed {
-            return Ok(result);
+            return Ok((result, false));
+        }
+        // An expired approval's plan can never run.
+        if !expired.is_empty() {
+            relock(&self.pending).retain(|approval, _| !expired.contains(approval));
         }
         if !result.status.active() {
             self.forget_offer(id);
@@ -612,8 +643,14 @@ impl NativeEngine {
         if let Some(e) = event {
             self.emit(&r.session_id, e);
         }
-        Ok(result)
+        Ok((result, true))
     }
+    /// Every approval of every conversation (or of `run`), oldest first: by
+    /// the creation time its id encodes ([`approval_time`]), then by
+    /// conversation id, then in the order its conversation recorded them. The
+    /// order is the same however the store lists conversations, so a caller
+    /// paging by offset gets strictly time-ordered pages and the last page
+    /// holds the newest approvals.
     pub fn approvals(&self, run: Option<&str>) -> Result<Vec<Approval>, String> {
         let mut out = vec![];
         for s in self.store.list()? {
@@ -625,10 +662,18 @@ impl NativeEngine {
                     .get(&s.id)?
                     .approvals
                     .into_iter()
-                    .filter(|a| run.is_none_or(|r| r == a.run_id)),
+                    .enumerate()
+                    .filter(|(_, a)| run.is_none_or(|r| r == a.run_id))
+                    .map(|(position, a)| (s.id.clone(), position, a)),
             );
         }
-        Ok(out)
+        out.sort_by(|(session_a, position_a, a), (session_b, position_b, b)| {
+            approval_time(&a.id)
+                .cmp(approval_time(&b.id))
+                .then_with(|| session_a.cmp(session_b))
+                .then_with(|| position_a.cmp(position_b))
+        });
+        Ok(out.into_iter().map(|(_, _, approval)| approval).collect())
     }
     pub fn respond(
         self: &Arc<Self>,
@@ -812,10 +857,12 @@ impl NativeEngine {
         if relock(&self.live).get(id).is_some_and(|r| r.executing) {
             return Err("run is still executing".into());
         }
-        self.store.update(&r.session_id, |s| {
+        let expired = self.store.update(&r.session_id, |s| {
+            let mut expired = Vec::new();
             for approval in &mut s.approvals {
                 if approval.run_id == id && approval.status == "pending" {
                     approval.status = "expired".into();
+                    expired.push(approval.id.clone());
                 }
             }
             let run = s.runs.iter_mut().find(|run| run.id == id).ok_or("run not found")?;
@@ -831,8 +878,10 @@ impl NativeEngine {
             }
             run.status = RunStatus::Pending;
             run.error = None;
-            Ok(())
+            Ok(expired)
         })?;
+        // An expired approval's plan can never run.
+        relock(&self.pending).retain(|approval, _| !expired.contains(approval));
         // The lock is held through the launch, so no reconciliation sees the
         // pending run without its thread.
         let r = self.store.run(id)?;
@@ -993,8 +1042,9 @@ impl NativeEngine {
     }
     /// Settle runs whose final state could not be saved while the vault was
     /// locked. Every active run with no working thread, with a cancelled one,
-    /// or waiting on a native approval whose plan is gone becomes
-    /// `interrupted`, which expires its approvals. Nothing is continued: an
+    /// or waiting on a native approval whose plan is gone (or was planned by
+    /// a thread since cancelled) becomes `interrupted`, which expires its
+    /// approvals. Nothing is continued: an
     /// interrupted run needs an explicit `resume`. A run that cannot be
     /// settled does not stop the others; the first such error is returned.
     pub fn reconcile_after_unlock(&self) -> Result<(), String> {
@@ -1023,10 +1073,15 @@ impl NativeEngine {
             .collect::<Vec<_>>();
         let stopped = match thread {
             Some(cancelled) => cancelled,
+            // Waiting on a plan the engine still holds, for a run nothing
+            // stopped since (a stop the locked vault kept from being saved
+            // cancelled the plan's tool token).
             None => {
                 let pending = relock(&self.pending);
                 !approvals.iter().any(|a| {
-                    a.status == "pending" && a.runtime_id.is_none() && pending.contains_key(&a.id)
+                    a.status == "pending"
+                        && a.runtime_id.is_none()
+                        && pending.get(&a.id).is_some_and(|plan| !plan.stopped())
                 })
             }
         };
@@ -1049,6 +1104,18 @@ impl NativeEngine {
         }
         Ok(())
     }
+}
+
+/// The creation time an approval id (`approval_<ULID>`) encodes: the ten
+/// timestamp characters of its ULID, whose Crockford base32 text sorts like
+/// the milliseconds it encodes. An id without a ULID gives the empty string,
+/// so it sorts before every timed one.
+fn approval_time(id: &str) -> &str {
+    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    id.rsplit_once('_')
+        .map(|(_, ulid)| ulid)
+        .filter(|ulid| ulid.len() == 26 && ulid.bytes().all(|b| CROCKFORD.contains(&b)))
+        .map_or("", |ulid| &ulid[..10])
 }
 
 /// The session configuration a model check of attachments was made for:
@@ -1240,6 +1307,24 @@ mod tests {
             runtime_prompt("rules", &[aidex_providers::ChatMessage::user("hi")]),
             "rules\nuser: hi"
         );
+    }
+
+    #[test]
+    fn approval_ids_sort_by_the_time_they_encode() {
+        let earlier = aidex_native_sessions::id("approval").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let later = aidex_native_sessions::id("approval").unwrap();
+        assert_eq!(approval_time(&earlier).len(), 10);
+        assert!(approval_time(&earlier) < approval_time(&later));
+        // Only the timestamp counts, not the random part.
+        assert_eq!(
+            approval_time("approval_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            "01ARZ3NDEK"
+        );
+        // Ids without a ULID sort first.
+        assert_eq!(approval_time("legacy"), "");
+        assert_eq!(approval_time("approval_01arz3ndektsv4rrffq69g5fav"), "");
+        assert_eq!(approval_time("approval_short"), "");
     }
 
     #[test]

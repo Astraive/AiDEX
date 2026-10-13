@@ -15,6 +15,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -22,32 +23,64 @@ use std::{
 const PASSPHRASE: &str = "fixture-passphrase";
 
 type Hook = Box<dyn FnOnce() + Send>;
+type Matcher = Box<dyn Fn(&EventKind) -> bool + Send>;
 
-/// Records events and runs a hook once, right after a chosen run is
-/// announced cancelled: inside the engine call that cancelled it.
+/// Records events and runs each hook once, right after the first event it
+/// matches is recorded: inside the engine call (or on the run thread) that
+/// emitted it.
 #[derive(Default)]
 struct Events {
     recorded: MemoryEventSink,
-    on_cancelled: Mutex<Option<(String, Hook)>>,
+    hooks: Mutex<Vec<(Matcher, Hook)>>,
 }
 impl Events {
     fn events(&self) -> Vec<EventEnvelope> {
         self.recorded.events()
     }
+    fn on(
+        &self,
+        matches: impl Fn(&EventKind) -> bool + Send + 'static,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        self.hooks
+            .lock()
+            .unwrap()
+            .push((Box::new(matches), Box::new(hook)));
+    }
+    /// Right after `run` is announced cancelled.
     fn on_cancelled(&self, run: &str, hook: impl FnOnce() + Send + 'static) {
-        *self.on_cancelled.lock().unwrap() = Some((run.to_owned(), Box::new(hook)));
+        let run = run.to_owned();
+        self.on(
+            move |event| {
+                matches!(event, EventKind::TaskCancelled { task_id } if task_id.as_str() == run)
+            },
+            hook,
+        );
+    }
+    /// Right after a native run announces the tool call it is about to plan,
+    /// run, or ask about.
+    fn on_tool_requested(&self, hook: impl FnOnce() + Send + 'static) {
+        self.on(
+            |event| matches!(event, EventKind::ToolRequested { .. }),
+            hook,
+        );
+    }
+    fn count(&self, name: &str) -> usize {
+        self.recorded
+            .names()
+            .iter()
+            .filter(|recorded| **recorded == name)
+            .count()
     }
 }
 impl EventSink for Events {
     fn emit(&self, scope: EventScope, event: EventKind) -> Result<Cursor, EventError> {
-        let hook = match &event {
-            EventKind::TaskCancelled { task_id } => self
-                .on_cancelled
-                .lock()
-                .unwrap()
-                .take_if(|(run, _)| run.as_str() == task_id.as_str())
-                .map(|(_, hook)| hook),
-            _ => None,
+        let hook = {
+            let mut hooks = self.hooks.lock().unwrap();
+            hooks
+                .iter()
+                .position(|(matches, _)| matches(&event))
+                .map(|index| hooks.remove(index).1)
         };
         let cursor = self.recorded.emit(scope, event)?;
         if let Some(hook) = hook {
@@ -592,4 +625,279 @@ fn a_cancel_cut_short_by_a_lock_leaves_the_paused_runtime_to_reconciliation() {
     );
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(runtime.continued.load(Ordering::SeqCst), 0);
+}
+
+/// Cancel every active run, as a user's cancel arriving at that moment would.
+fn cancel_active(engine: &NativeEngine) {
+    for run in engine.store().run_summaries().unwrap() {
+        if run.status.active() {
+            engine.cancel(&run.id).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_run_cancelled_as_it_pauses_for_approval_stays_cancelled() {
+    let f = fixture(vec![write_call(), FakeTurn::text("never asked")], false);
+    // Cancelled after the call is announced, before its approval is saved.
+    let engine = f.engine.clone();
+    f.events.on_tool_requested(move || cancel_active(&engine));
+    let run = f.engine.start(&f.session, "write", "write", None).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::Cancelled);
+    f.idle();
+    assert_eq!(
+        f.engine.store().run(&run.id).unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert!(f.engine.approvals(Some(&run.id)).unwrap().is_empty());
+    assert_eq!(f.events.count("approval.created"), 0);
+    assert_eq!(f.cancellations(&run.id), 1);
+    assert!(!f.ws.path().join("file.txt").exists());
+    assert_eq!(f.provider.requests().len(), 1);
+}
+
+#[test]
+fn a_run_interrupted_by_a_lock_as_it_pauses_for_approval_stays_interrupted() {
+    let f = fixture(vec![write_call(), FakeTurn::text("replanned")], false);
+    // The vault locks (stopping the run) and unlocks again, and the run is
+    // reconciled, before its approval is saved.
+    let engine = f.engine.clone();
+    let vault = f.vault.clone();
+    f.events.on_tool_requested(move || {
+        assert!(vault.lock().was_unlocked);
+        engine.cancel_all();
+        vault
+            .unlock(&SecretString::from(PASSPHRASE.to_owned()))
+            .unwrap();
+        engine.reconcile_after_unlock().unwrap();
+    });
+    let run = f.engine.start(&f.session, "write", "write", None).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::Interrupted);
+    f.idle();
+    let interrupted = f.engine.store().run(&run.id).unwrap();
+    assert_eq!(interrupted.status, RunStatus::Interrupted);
+    assert!(
+        interrupted
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("locked"))
+    );
+    assert!(f.engine.approvals(Some(&run.id)).unwrap().is_empty());
+    assert_eq!(f.events.count("approval.created"), 0);
+    assert!(!f.ws.path().join("file.txt").exists());
+    // Only an explicit resume continues it, without the unapproved write.
+    f.engine.resume(&run.id).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::Completed);
+    assert!(!f.ws.path().join("file.txt").exists());
+}
+
+#[test]
+fn a_run_pausing_for_approval_stays_counted_until_the_pause_is_saved() {
+    let f = fixture(vec![write_call(), FakeTurn::text("written")], false);
+    // Once the call is announced, another holder of the store keeps the
+    // run's pause from being saved until released.
+    let store = f.engine.store().clone();
+    let session = f.session.clone();
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (blocker_tx, blocker_rx) = mpsc::channel();
+    f.events.on_tool_requested(move || {
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            store
+                .update(&session, |_| {
+                    acquired_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        acquired_rx.recv().unwrap();
+        blocker_tx.send(blocker).unwrap();
+        held_tx.send(()).unwrap();
+    });
+    let run = f.engine.start(&f.session, "write", "write", None).unwrap();
+    held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let blocker = blocker_rx.recv().unwrap();
+    // Give the run thread time to reach the save.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(f.engine.has_active(), "a pausing run lost its entry");
+    // Reconciliation racing the save never interrupts the run.
+    let engine = f.engine.clone();
+    let reconcile = std::thread::spawn(move || engine.reconcile_after_unlock());
+    std::thread::sleep(Duration::from_millis(50));
+    release_tx.send(()).unwrap();
+    blocker.join().unwrap();
+    reconcile.join().unwrap().unwrap();
+    let paused = f.settled(&run.id);
+    assert_eq!(paused.status, RunStatus::WaitingApproval);
+    assert_eq!(paused.error, None);
+    f.idle();
+    f.engine.reconcile_after_unlock().unwrap();
+    let approval = f.engine.approvals(Some(&run.id)).unwrap().remove(0);
+    assert_eq!(approval.status, "pending");
+    f.engine
+        .respond(&approval.id, &approval.fingerprint, true, "approve")
+        .unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::Completed);
+    assert_eq!(
+        std::fs::read_to_string(f.ws.path().join("file.txt")).unwrap(),
+        "new"
+    );
+}
+
+#[test]
+fn an_approval_answered_as_soon_as_it_is_saved_continues_the_run() {
+    let f = fixture(vec![write_call(), FakeTurn::text("written")], false);
+    // Answered on the run thread itself, right as the approval is
+    // announced, before that thread lets go of the run.
+    let engine = f.engine.clone();
+    f.events.on(
+        |event| matches!(event, EventKind::ApprovalCreated { .. }),
+        move || {
+            let approval = engine.approvals(None).unwrap().remove(0);
+            engine
+                .respond(&approval.id, &approval.fingerprint, true, "approve")
+                .unwrap();
+        },
+    );
+    let run = f.engine.start(&f.session, "write", "write", None).unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    while f.engine.store().run(&run.id).unwrap().status != RunStatus::Completed {
+        assert!(Instant::now() < until, "the approved run never completed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    f.idle();
+    assert_eq!(
+        std::fs::read_to_string(f.ws.path().join("file.txt")).unwrap(),
+        "new"
+    );
+}
+
+#[test]
+fn a_run_settled_before_it_completes_is_never_announced_finished() {
+    let f = fixture(vec![FakeTurn::text("answer")], false);
+    // Cancelled and saved while the reply streams, after the run's last look
+    // at its cancellation.
+    let store = f.engine.store().clone();
+    let session = f.session.clone();
+    f.events.on(
+        |event| matches!(event, EventKind::AgentRunDelta { .. }),
+        move || {
+            store
+                .update(&session, |s| {
+                    for run in &mut s.runs {
+                        if run.status.active() {
+                            run.status = RunStatus::Cancelled;
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        },
+    );
+    let run = f.engine.start(&f.session, "hi", "hi", None).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::Cancelled);
+    f.idle();
+    assert_eq!(
+        f.engine.store().run(&run.id).unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(f.events.count("agent.finished"), 0);
+    assert_eq!(f.events.count("task.completed"), 0);
+    // A run that does complete is announced once.
+    let f = fixture(vec![FakeTurn::text("answer")], false);
+    let run = f.engine.start(&f.session, "hi", "hi", None).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::Completed);
+    f.idle();
+    assert_eq!(f.events.count("agent.finished"), 1);
+}
+
+#[test]
+fn a_run_whose_stop_could_not_be_saved_never_pauses_for_approval() {
+    let f = fixture(vec![write_call(), FakeTurn::text("never asked")], false);
+    // The vault locks (stopping the run, whose stop cannot be saved) and
+    // unlocks again before the run's approval is saved, with nothing
+    // reconciled in between.
+    let engine = f.engine.clone();
+    let vault = f.vault.clone();
+    f.events.on_tool_requested(move || {
+        assert!(vault.lock().was_unlocked);
+        engine.cancel_all();
+        vault
+            .unlock(&SecretString::from(PASSPHRASE.to_owned()))
+            .unwrap();
+    });
+    let run = f.engine.start(&f.session, "write", "write", None).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::Cancelled);
+    f.idle();
+    assert!(f.engine.approvals(Some(&run.id)).unwrap().is_empty());
+    assert_eq!(f.events.count("approval.created"), 0);
+    f.engine.reconcile_after_unlock().unwrap();
+    assert_eq!(
+        f.engine.store().run(&run.id).unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert!(!f.ws.path().join("file.txt").exists());
+    assert_eq!(f.provider.requests().len(), 1);
+}
+
+#[test]
+fn a_held_plan_whose_thread_was_stopped_is_interrupted_after_unlock() {
+    let f = fixture(vec![write_call(), FakeTurn::text("replanned")], false);
+    // The run's tokens are cancelled right after its pause is saved, and its
+    // plan stays held: what a lock racing the pause can leave behind.
+    let engine = f.engine.clone();
+    f.events.on(
+        |event| matches!(event, EventKind::ApprovalCreated { .. }),
+        move || engine.shutdown(),
+    );
+    let run = f.engine.start(&f.session, "write", "write", None).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::WaitingApproval);
+    f.idle();
+    let approval = f.engine.approvals(Some(&run.id)).unwrap().remove(0);
+    f.engine.reconcile_after_unlock().unwrap();
+    let interrupted = f.engine.store().run(&run.id).unwrap();
+    assert_eq!(interrupted.status, RunStatus::Interrupted);
+    assert_eq!(
+        f.engine.approvals(Some(&run.id)).unwrap()[0].status,
+        "expired"
+    );
+    assert!(
+        f.engine
+            .respond(&approval.id, &approval.fingerprint, true, "approve")
+            .is_err()
+    );
+    assert!(!f.ws.path().join("file.txt").exists());
+}
+
+#[test]
+fn resuming_a_waiting_run_drops_the_plan_of_its_expired_approval() {
+    let f = fixture(vec![write_call(), FakeTurn::text("replanned")], false);
+    let run = f.engine.start(&f.session, "write", "write", None).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::WaitingApproval);
+    f.idle();
+    let approval = f.engine.approvals(Some(&run.id)).unwrap().remove(0);
+    f.engine.resume(&run.id).unwrap();
+    assert_eq!(f.settled(&run.id).status, RunStatus::Completed);
+    f.idle();
+    assert_eq!(
+        f.engine.approvals(Some(&run.id)).unwrap()[0].status,
+        "expired"
+    );
+    // Even made to wait again, the run cannot reach the dropped plan.
+    let store = f.engine.store().clone();
+    store
+        .update(&f.session, |s| {
+            s.runs[0].status = RunStatus::WaitingApproval;
+            s.approvals[0].status = "pending".into();
+            Ok(())
+        })
+        .unwrap();
+    let refused = f
+        .engine
+        .respond(&approval.id, &approval.fingerprint, true, "approve")
+        .unwrap_err();
+    assert!(refused.contains("resume"), "{refused}");
+    assert!(!f.ws.path().join("file.txt").exists());
 }

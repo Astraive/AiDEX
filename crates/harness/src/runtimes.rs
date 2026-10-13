@@ -178,6 +178,9 @@ impl NativeEngine {
             .map(|runtime| runtime.descriptor().name)
             .unwrap_or_else(|_| "this runtime".into());
         self.runtime_placeholders(&s, run, &runtime_name, &mut messages)?;
+        // Tool results earlier in the conversation carry diff statistics, not
+        // applied diffs, as for native models.
+        crate::tool_view::tool_results_for_model(&mut messages);
         if operation == RuntimeOperation::Resume {
             crate::engine::resume_messages(&mut messages);
         }

@@ -46,6 +46,16 @@ impl NativeEngine {
         })
     }
     /// Park the run until the user decides on `request`.
+    ///
+    /// The run keeps its live entry until its thread ends, marked no longer
+    /// executing before the pause is saved: reconciliation never finds the
+    /// running run without an entry, and an approval answered as soon as it
+    /// is saved relaunches the run (taking the entry over) instead of finding
+    /// it still executing. The plan is held before the approval can be read,
+    /// and the pause is saved only for a run that is still running and not
+    /// stopped, so a run cancelled or interrupted meanwhile keeps that state
+    /// (or, when its stop could not be saved, settles as stopped) and its
+    /// plan is dropped.
     fn request_approval(
         &self,
         id: &str,
@@ -66,16 +76,33 @@ impl NativeEngine {
             preview: request.preview,
         };
         relock(&self.pending).insert(approval.id.clone(), request.pending);
-        relock(&self.live).remove(id);
-        self.store.update(&run.session_id, |s| {
-            s.approvals.push(approval.clone());
-            s.runs
+        let tokens = relock(&self.live).get_mut(id).map(|live| {
+            live.executing = false;
+            (live.provider.clone(), live.tool.clone())
+        });
+        let saved = self.store.update(&run.session_id, |s| {
+            let r = s
+                .runs
                 .iter_mut()
                 .find(|r| r.id == id)
-                .ok_or("run not found")?
-                .status = RunStatus::WaitingApproval;
+                .ok_or("run not found")?;
+            // A stop whose state could not be saved (the vault locked and
+            // was unlocked again) leaves the run running with its tokens
+            // cancelled; it is not paused either.
+            let stopped = tokens
+                .as_ref()
+                .is_some_and(|(provider, tool)| provider.is_stopped() || tool.is_cancelled());
+            if r.status != RunStatus::Running || stopped {
+                return Err("run stopped before its approval was requested".into());
+            }
+            r.status = RunStatus::WaitingApproval;
+            s.approvals.push(approval.clone());
             Ok(())
-        })?;
+        });
+        if let Err(error) = saved {
+            relock(&self.pending).remove(&approval.id);
+            return Err(error);
+        }
         self.emit(
             &run.session_id,
             EventKind::ApprovalCreated {
@@ -333,14 +360,19 @@ impl NativeEngine {
                 {
                     continue;
                 }
-                self.transition(id, RunStatus::Completed, None)?;
-                self.emit(
-                    &run.session_id,
-                    EventKind::AgentFinished {
-                        agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
-                        outcome: Outcome::Succeeded,
-                    },
-                );
+                // Announced only when this transition saved the completion: a
+                // run cancelled, interrupted, or failed meanwhile keeps that
+                // state and is not reported as succeeded.
+                let (_, saved) = self.settle(id, RunStatus::Completed, None)?;
+                if saved {
+                    self.emit(
+                        &run.session_id,
+                        EventKind::AgentFinished {
+                            agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
+                            outcome: Outcome::Succeeded,
+                        },
+                    );
+                }
                 return Ok(());
             }
         }
@@ -388,7 +420,8 @@ impl NativeEngine {
             Ok(())
         })?;
         // The whole output (content, applied diff, changed paths, warnings)
-        // stays in encrypted history and is what the model reads.
+        // stays in encrypted history; requests carry it with diff statistics
+        // in place of the applied diff (`crate::tool_view`).
         self.append_result(
             id,
             &call.id,

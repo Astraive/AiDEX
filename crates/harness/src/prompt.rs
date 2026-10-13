@@ -1,11 +1,13 @@
 //! Prompt assembly for one native turn: mode instructions, workspace context
 //! (read through policy, [`crate::context`]), project instruction files,
 //! invoked skills, the model-invocable skill catalog, and the transcript with
-//! untrusted tool and child results wrapped in nonce delimiters.
+//! untrusted tool and child results wrapped in nonce delimiters, every tool
+//! result in its model view ([`crate::tool_view`]) before any wrapping.
 use crate::{
     NativeEngine,
     children::{CHILD_RESULTS, child_results_body},
     native_tools::{Offer, untrusted_trust},
+    tool_view::model_content,
     untrusted::{bounded, nonce, preamble, quote, wrap},
 };
 use aidex_core::EntityId;
@@ -148,6 +150,11 @@ impl NativeEngine {
             }
         }
         messages.extend(run.transcript.iter().zip(&names).map(|(message, name)| {
+            // A tool result reaches the model in its view (diff statistics in
+            // place of an applied diff) before anything wraps it; history
+            // keeps it whole.
+            let view = model_content(message);
+            let content = view.as_deref().unwrap_or(&message.content);
             if let Some(body) =
                 child_results_body(&message.content).filter(|_| message.role == Role::User)
             {
@@ -170,11 +177,17 @@ impl NativeEngine {
                         &nonce,
                         &format!("source=tool name={} call={}", quote(name), quote(id)),
                         trust,
-                        &message.content,
+                        content,
                     );
                     wrapped
                 }
-                None => message.clone(),
+                None => {
+                    let mut message = message.clone();
+                    if let Some(view) = view {
+                        message.content = view;
+                    }
+                    message
+                }
             }
         }));
         Ok(messages)
