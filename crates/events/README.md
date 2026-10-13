@@ -94,6 +94,8 @@ session_id, kinds }`, `RetentionPolicy { max_events, max_age }`, `ReplayPage`,
 - **Ephemeral events** (`agent.delta`, `agent.run_delta`, `process.output`) are
   never stored and take no cursor; their envelope carries the latest durable
   cursor. They reach live subscribers only, and are lost while a subscriber lags.
+  The harness emits `agent.run_delta` (keyed by run id) for every run's text and
+  `agent.delta` for root runs only, so a root run's text arrives as both.
 - **Redaction and bounds.** Before storage or delivery every string in the payload
   goes through `redact_text` and is truncated to 16 KiB with a
   `[TRUNCATED: N bytes omitted]` marker. An identifier (payload or scope) that looks
