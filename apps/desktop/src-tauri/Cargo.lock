@@ -52,6 +52,7 @@ dependencies = [
  "aidex-vault",
  "base64 0.22.1",
  "chacha20poly1305",
+ "fs2",
  "getrandom 0.3.4",
  "rusqlite",
  "serde",

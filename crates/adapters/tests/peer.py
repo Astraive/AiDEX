@@ -1,5 +1,5 @@
 """Protocol peers: stdin assertions plus real side effects only after exact approval."""
-import json, os, sys, time, uuid
+import hashlib, json, os, sys, time, uuid
 driver, scenario = sys.argv[1:3]
 # Every process start is recorded, so a refusal can prove none happened.
 with open('launches.txt','a',newline='') as f: f.write('launch\n')
@@ -43,11 +43,21 @@ if driver in ('pi','omp'):
             time.sleep(.03)
             send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':' world'}})
             send({'type':'agent_settled' if driver=='pi' else 'session_settled'})
+if scenario=='rotate':
+    # The CLI refreshes its stale credential at start, and the refresh token
+    # rotates: one already used is rejected, as the provider does.
+    path=os.path.join(os.environ['CODEX_HOME'],'auth.json')
+    token=json.load(open(path))['tokens']['access_token']
+    used=open('used-tokens.txt').read().split() if os.path.exists('used-tokens.txt') else []
+    if token in used:
+        print('refresh token was already used; sign in again',file=sys.stderr); sys.exit(5)
+    with open('used-tokens.txt','a',newline='') as f: f.write(token+'\n')
+    json.dump({'tokens':{'access_token':'Rotated'+uuid.uuid4().hex}},open(path,'w'))
 if driver == 'codex':
     r=read(); assert r['method']=='initialize' and r['params']['clientInfo']['name']=='AiDEX'; reply(r,{})
     r=read(); assert r['method']=='initialized'
 else:
-    r=read(); assert r['method']=='initialize'; reply(r,{'protocolVersion':1,'agentCapabilities':{'loadSession':True},'schema':{'version':1},'authMethods':[]})
+    r=read(); assert r['method']=='initialize'; reply(r,{'protocolVersion':1,'agentCapabilities':{'loadSession':scenario!='no_load'},'schema':{'version':1},'authMethods':[]})
 while True:
     r=read(); method=r.get('method','')
     if method=='model/list': reply(r,{'data':[{'id':'fixture','name':'Fixture'}]})
@@ -65,6 +75,17 @@ while True:
     elif method in ('session/new','session/load','session/resume','session/start'):
         assert os.path.samefile(r['params'].get('cwd',r['params'].get('workspaceRoot')), os.getcwd())
         if driver=='muse':assert uuid.UUID(r['params']['commandId']).version==7
+        if method=='session/load':
+            with open('loads.txt','a',newline='') as f: f.write(r['params']['sessionId']+'\n')
+            if scenario=='load_error': send({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32603,'message':'Session not found'}}); continue
+            if scenario in ('spec_load','acp_replay'):
+                # ACP: the agent replays the whole saved conversation, then
+                # answers with no identity.
+                for i in range(2000 if scenario=='acp_replay' else 3):
+                    send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'OLD'}}}})
+                    send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-session','update':{'sessionUpdate':'tool_call','toolCallId':'old-tool-%d'%i,'title':'Old','status':'in_progress'}}})
+                    send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-session','update':{'sessionUpdate':'tool_call_update','toolCallId':'old-tool-%d'%i,'status':'completed'}}})
+                reply(r,None); continue
         reply(r,{'sessionId':'native-session','session':{'sessionId':'native-session'},'models':{'availableModels':[{'modelId':'fixture','name':'Fixture'}]}})
     elif method in ('session/set_model','session/setModel','session/setApprovalMode','session/set_mode'): reply(r,{})
     elif method in ('turn/start','session/prompt'):
@@ -95,7 +116,11 @@ while True:
             sys.exit(3)
         if scenario=='expect_refreshed':
             assert json.load(open(os.path.join(os.environ['CODEX_HOME'],'auth.json')))['tokens']['access_token']=='RefreshedOpaqueToken_9182'
-        if scenario in ('approval','reflection'):
+        if scenario=='approval_preamble':
+            # Text streamed before the approval belongs to the same turn.
+            if driver=='codex': send({'method':'item/agentMessage/delta','params':{'threadId':'native-session','turnId':'native-turn','delta':'before '}})
+            else: send({'method':'session/update','params':{'sessionId':'native-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'before '}}}})
+        if scenario in ('approval','approval_preamble','reflection'):
             permission={'jsonrpc':'2.0','id':77,'method':'item/commandExecution/requestApproval' if driver=='codex' else 'session/request_permission','params':{'threadId':'native-session','turnId':'native-turn','sessionId':'native-session','toolCall':{'toolCallId':'tool-1','title':'Write fixture'},'options':[{'optionId':'allow-once','kind':'allow_once'},{'optionId':'deny-once','kind':'reject_once'}],'command':'write effect','itemId':'tool-1'}}
             if scenario=='reflection':
                 # A vendor reflecting the credential as a key and as a number.
@@ -110,10 +135,18 @@ while True:
             send({'method':'item/started','params':{'threadId':'native-session','turnId':'native-turn','item':{'type':'commandExecution','id':'tool-1','command':'read fixture'}}})
             send({'method':'item/completed','params':{'threadId':'native-session','turnId':'native-turn','item':{'type':'commandExecution','id':'tool-1','command':'read fixture'}}})
             send({'method':'turn/completed','params':{'threadId':'child','turn':{'id':'child-turn','status':'completed'}}})
+            if scenario=='rotate': time.sleep(.5)
             if scenario=='secret': delta=os.environ.get('OPENAI_API_KEY','hello')
             elif scenario=='native_secret': delta=json.load(open(os.path.join(os.environ['CODEX_HOME'],'auth.json')))['tokens']['access_token']
+            # Which managed credential the launch restored, without its value.
+            elif scenario=='credential_digest': delta=hashlib.sha256(json.load(open(os.path.join(os.environ['CODEX_HOME'],'auth.json')))['tokens']['access_token'].encode()).hexdigest()
             else: delta='hello'
-            send({'method':'item/agentMessage/delta','params':{'threadId':'native-session','turnId':'native-turn','delta':delta}})
+            if scenario=='split_secret':
+                # A credential streamed in fragments, none of which holds it.
+                secret=os.environ['OPENAI_API_KEY']
+                for delta in ('said '+secret[:6],secret[6:]+' done'):
+                    send({'method':'item/agentMessage/delta','params':{'threadId':'native-session','turnId':'native-turn','delta':delta}})
+            else: send({'method':'item/agentMessage/delta','params':{'threadId':'native-session','turnId':'native-turn','delta':delta}})
             send({'method':'turn/completed','params':{'threadId':'native-session','turn':{'id':'native-turn','status':'completed'}}})
         elif driver=='muse':
             send({'method':'item/started','params':{'sessionId':'native-session','item':{'kind':'tool','itemId':'tool-1','tool':'read','status':'running','revision':1}}})

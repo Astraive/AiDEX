@@ -419,9 +419,9 @@ fn encrypted_native_state_survives_restart_and_resume_does_not_repeat_initial_ef
     request.runtime_ref = done.runtime_ref;
     request.operation = RuntimeOperation::Resume;
     request.run_id = "run-2".into();
-    request
-        .messages
-        .push(aidex_providers::ChatMessage::user("follow-up"));
+    // A resumed native thread receives only what it has not seen: the
+    // harness's `resume_messages`.
+    request.messages = vec![aidex_providers::ChatMessage::user("follow-up")];
     let private = dir.path().join("private");
     for file in std::fs::read_dir(&private).unwrap() {
         let bytes = std::fs::read(file.unwrap().path()).unwrap();
@@ -661,16 +661,13 @@ fn every_acp_family_denies_exact_live_permission_before_file_effect() {
 }
 #[test]
 fn cancellation_after_returning_waiting_approval_stops_native_tree() {
-    let (dir, manager, request) = setup(Driver::Codex, "approval");
+    let (dir, manager, mut request) = setup(Driver::Codex, "approval");
     let executor = manager.executors().unwrap().remove(0);
     let cancel = CancelToken::new();
-    assert_eq!(
-        executor
-            .execute(&request, &mut pause_on_approval, &cancel)
-            .unwrap()
-            .status,
-        RuntimeStatus::WaitingApproval
-    );
+    let paused = executor
+        .execute(&request, &mut pause_on_approval, &cancel)
+        .unwrap();
+    assert_eq!(paused.status, RuntimeStatus::WaitingApproval);
     cancel.cancel();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !manager.process_registry().is_empty() {
@@ -678,6 +675,17 @@ fn cancellation_after_returning_waiting_approval_stops_native_tree() {
         std::thread::sleep(Duration::from_millis(25));
     }
     assert!(!dir.path().join("effect.txt").exists());
+    // The parked launch went with its tree: its home (restored snapshot and
+    // credential) is gone and the run can be resumed.
+    wait_until("parked home removed", || manager.temporary_homes() == 0);
+    assert_eq!(manager.parked_runs(), 0);
+    request.operation = RuntimeOperation::Resume;
+    request.runtime_ref = paused.runtime_ref;
+    let resumed = executor
+        .execute(&request, &mut pause_on_approval, &CancelToken::new())
+        .unwrap();
+    assert_eq!(resumed.status, RuntimeStatus::WaitingApproval);
+    assert_eq!(manager.release_paused(), 1);
 }
 #[test]
 fn closing_the_gate_mid_turn_kills_the_peer_and_a_later_launch_works() {
@@ -831,8 +839,334 @@ fn official_login_encrypts_credentials_and_cancel_cleans_the_owned_tree() {
                     .contains("fixture-opaque-secret")
             );
         }
-        manager.logout("fixture").unwrap();
+        if pending {
+            // The cancelled login bound no account, so there is none to sign out.
+            assert_eq!(
+                manager.logout("fixture").unwrap_err().code,
+                "invalid_request"
+            );
+        } else {
+            manager.logout("fixture").unwrap();
+        }
         assert!(!manager.account_status("fixture").unwrap().authenticated);
+    }
+}
+
+#[test]
+fn official_login_runs_the_app_server_and_reports_its_authorization_page() {
+    let (_dir, manager, _) = setup(Driver::Codex, "normal");
+    // The account peer fails any run of the browser-opening `login` command.
+    set_argv(&manager, account_argv(&["pending"]));
+    let flow = manager.login_start("fixture").unwrap();
+    assert!(flow.authorization_url.is_none());
+    wait_for_authorization(&manager, &flow.flow_id);
+    let pending = manager.login_status("fixture", &flow.flow_id).unwrap();
+    assert_eq!(pending.state, "pending");
+    let url = pending.authorization_url.unwrap();
+    assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
+    assert!(url.ends_with("state=app-server-fixture"));
+    assert_eq!(
+        manager
+            .login_cancel("fixture", &flow.flow_id)
+            .unwrap()
+            .state,
+        "cancelled"
+    );
+    assert!(manager.process_registry().is_empty());
+    // An app-server that cannot start the login (an older CLI) fails the
+    // flow without its text, and the runtime keeps its authentication.
+    set_argv(&manager, account_argv(&["unsupported"]));
+    let flow = manager.login_start("fixture").unwrap();
+    let failed = wait_for_login(&manager, &flow.flow_id);
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.error_code.as_deref(), Some("login_failed"));
+    assert!(failed.authorization_url.is_none());
+    assert!(
+        !serde_json::to_string(&failed)
+            .unwrap()
+            .contains("arbitrary-secret")
+    );
+    assert!(manager.get("fixture").unwrap().profile.is_none());
+    assert!(!manager.has_pending_logins());
+    assert!(manager.process_registry().is_empty());
+}
+
+#[test]
+fn an_executor_loaded_before_a_login_bound_its_account_refuses_to_launch() {
+    let (dir, manager, request) = setup(Driver::Codex, "normal");
+    let mut config = manager.get("fixture").unwrap();
+    config.auth = RuntimeAuth::Vault {
+        secret_name: "runtime-fixture-key".into(),
+        env_name: "OPENAI_API_KEY".into(),
+    };
+    manager.save(config).unwrap();
+    // What an engine that could not reload its runtimes still holds.
+    let stale = manager.executors().unwrap().remove(0);
+    let argv = manager.get("fixture").unwrap().argv;
+    set_argv(&manager, account_argv(&[]));
+    let generation = manager.generation();
+    // The login binds its account from its worker thread, outside any call.
+    let flow = manager.login_start("fixture").unwrap();
+    assert_eq!(wait_for_login(&manager, &flow.flow_id).state, "connected");
+    assert!(manager.generation() > generation);
+    set_argv(&manager, argv);
+    let before = launches(dir.path());
+    assert_eq!(
+        stale
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap_err()
+            .code,
+        "account_changed"
+    );
+    assert_eq!(launches(dir.path()), before);
+    // The reloaded runtime launches with the managed account.
+    assert_eq!(
+        manager.executors().unwrap()[0]
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap()
+            .status,
+        RuntimeStatus::Completed
+    );
+    // A removed runtime's executor launches nothing either.
+    let current = manager.executors().unwrap().remove(0);
+    set_argv(&manager, account_argv(&[]));
+    manager.logout("fixture").unwrap();
+    assert!(manager.remove("fixture").unwrap());
+    let before = launches(dir.path());
+    assert_eq!(
+        current
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    assert_eq!(launches(dir.path()), before);
+}
+
+#[test]
+fn a_failed_account_rotation_never_resumes_the_old_account_under_the_new_one() {
+    let (dir, manager, mut request) = setup(Driver::Codex, "normal");
+    import(&manager, dir.path(), "OpaqueRotationAccountA_7301");
+    let first = manager.executors().unwrap()[0]
+        .execute(&request, &mut continue_all, &CancelToken::new())
+        .unwrap();
+    let reference = first.runtime_ref.unwrap();
+    assert!(is_resumable_reference(&reference));
+    // The revision record cannot be replaced: the rotation fails after the
+    // new credential was written.
+    let profile = manager.get("fixture").unwrap().profile.unwrap();
+    let record = dir
+        .path()
+        .join("private")
+        .join(format!("account-{}.sealed", digest(profile.as_bytes())));
+    let saved = std::fs::read(&record).unwrap();
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+    std::fs::write(record.join("blocker"), b"").unwrap();
+    let argv = manager.get("fixture").unwrap().argv;
+    set_argv(&manager, account_argv(&[]));
+    let source = dir.path().join("account-b.json");
+    std::fs::write(
+        &source,
+        serde_json::json!({"tokens":{"access_token":"OpaqueRotationAccountB_7302"}}).to_string(),
+    )
+    .unwrap();
+    assert!(manager.import_profile("fixture", &source).is_err());
+    set_argv(&manager, argv);
+    std::fs::remove_dir_all(&record).unwrap();
+    std::fs::write(&record, saved).unwrap();
+    // Account A's session snapshot went before the new credential was
+    // written: its reference is refused before any process starts.
+    request.operation = RuntimeOperation::Resume;
+    request.run_id = "run-2".into();
+    request.runtime_ref = Some(reference);
+    request.messages = vec![aidex_providers::ChatMessage::user("follow-up")];
+    let before = launches(dir.path());
+    assert_eq!(
+        manager.executors().unwrap()[0]
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap_err()
+            .code,
+        "resume_unavailable"
+    );
+    assert_eq!(launches(dir.path()), before);
+    // And the runtime still authenticates as account A.
+    set_argv(&manager, peer_argv(Driver::Codex, "credential_digest"));
+    request.operation = RuntimeOperation::Start;
+    request.run_id = "run-3".into();
+    request.runtime_ref = None;
+    let done = manager.executors().unwrap()[0]
+        .execute(&request, &mut continue_all, &CancelToken::new())
+        .unwrap();
+    assert_eq!(
+        done.message.unwrap().content,
+        digest(b"OpaqueRotationAccountA_7301")
+    );
+}
+
+#[test]
+fn sign_out_and_account_changes_remove_snapshots_an_older_daemon_saved() {
+    let (dir, manager, _) = setup(Driver::Codex, "normal");
+    let private = dir.path().join("private");
+    let legacy = |runtime: &str, session: &str| {
+        private.join(format!(
+            "runtime-{}.sealed",
+            digest(format!("{runtime}:{session}").as_bytes())
+        ))
+    };
+    // Another runtime's branch snapshot is this daemon's own and stays.
+    let other_branch = private.join(format!(
+        "runtime-{}-{}.sealed",
+        digest(b"other"),
+        digest(b"s:b")
+    ));
+    std::fs::write(&other_branch, vec![0u8; 64]).unwrap();
+    // A legacy name does not tell whose it is, so every one goes.
+    let older = [legacy("fixture", "s1"), legacy("other", "s2")];
+    for path in &older {
+        std::fs::write(path, vec![0u8; 64]).unwrap();
+    }
+    import(&manager, dir.path(), "OpaqueLegacySweepAccount_1101");
+    for path in &older {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    std::fs::write(legacy("fixture", "s3"), vec![0u8; 64]).unwrap();
+    set_argv(&manager, account_argv(&[]));
+    assert_eq!(manager.logout("fixture").unwrap().status, "signed_out");
+    assert!(!legacy("fixture", "s3").exists());
+    assert!(other_branch.exists());
+}
+
+#[test]
+fn removing_a_runtime_removes_its_managed_account_and_snapshots() {
+    let (dir, manager, request) = setup(Driver::Codex, "normal");
+    import(&manager, dir.path(), "OpaqueRemovedAccount_6620");
+    assert_eq!(
+        manager.executors().unwrap()[0]
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap()
+            .status,
+        RuntimeStatus::Completed
+    );
+    assert!(!runtime_snapshots(dir.path()).is_empty());
+    let config = manager.get("fixture").unwrap();
+    let profile = config.profile.clone().unwrap();
+    let private = dir.path().join("private");
+    let credential = private.join(format!("profile-{}.sealed", digest(profile.as_bytes())));
+    let revision = private.join(format!("account-{}.sealed", digest(profile.as_bytes())));
+    let legacy = private.join(format!("runtime-{}.sealed", digest(b"fixture:s")));
+    std::fs::write(&legacy, vec![0u8; 64]).unwrap();
+    assert!(credential.is_file() && revision.is_file());
+    // A runtime sharing the profile keeps the account.
+    let mut sharing = config.clone();
+    sharing.id = "sharing".into();
+    manager.save(sharing).unwrap();
+    assert!(manager.remove("fixture").unwrap());
+    assert!(credential.is_file() && revision.is_file());
+    assert!(runtime_snapshots(dir.path()).is_empty());
+    assert!(manager.remove("sharing").unwrap());
+    assert!(!credential.exists());
+    assert!(!revision.exists());
+    assert!(!legacy.exists());
+    // The configuration record still decodes.
+    assert!(manager.list().unwrap().is_empty());
+    // A runtime added again under the id finds no credential.
+    let mut again = config;
+    again.argv = account_argv(&[]);
+    manager.save(again).unwrap();
+    assert!(
+        !manager
+            .account_status("fixture")
+            .unwrap()
+            .credential_present
+    );
+}
+
+#[test]
+fn signing_out_a_runtime_without_a_managed_account_is_refused_and_removes_nothing() {
+    let (dir, manager, request) = setup(Driver::Codex, "normal");
+    let mut config = manager.get("fixture").unwrap();
+    config.auth = RuntimeAuth::Vault {
+        secret_name: "runtime-fixture-key".into(),
+        env_name: "OPENAI_API_KEY".into(),
+    };
+    manager.save(config).unwrap();
+    assert_eq!(
+        manager.executors().unwrap()[0]
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap()
+            .status,
+        RuntimeStatus::Completed
+    );
+    let snapshots = runtime_snapshots(dir.path());
+    assert!(!snapshots.is_empty());
+    set_argv(&manager, account_argv(&[]));
+    assert_eq!(
+        manager.logout("fixture").unwrap_err().code,
+        "invalid_request"
+    );
+    assert_eq!(runtime_snapshots(dir.path()), snapshots);
+    assert!(matches!(
+        manager.get("fixture").unwrap().auth,
+        RuntimeAuth::Vault { .. }
+    ));
+}
+
+#[test]
+fn a_stale_full_save_cannot_unbind_a_signed_in_account() {
+    let (dir, manager, _) = setup(Driver::Codex, "normal");
+    // A client's copy, read before the import bound the account.
+    let stale = manager.get("fixture").unwrap();
+    import(&manager, dir.path(), "OpaqueBoundAccount_8080");
+    let mut edit = stale;
+    edit.argv = account_argv(&[]);
+    assert_eq!(manager.save(edit).unwrap_err().code, "conflict");
+    let config = manager.get("fixture").unwrap();
+    assert!(config.profile.is_some());
+    assert!(matches!(config.auth, RuntimeAuth::None));
+    // The same edit of a fresh read keeps the account.
+    let mut fresh = config;
+    fresh.argv = account_argv(&[]);
+    manager.save(fresh).unwrap();
+    assert!(manager.account_status("fixture").unwrap().authenticated);
+    // Signed out, the runtime may leave its profile.
+    manager.logout("fixture").unwrap();
+    let mut unbound = manager.get("fixture").unwrap();
+    unbound.profile = None;
+    manager.save(unbound).unwrap();
+    assert!(manager.get("fixture").unwrap().profile.is_none());
+}
+
+#[test]
+fn health_reports_a_managed_account_only_in_its_documented_codes() {
+    let documented = [
+        "ready",
+        "binary_missing",
+        "auth_required",
+        "installed_auth_unverified",
+        "protocol_ready_auth_unverified",
+    ];
+    let (dir, manager, _) = setup(Driver::Codex, "normal");
+    import(&manager, dir.path(), "OpaqueHealthCodes_3030");
+    // The account peer speaks no turn protocol, so the model probe fails:
+    // what an offline confirmed account looks like.
+    set_argv(&manager, account_argv(&[]));
+    let health = manager.health("fixture").unwrap();
+    assert_eq!(health.status, "installed_auth_unverified");
+    assert!(health.authenticated);
+    assert!(!health.protocol_ready);
+    set_argv(&manager, account_argv(&["pending"]));
+    let flow = manager.login_start("fixture").unwrap();
+    let pending = manager.health("fixture").unwrap();
+    assert_eq!(pending.status, "auth_required");
+    assert!(!pending.authenticated);
+    manager.login_cancel("fixture", &flow.flow_id).unwrap();
+    set_argv(&manager, account_argv(&[]));
+    manager.logout("fixture").unwrap();
+    let signed_out = manager.health("fixture").unwrap();
+    assert_eq!(signed_out.status, "auth_required");
+    for status in [health.status, pending.status, signed_out.status] {
+        assert!(documented.contains(&status.as_str()), "{status}");
     }
 }
 
@@ -1064,9 +1398,9 @@ fn first_turn_native_checkpoint_survives_incomplete_response_without_replaying_e
     request.runtime_ref = Some(checkpoint);
     request.operation = RuntimeOperation::Resume;
     request.run_id = "run-2".into();
-    request
-        .messages
-        .push(aidex_providers::ChatMessage::user("follow-up"));
+    // A resumed native thread receives only what it has not seen: the
+    // harness's `resume_messages`.
+    request.messages = vec![aidex_providers::ChatMessage::user("follow-up")];
     assert_eq!(
         executor
             .execute(
@@ -1298,9 +1632,9 @@ fn changing_native_account_refuses_old_session_identity_without_replaying_effect
     import(&manager, dir.path(), "OpaqueAccountB_2085");
     request.operation = RuntimeOperation::Resume;
     request.run_id = "run-2".into();
-    request
-        .messages
-        .push(aidex_providers::ChatMessage::user("follow-up"));
+    // A resumed native thread receives only what it has not seen: the
+    // harness's `resume_messages`.
+    request.messages = vec![aidex_providers::ChatMessage::user("follow-up")];
     let before = launches(dir.path());
     assert_eq!(
         manager.executors().unwrap()[0]
@@ -1374,9 +1708,7 @@ fn root_and_child_native_branches_have_independent_encrypted_resume_snapshots() 
         request.operation = RuntimeOperation::Resume;
         request.runtime_ref = Some(reference);
         request.run_id.push_str("-next");
-        request
-            .messages
-            .push(aidex_providers::ChatMessage::user("follow-up"));
+        request.messages = vec![aidex_providers::ChatMessage::user("follow-up")];
         assert_eq!(
             executor
                 .execute(
@@ -1669,4 +2001,418 @@ fn failed_run_returns_only_after_its_live_native_tree_left_the_registry() {
         // must not leave a registration that reports the runtime as still busy.
         manager.save(manager.get("fixture").unwrap()).unwrap();
     }
+}
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+/// Start `request` and pause at its approval: the response and the decision
+/// that approves exactly that request.
+fn pause_for_approval(
+    executor: &Arc<dyn RuntimeExecutor>,
+    request: &RuntimeRequest,
+    cancel: &CancelToken,
+) -> (RuntimeResponse, RuntimeApprovalDecision) {
+    let mut decision = None;
+    let paused = executor
+        .execute(
+            request,
+            &mut |event| {
+                if let Some(found) = fingerprint(request, event) {
+                    decision = Some(found);
+                    return RuntimeControl::Pause;
+                }
+                RuntimeControl::Continue
+            },
+            cancel,
+        )
+        .unwrap();
+    assert_eq!(paused.status, RuntimeStatus::WaitingApproval);
+    (paused, decision.unwrap())
+}
+#[test]
+fn a_parked_approval_released_by_cancel_or_a_closed_gate_leaves_no_home_and_resumes() {
+    for driver in [Driver::Acp, Driver::Codex] {
+        for closed_gate in [false, true] {
+            let gate = Arc::new(AtomicBool::new(true));
+            let (dir, manager, mut request, _vault) =
+                setup_with_gate(driver, "approval", gate.clone());
+            let executor = manager.executors().unwrap().remove(0);
+            let cancel = CancelToken::new();
+            let (paused, decision) = pause_for_approval(&executor, &request, &cancel);
+            assert_eq!(manager.parked_runs(), 1);
+            assert_eq!(manager.temporary_homes(), 1);
+            // A run.cancel, or a vault lock, emergency stop or going offline.
+            if closed_gate {
+                gate.store(false, Ordering::SeqCst);
+            } else {
+                cancel.cancel();
+            }
+            wait_until("parked launch released", || {
+                manager.process_registry().is_empty()
+                    && manager.temporary_homes() == 0
+                    && manager.parked_runs() == 0
+            });
+            gate.store(true, Ordering::SeqCst);
+            // Its decision has nothing to continue any more.
+            let mut approval = request.clone();
+            approval.operation = RuntimeOperation::Approval;
+            approval.runtime_ref = paused.runtime_ref.clone();
+            approval.approvals = vec![decision];
+            assert_eq!(
+                executor
+                    .execute(&approval, &mut continue_all, &CancelToken::new())
+                    .unwrap_err()
+                    .code,
+                "approval_expired",
+                "{driver:?}"
+            );
+            // The documented continuation after a lock or a cancel works.
+            request.operation = RuntimeOperation::Resume;
+            request.runtime_ref = paused.runtime_ref;
+            let resumed = executor
+                .execute(&request, &mut pause_on_approval, &CancelToken::new())
+                .unwrap_or_else(|e| panic!("{driver:?} {closed_gate}: {e}"));
+            assert_eq!(resumed.status, RuntimeStatus::WaitingApproval);
+            assert!(!dir.path().join("effect.txt").exists());
+            assert_eq!(manager.release_paused(), 1);
+            assert_eq!(manager.temporary_homes(), 0);
+            assert!(manager.process_registry().is_empty());
+        }
+    }
+}
+#[test]
+fn releasing_parked_approvals_removes_their_homes_before_it_returns() {
+    let (_dir, manager, mut request) = setup(Driver::Acp, "approval");
+    let executor = manager.executors().unwrap().remove(0);
+    let (paused, _) = pause_for_approval(&executor, &request, &CancelToken::new());
+    // What the vault lock observer, emergency stop and going offline call.
+    assert_eq!(manager.release_paused(), 1);
+    assert_eq!(manager.temporary_homes(), 0);
+    assert_eq!(manager.parked_runs(), 0);
+    assert!(manager.process_registry().is_empty());
+    request.operation = RuntimeOperation::Resume;
+    request.runtime_ref = paused.runtime_ref;
+    assert_eq!(
+        executor
+            .execute(&request, &mut pause_on_approval, &CancelToken::new())
+            .unwrap()
+            .status,
+        RuntimeStatus::WaitingApproval
+    );
+    // One run released by id, as for a cancelled or failed run.
+    assert!(manager.release_run(&request.run_id));
+    assert!(!manager.release_run(&request.run_id));
+    assert_eq!(manager.temporary_homes(), 0);
+    assert!(manager.process_registry().is_empty());
+}
+#[test]
+fn a_resume_supersedes_a_launch_still_waiting_while_a_start_is_refused() {
+    let (dir, manager, mut request) = setup(Driver::Codex, "approval");
+    let executor = manager.executors().unwrap().remove(0);
+    let (paused, first) = pause_for_approval(&executor, &request, &CancelToken::new());
+    assert_eq!(
+        executor
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap_err()
+            .code,
+        "runtime_busy"
+    );
+    request.operation = RuntimeOperation::Resume;
+    request.runtime_ref = paused.runtime_ref;
+    let (resumed, second) = pause_for_approval(&executor, &request, &CancelToken::new());
+    // Only the new launch is left, with its own home.
+    assert_eq!(manager.parked_runs(), 1);
+    assert_eq!(manager.temporary_homes(), 1);
+    // The vendor numbers requests per connection: the same wire id, scoped to
+    // its launch, so the earlier launch's decision never matches.
+    assert_ne!(first.request_id, second.request_id);
+    assert!(first.request_id.ends_with(":77") && second.request_id.ends_with(":77"));
+    assert_eq!(first.runtime_ref["native_request_id"], 77);
+    assert_eq!(second.runtime_ref["native_request_id"], 77);
+    request.operation = RuntimeOperation::Approval;
+    request.runtime_ref = resumed.runtime_ref;
+    request.approvals = vec![first];
+    assert_eq!(
+        executor
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap_err()
+            .code,
+        "approval_mismatch"
+    );
+    request.approvals = vec![second];
+    assert_eq!(
+        executor
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap()
+            .status,
+        RuntimeStatus::Completed
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("effect.txt")).unwrap(),
+        "once\n"
+    );
+    assert_eq!(manager.temporary_homes(), 0);
+}
+#[test]
+fn acp_follow_up_continues_from_a_spec_shaped_load_without_its_history_replay() {
+    for scenario in ["spec_load", "acp_replay"] {
+        let (dir, manager, mut request) = setup(Driver::Acp, scenario);
+        let executor = manager.executors().unwrap().remove(0);
+        let done = executor
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap();
+        request.runtime_ref = done.runtime_ref;
+        request.operation = RuntimeOperation::Resume;
+        request.run_id = "run-2".into();
+        request.messages = vec![aidex_providers::ChatMessage::user("follow-up")];
+        let mut observed = vec![];
+        let follow_up = executor
+            .execute(
+                &request,
+                &mut |event| {
+                    observed.push(serde_json::to_string(event).unwrap());
+                    RuntimeControl::Continue
+                },
+                &CancelToken::new(),
+            )
+            .unwrap_or_else(|e| panic!("{scenario}: {e}"));
+        assert_eq!(follow_up.status, RuntimeStatus::Completed);
+        // The replayed history is not the new turn's text, tools or steps.
+        assert_eq!(follow_up.message.unwrap().content, "hello", "{scenario}");
+        let observed = observed.join("\n");
+        assert!(!observed.contains("OLD"), "{scenario}");
+        assert!(!observed.contains("old-tool"), "{scenario}");
+        let reference = follow_up.runtime_ref.unwrap();
+        assert_eq!(reference["native_session_id"], "native-session");
+        assert!(is_resumable_reference(&reference));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("loads.txt")).unwrap(),
+            "native-session\n"
+        );
+    }
+}
+#[test]
+fn acp_that_cannot_load_its_session_refuses_the_resume_as_unavailable() {
+    for scenario in ["no_load", "load_error"] {
+        let (dir, manager, mut request) = setup(Driver::Acp, scenario);
+        let executor = manager.executors().unwrap().remove(0);
+        let done = executor
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap();
+        request.runtime_ref = done.runtime_ref;
+        request.operation = RuntimeOperation::Resume;
+        request.run_id = "run-2".into();
+        let mut events = 0;
+        let error = executor
+            .execute(
+                &request,
+                &mut |_| {
+                    events += 1;
+                    RuntimeControl::Continue
+                },
+                &CancelToken::new(),
+            )
+            .unwrap_err();
+        // The harness then starts a new native session with the transcript.
+        assert_eq!(error.code, "resume_unavailable", "{scenario}");
+        assert_eq!(events, 0, "{scenario}");
+        // An agent without `loadSession` is never asked to load.
+        assert_eq!(
+            dir.path().join("loads.txt").exists(),
+            scenario == "load_error"
+        );
+        assert!(manager.process_registry().is_empty());
+        assert_eq!(manager.temporary_homes(), 0);
+    }
+}
+#[test]
+fn a_turn_continued_after_its_approval_completes_with_the_whole_turn_text() {
+    for driver in [Driver::Codex, Driver::Acp] {
+        let (_dir, manager, mut request) = setup(driver, "approval_preamble");
+        let executor = manager.executors().unwrap().remove(0);
+        let (paused, decision) = pause_for_approval(&executor, &request, &CancelToken::new());
+        request.operation = RuntimeOperation::Approval;
+        request.runtime_ref = paused.runtime_ref;
+        request.approvals = vec![decision];
+        let mut streamed = String::new();
+        let done = executor
+            .execute(
+                &request,
+                &mut |event| {
+                    if let RuntimeEvent::TextDelta { text } = event {
+                        streamed.push_str(text);
+                    }
+                    RuntimeControl::Continue
+                },
+                &CancelToken::new(),
+            )
+            .unwrap();
+        // The continuation streams only what follows the pause; its completed
+        // message is the whole native turn, for the harness to replace the
+        // turn's partial text with.
+        assert_eq!(streamed, "hello", "{driver:?}");
+        assert_eq!(done.message.unwrap().content, "before hello", "{driver:?}");
+    }
+}
+#[test]
+fn a_credential_streamed_in_fragments_is_scrubbed_from_the_completed_message() {
+    let (_dir, manager, request) = setup(Driver::Codex, "split_secret");
+    let mut config = manager.get("fixture").unwrap();
+    config.auth = RuntimeAuth::Vault {
+        secret_name: "runtime-fixture-key".into(),
+        env_name: "OPENAI_API_KEY".into(),
+    };
+    manager.save(config).unwrap();
+    let done = manager.executors().unwrap()[0]
+        .execute(&request, &mut continue_all, &CancelToken::new())
+        .unwrap();
+    let message = done.message.unwrap().content;
+    assert!(!message.contains("opaqueMarker"), "{message}");
+    assert_eq!(message, "said [REDACTED] done");
+}
+#[test]
+fn concurrent_launches_of_one_managed_account_never_reuse_its_rotated_token() {
+    let (dir, manager, request) = setup(Driver::Codex, "rotate");
+    import(&manager, dir.path(), "OpaqueRotatingAccount_6612");
+    let executor = manager.executors().unwrap().remove(0);
+    let turns: Vec<_> = (0..2)
+        .map(|i| {
+            let executor = executor.clone();
+            let mut request = request.clone();
+            request.session_id = format!("session-{i}");
+            request.run_id = format!("run-{i}");
+            std::thread::spawn(move || {
+                executor.execute(
+                    &request,
+                    &mut continue_all,
+                    &CancelToken::new().with_timeout(Duration::from_secs(60)),
+                )
+            })
+        })
+        .collect();
+    for turn in turns {
+        assert_eq!(
+            turn.join().unwrap().unwrap().status,
+            RuntimeStatus::Completed
+        );
+    }
+    // The stored profile holds the newest token: the next launch starts from
+    // a token the provider has not seen used.
+    assert_eq!(
+        executor
+            .execute(&request, &mut continue_all, &CancelToken::new())
+            .unwrap()
+            .status,
+        RuntimeStatus::Completed
+    );
+    let used = std::fs::read_to_string(dir.path().join("used-tokens.txt")).unwrap();
+    let used: Vec<_> = used.lines().collect();
+    assert_eq!(used.len(), 3);
+    assert_eq!(used[0], "OpaqueRotatingAccount_6612");
+    assert!(used[1] != used[2] && used[1] != used[0]);
+    for entry in std::fs::read_dir(dir.path().join("private")).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("Rotated"));
+    }
+}
+#[test]
+fn health_never_probes_while_a_launch_of_the_managed_account_is_live() {
+    let (dir, manager, request) = setup(Driver::Codex, "approval");
+    import(&manager, dir.path(), "OpaqueProbeAccount_7781");
+    let executor = manager.executors().unwrap().remove(0);
+    pause_for_approval(&executor, &request, &CancelToken::new());
+    let before = launches(dir.path());
+    let health = manager.health("fixture").unwrap();
+    assert!(!health.protocol_ready);
+    assert_eq!(launches(dir.path()), before);
+    assert_eq!(manager.release_paused(), 1);
+    // With no launch of the account left, the probe runs again.
+    manager.health("fixture").unwrap();
+    assert_eq!(launches(dir.path()), before + 1);
+}
+#[test]
+fn superseded_branch_snapshots_are_forgotten_only_for_their_own_runtime() {
+    let (dir, manager, mut request) = setup(Driver::Codex, "normal");
+    let executor = manager.executors().unwrap().remove(0);
+    let mut references = vec![];
+    for (session, run) in [
+        ("session-1", "run-1"),
+        ("session-1", "run-2"),
+        ("session-2", "run-3"),
+    ] {
+        request.session_id = session.into();
+        request.run_id = run.into();
+        references.push(
+            executor
+                .execute(&request, &mut continue_all, &CancelToken::new())
+                .unwrap()
+                .runtime_ref
+                .unwrap(),
+        );
+    }
+    assert_eq!(runtime_snapshots(dir.path()).len(), 3);
+    // A reference that names a record which is not one of its runtime's
+    // branch snapshots removes nothing.
+    let mut other_runtime = references[0].clone();
+    other_runtime["runtime_id"] = "other".into();
+    let mut forged = references[0].clone();
+    forged["snapshot_id"] = "runtime-config.sealed".into();
+    for reference in [&other_runtime, &forged] {
+        assert!(!manager.forget_snapshot(reference));
+    }
+    assert_eq!(manager.list().unwrap().len(), 1);
+    assert_eq!(runtime_snapshots(dir.path()).len(), 3);
+    // A thread a configuration change ended, a refused resume.
+    assert!(manager.forget_snapshot(&references[0]));
+    assert!(!manager.forget_snapshot(&references[0]));
+    assert_eq!(runtime_snapshots(dir.path()).len(), 2);
+    // A deleted conversation, with the snapshot an older daemon kept for it.
+    let legacy = dir
+        .path()
+        .join("private")
+        .join(format!("runtime-{}.sealed", digest(b"fixture:session-1")));
+    std::fs::write(&legacy, vec![0u8; 64]).unwrap();
+    assert!(manager.forget_snapshot(&references[1]));
+    assert!(manager.forget_legacy_snapshot("fixture", "session-1"));
+    assert!(!legacy.exists());
+    let left = runtime_snapshots(dir.path());
+    assert_eq!(
+        left,
+        vec![references[2]["snapshot_id"].as_str().unwrap().to_owned()]
+    );
+    // Removing the runtime removes the rest.
+    assert!(manager.remove("fixture").unwrap());
+    assert!(runtime_snapshots(dir.path()).is_empty());
+}
+#[test]
+fn opening_the_manager_sweeps_homes_a_crashed_daemon_left() {
+    let base = std::env::temp_dir().join("aidex-rt");
+    std::fs::create_dir_all(&base).unwrap();
+    let crashed = tempfile::Builder::new()
+        .prefix("d-")
+        .tempdir_in(&base)
+        .unwrap()
+        .keep();
+    std::fs::create_dir_all(crashed.join("aidex-runtime-x/home")).unwrap();
+    std::fs::write(
+        crashed.join("aidex-runtime-x/home/auth.json"),
+        br#"{"tokens":{"access_token":"left-by-a-crash"}}"#,
+    )
+    .unwrap();
+    std::fs::File::create(crashed.join("daemon.lock"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
+    // A daemon that is still running keeps its homes.
+    let (_dir, manager, request) = setup(Driver::Acp, "approval");
+    let executor = manager.executors().unwrap().remove(0);
+    pause_for_approval(&executor, &request, &CancelToken::new());
+    assert!(!crashed.exists());
+    let (_other_dir, _other, _, _) = setup_with_vault(Driver::Codex, "normal");
+    assert_eq!(manager.temporary_homes(), 1);
+    assert_eq!(manager.release_paused(), 1);
 }

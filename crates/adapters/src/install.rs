@@ -55,6 +55,32 @@ fn contained(root: &Path, path: &Path) -> Result<(), RuntimeError> {
     }
     Ok(())
 }
+/// Give the staged copy the source's permission bits plus owner read, write
+/// and execute: the staging file is created `0600`, and the placed component
+/// is a program every launch spawns. A drive whose filesystem keeps no modes
+/// (FAT, exFAT) may refuse the change while its mount options already grant
+/// execution, so only a copy its owner still cannot execute fails.
+#[cfg(unix)]
+fn executable(staged: &fs::File, source: &fs::Metadata) -> Result<(), RuntimeError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = (source.permissions().mode() & 0o777) | 0o700;
+    let _ = staged.set_permissions(fs::Permissions::from_mode(mode));
+    let placed = staged
+        .metadata()
+        .map_err(|_| error("installer_unavailable", "Runtime artifact cannot be staged"))?;
+    if placed.permissions().mode() & 0o100 == 0 {
+        return Err(error(
+            "installer_unavailable",
+            "Runtime artifact cannot be made executable on this drive",
+        ));
+    }
+    Ok(())
+}
+/// Windows runs a program by its name, not a mode bit.
+#[cfg(not(unix))]
+fn executable(_staged: &fs::File, _source: &fs::Metadata) -> Result<(), RuntimeError> {
+    Ok(())
+}
 pub(crate) fn place(
     root: &Path,
     driver: Driver,
@@ -150,6 +176,7 @@ pub(crate) fn place(
             "Runtime artifact does not match the declared component digest",
         ));
     }
+    executable(output.as_file(), &metadata)?;
     output
         .as_file()
         .sync_all()
@@ -224,9 +251,51 @@ mod tests {
             &aidex_native_sessions::digest(b"fixture"),
         )
         .unwrap();
-        assert_eq!(
-            fs::read(root.path().join(result.executable)).unwrap(),
-            b"fixture"
+        let placed = root.path().join(result.executable);
+        assert_eq!(fs::read(&placed).unwrap(), b"fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                fs::metadata(&placed).unwrap().permissions().mode() & 0o100,
+                0
+            );
+        }
+    }
+    /// The staging file is created `0600`; the placed component must run.
+    #[cfg(unix)]
+    #[test]
+    fn a_placed_component_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let script = b"#!/bin/sh\nexit 0\n";
+        let source = root.path().join("fixture.sh");
+        fs::write(&source, script).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        let result = place(
+            root.path(),
+            Driver::Codex,
+            "fixture.sh",
+            &aidex_native_sessions::digest(script),
+        )
+        .unwrap();
+        let placed = root.path().join(result.executable);
+        assert_ne!(
+            fs::metadata(&placed).unwrap().permissions().mode() & 0o100,
+            0
         );
+        // Another test thread forking while a file is open for writing can make
+        // a fresh executable briefly busy (ETXTBSY); that is not this check.
+        let mut attempts = 0;
+        let status = loop {
+            match std::process::Command::new(&placed).status() {
+                Err(e) if e.raw_os_error() == Some(26) && attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                status => break status.unwrap(),
+            }
+        };
+        assert!(status.success());
     }
 }
