@@ -7,9 +7,10 @@ import type { NetworkStatus } from "@aidex/client/dto/models";
 import type { ApprovalList } from "@aidex/client/dto/sessions";
 import type { VaultState, VaultStatus } from "@aidex/client/dto/vault";
 import type { BridgeQuery } from "../../hooks/useBridgeQuery";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 
-/** How often the Security page re-reads its status while it is open. */
+/** How often the Security page re-reads its status while it is open and the user is present. */
 export const SECURITY_POLL_MS = 5000;
 
 const ACTIVE_RUN_STATUSES = new Set(["pending", "running", "waiting_approval"]);
@@ -59,8 +60,9 @@ export function useSecuritySnapshot(): SecuritySnapshot {
 }
 
 /**
- * Owns the Security page's shared queries and polls them every `SECURITY_POLL_MS`. `execution.status`
- * (up to 1000 run summaries) is read only while `withExecution` is set.
+ * Owns the Security page's shared queries and polls them every `SECURITY_POLL_MS` while the user is
+ * present (`usePoll`), catching up when they come back. `execution.status` (up to 1000 run summaries)
+ * is read only while `withExecution` is set.
  */
 export function useSecurityStatus(withExecution: boolean): SecurityStatus {
   const vault = useRpc("vault.status");
@@ -76,10 +78,9 @@ export function useSecurityStatus(withExecution: boolean): SecurityStatus {
     setVersion((value) => value + 1);
   }, []);
 
-  useEffect(() => {
-    const timer = setInterval(refresh, SECURITY_POLL_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
+  // `approval.list`, `execution.status`, and the panels' reads go through the vault: only while the
+  // user is present, so an unattended Security page never holds off the idle auto-lock.
+  usePoll(refresh, SECURITY_POLL_MS);
 
   const vaultState = vault.data?.state;
   const pendingApprovals = pending.data?.total_approvals;
@@ -94,12 +95,4 @@ export function useSecurityStatus(withExecution: boolean): SecurityStatus {
   );
 
   return { vault, pending, network, execution, version, refresh };
-}
-
-/** Calls `refetch` whenever `version` changes after the first render (the query already loaded once). */
-export function useRefetchOnVersion(version: number, refetch: () => void): void {
-  const first = useRef(version);
-  useEffect(() => {
-    if (version !== first.current) refetch();
-  }, [version, refetch]);
 }

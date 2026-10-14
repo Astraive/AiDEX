@@ -1,5 +1,7 @@
-// Paging rules of the checkpoint list, as pure functions so they can be tested without a daemon.
-// `checkpoint.list` returns checkpoints oldest first; the page opens on the newest ones.
+// Paging rules of the checkpoint list, and when an open checkpoint closes, as pure functions so they
+// can be tested without a daemon. `checkpoint.list` returns checkpoints oldest first; the page opens
+// on the newest ones.
+import { ErrorKind } from "@aidex/client/errors";
 
 /** Checkpoints per `checkpoint.list` page. */
 export const CHECKPOINT_PAGE = 20;
@@ -38,4 +40,13 @@ export function olderWindow(shown: CheckpointWindow): CheckpointWindow {
 export function newerWindow(total: number, nextOffset: number | null): PageWindow | undefined {
   if (nextOffset == null) return undefined;
   return nextOffset === newestPageOffset(total) ? null : { offset: nextOffset, limit: CHECKPOINT_PAGE };
+}
+
+/**
+ * Whether the open checkpoint (its decrypted original content and the current file) must close:
+ * any of the page's reads was refused because the vault locked. A locked vault leaves no decrypted
+ * record on screen, so the selection goes with the list.
+ */
+export function selectionDropped(...errors: ({ kind: string } | null | undefined)[]): boolean {
+  return errors.some((error) => error?.kind === ErrorKind.vaultLocked);
 }

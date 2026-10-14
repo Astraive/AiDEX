@@ -8,6 +8,7 @@ import { useToast } from "../../../app/providers/toast";
 import { useProviderCatalog } from "../catalog/ProviderCatalog";
 import { nativeModelKey, parseModelKey } from "../catalog/modelKeys";
 import { accountUpdateParams } from "../catalog/providerAccounts";
+import { applyRuntimeEdit, type RuntimeEdit } from "./runtimeEdit";
 import { storeRuntimeKey } from "./runtimeSecret";
 
 export type ProviderActions = {
@@ -26,11 +27,35 @@ export type ProviderActions = {
   setDefaultModel: (model: ModelRef) => Promise<void>;
   openPresetLink: (presetId: string, link: "api_key" | "docs") => Promise<void>;
   setRuntimeEnabled: (runtime: RuntimeConfig, enabled: boolean) => Promise<void>;
-  updateRuntime: (runtime: RuntimeConfig) => Promise<boolean>;
+  /** Applies `edit` to the configuration as stored now (`runtime.config.get`), never the cached copy. */
+  updateRuntime: (id: string, edit: RuntimeEdit) => Promise<boolean>;
   /** Stores a vault-auth runtime's key for that runtime's consumer, then checks the runtime again. */
   replaceRuntimeKey: (runtime: RuntimeConfig, value: string) => Promise<boolean>;
+  /** Signs a managed account out first (best effort), so its saved credentials leave with the runtime. */
   removeRuntime: (runtime: RuntimeConfig) => Promise<boolean>;
 };
+
+/**
+ * `runtime.update` replaces the stored configuration, including the account profile and auth that
+ * AiDEX Core binds when a sign-in or import finishes, so the edit goes onto a fresh read. Bridge calls
+ * run one at a time, so a binding that finished before the read is kept.
+ */
+async function updateStoredRuntime(id: string, edit: RuntimeEdit) {
+  const stored = await call("runtime.config.get", { id });
+  return call("runtime.update", applyRuntimeEdit(stored, edit));
+}
+
+/**
+ * Before a runtime with an account profile is removed, its saved account (and the runtime's saved
+ * conversation state) is deleted with `runtime.login.logout`: once the configuration is gone, no
+ * screen can sign it out. Best effort: a failure (a driver without a managed account, a missing
+ * executable, a locked vault) does not block the removal; clearing what is left of a removed
+ * runtime is `runtime.remove`'s job in AiDEX Core.
+ */
+async function signOutBeforeRemoval(runtime: RuntimeConfig) {
+  if (!runtime.profile) return;
+  await call("runtime.login.logout", { id: runtime.id }).catch(() => undefined);
+}
 
 /**
  * Account and runtime mutations for the providers screen. Each caller gets its own busy and error
@@ -139,13 +164,13 @@ export function useProviderActions(): ProviderActions {
       await run("link", () => call("provider.open_link", { preset_id: presetId, link }));
     },
     setRuntimeEnabled: async (runtime, enabled) => {
-      await run(enabled ? "enable" : "disable", () => call("runtime.update", { ...runtime, enabled }));
+      await run(enabled ? "enable" : "disable", () => updateStoredRuntime(runtime.id, { enabled }));
       catalog.reload();
     },
-    updateRuntime: async (runtime) =>
+    updateRuntime: async (id, edit) =>
       succeeded(
         await run("update", async () => {
-          await call("runtime.update", runtime);
+          await updateStoredRuntime(id, edit);
           catalog.reload();
           return true;
         }),
@@ -163,6 +188,7 @@ export function useProviderActions(): ProviderActions {
     removeRuntime: async (runtime) =>
       succeeded(
         await run("remove", async () => {
+          await signOutBeforeRemoval(runtime);
           await call("runtime.remove", { id: runtime.id });
           forgetDefault({ runtime: runtime.id });
           catalog.reload();

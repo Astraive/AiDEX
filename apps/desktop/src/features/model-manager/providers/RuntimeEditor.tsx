@@ -16,6 +16,8 @@ import { useProviderActions } from "./useProviderActions";
 /** Editor for an external agent runtime (Codex, Claude Code, ...). */
 export function RuntimeEditor({ item }: { item: RuntimeItem }) {
   const actions = useProviderActions();
+  // An import, sign-in, or sign-out in Account binds or unbinds the account; Connection waits for it.
+  const [accountBusy, setAccountBusy] = useState(false);
   const badges = ["Agent runtime", ...(item.runtime.enabled ? [] : ["Disabled"])];
   return (
     <Stack gap={4}>
@@ -24,12 +26,17 @@ export function RuntimeEditor({ item }: { item: RuntimeItem }) {
         title={item.title}
         badges={badges}
         onRemove={() => actions.removeRuntime(item.runtime)}
-        busy={actions.busy !== null}
+        removeDetail={
+          item.runtime.profile
+            ? "The account saved for it on this drive and its saved conversation state are deleted too."
+            : undefined
+        }
+        busy={actions.busy !== null || accountBusy}
         error={actions.error}
       />
       <RuntimeSetupSection item={item} />
-      <RuntimeAccountSection item={item} />
-      <RuntimeConnectionSection item={item} />
+      <RuntimeAccountSection item={item} onBusyChange={setAccountBusy} />
+      <RuntimeConnectionSection item={item} accountBusy={accountBusy} />
       <RuntimeModelsSection item={item} />
     </Stack>
   );

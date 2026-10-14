@@ -8,6 +8,7 @@ import type { RuntimeAccountStatus, RuntimeLoginStatus } from "@aidex/client/dto
 import { useRpc } from "../../../hooks/useRpc";
 import { useProviderCatalog } from "../catalog/ProviderCatalog";
 import type { RuntimeItem } from "./providerItems";
+import { shouldOpenSignInPage } from "./runtimeLogin";
 
 /** Driver auth methods that mean AiDEX manages the runtime's own account (`runtime.login.*`). */
 const MANAGED_METHODS = ["native_cli", "profile_import"];
@@ -46,12 +47,21 @@ function pollFailureIsTerminal(caught: unknown): boolean {
   return error.is(ErrorKind.vaultLocked) || error.code === "not_found";
 }
 
+type Props = {
+  item: RuntimeItem;
+  /**
+   * Told when an import, sign-in, or sign-out starts and settles: AiDEX Core binds or unbinds the
+   * runtime's account when one finishes, so the editor holds back other configuration writes meanwhile.
+   */
+  onBusyChange?: (busy: boolean) => void;
+};
+
 /**
  * The runtime's own account, kept encrypted on the drive (Codex): status, sign-in through the
  * runtime's official CLI, import of an `auth.json` the user names, and sign-out. Credential bytes
  * never reach this screen. Other drivers say AiDEX does not manage their account.
  */
-export function RuntimeAccountSection({ item }: { item: RuntimeItem }) {
+export function RuntimeAccountSection({ item, onBusyChange }: Props) {
   if (!managesAccount(item))
     return (
       <SettingsSection title="Account" icon={<UserIcon />}>
@@ -61,10 +71,10 @@ export function RuntimeAccountSection({ item }: { item: RuntimeItem }) {
         </Text>
       </SettingsSection>
     );
-  return <ManagedAccount item={item} />;
+  return <ManagedAccount item={item} onBusyChange={onBusyChange} />;
 }
 
-function ManagedAccount({ item }: { item: RuntimeItem }) {
+function ManagedAccount({ item, onBusyChange }: Props) {
   const catalog = useProviderCatalog();
   const { runtime } = item;
   const id = runtime.id;
@@ -89,6 +99,13 @@ function ManagedAccount({ item }: { item: RuntimeItem }) {
   useEffect(() => {
     if (accountError && accountUnsupported(accountError)) setUnsupported(true);
   }, [accountError]);
+  const working = busy !== null || login.pending || login.starting;
+  const onBusyChangeRef = useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
+  useEffect(() => {
+    onBusyChangeRef.current?.(working);
+  }, [working]);
+  useEffect(() => () => onBusyChangeRef.current?.(false), []);
 
   const act = async (kind: "import" | "logout", operation: () => Promise<unknown>) => {
     setBusy(kind);
@@ -266,11 +283,13 @@ function LoginProgress({ login, onOpen }: { login: RuntimeLoginStatus; onOpen: (
       <Notice tone="info" role="status">
         <Stack gap={3} align="start">
           <Text as="span">
-            Finish signing in in the browser Codex opened. This page updates when you are done.
+            {login.authorization_url
+              ? "Finish signing in on the sign-in page AiDEX opened in your browser. This page updates when you are done."
+              : "Starting the sign-in. AiDEX opens the sign-in page in your browser when Codex provides it."}
           </Text>
           {login.authorization_url && (
             <Button variant="outline" size="md" icon={<ExternalLinkIcon />} onClick={onOpen}>
-              Open the sign-in page
+              Open the sign-in page again
             </Button>
           )}
         </Stack>
@@ -299,9 +318,10 @@ function LoginProgress({ login, onOpen }: { login: RuntimeLoginStatus; onOpen: (
  * account and the runtime. A failed check is retried; the flow is cancelled only after
  * `MAX_POLL_FAILURES` failures in a row or one retrying cannot fix (vault locked, flow gone).
  * `onUnsupported` reports an AiDEX Core without `runtime.login.*`. Leaving the screen cancels a
- * pending sign-in, as provider sign-ins do, so no CLI process outlives it. The CLI opens the
- * browser itself; "Open the sign-in page" opens the URL it printed (an OpenAI address the adapter
- * checked) through `web.open`.
+ * pending sign-in, as provider sign-ins do, so no CLI process outlives it. The sign-in page (an
+ * OpenAI address the adapter checked) opens once per flow, as soon as the flow reports it, through
+ * `web.open`: AiDEX Core starts the browser outside the sandbox job that runs the CLI, so ending the
+ * sign-in never closes it. "Open the sign-in page again" opens it once more.
  */
 function useRuntimeLogin(id: string, onSettled: () => void, onUnsupported: () => void) {
   const [state, setState] = useState<RuntimeLoginStatus | null>(null);
@@ -314,6 +334,8 @@ function useRuntimeLogin(id: string, onSettled: () => void, onUnsupported: () =>
   const flowId = state?.state === "pending" ? state.flow_id : null;
   const pendingRef = useRef<string | null>(null);
   pendingRef.current = flowId;
+  // The flow whose sign-in page was opened automatically, so it opens once.
+  const openedFor = useRef<string | null>(null);
   // Bumped by every start, cancel, and unmount, so a start that resolves late cancels its own flow.
   const attemptRef = useRef(0);
   const mountedRef = useRef(true);
@@ -418,14 +440,24 @@ function useRuntimeLogin(id: string, onSettled: () => void, onUnsupported: () =>
     }
   };
 
-  const openPage = () => {
-    const url = state?.authorization_url ? safeExternalUrl(state.authorization_url, { allowMailto: false }) : null;
+  const openUrl = (address: string | null | undefined) => {
+    const url = address ? safeExternalUrl(address, { allowMailto: false }) : null;
     if (!url) {
       setError("The sign-in page address could not be opened.");
       return;
     }
     call("web.open", { url }).catch((caught) => setError(toAidexError(caught).message));
   };
+  const openPage = () => openUrl(state?.authorization_url);
+
+  // Open the sign-in page as soon as the pending flow reports it.
+  const autoOpen = state?.state === "pending" && state.authorization_url ? state : null;
+  useEffect(() => {
+    if (!autoOpen || !shouldOpenSignInPage(openedFor.current, autoOpen)) return;
+    openedFor.current = autoOpen.flow_id;
+    openUrl(autoOpen.authorization_url);
+    // `openUrl` only reads its argument and stable setters.
+  }, [autoOpen?.flow_id, autoOpen?.authorization_url]);
 
   return { state, starting, pending: !!flowId, error, start, cancel, openPage };
 }

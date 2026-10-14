@@ -85,6 +85,30 @@ export function buildSessionConfig(input: SessionConfigInput): SessionConfig {
   };
 }
 
+/**
+ * A settings-only write (Conversation settings): the stored conversation with new instructions,
+ * fallback, or limits. Mode, project, permission, and model come from `session` itself, never from page
+ * state, so a page that has not synced them yet cannot rewrite them. A project removed from the
+ * registry since is sent as stored, and the daemon refuses it rather than dropping it silently.
+ */
+export function settingsConfiguration(
+  session: SessionConfig,
+  defaults: AppPreferences,
+  settings: Partial<SessionSettings>,
+): SessionConfig {
+  return buildSessionConfig({
+    session,
+    defaults,
+    title: session.title,
+    mode: session.mode,
+    workspaceId: session.workspace_id ?? "",
+    isRegisteredWorkspace: (id) => id === session.workspace_id,
+    target: sessionTargetOf(session),
+    permission: session.permission_mode,
+    overrides: settings,
+  });
+}
+
 /** Whether two configurations differ in what a run uses: model, runtime, mode, project, or permissions. */
 export function configurationChanged(previous: SessionConfig, next: SessionConfig): boolean {
   return (

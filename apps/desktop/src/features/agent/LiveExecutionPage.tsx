@@ -7,6 +7,8 @@ import type { Run } from "@aidex/client/dto/sessions";
 import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
 import { useNavigation } from "../../app/providers/navigation";
+import { useAidexStatus } from "../../hooks/useAidexStatus";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 import { runDelta } from "../../hooks/sessionEvents";
 import { useSessionUpdates } from "../../hooks/useSessionUpdates";
@@ -15,7 +17,11 @@ import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import {
   appendRunText,
   captureProcessEvent,
+  dropsLiveOutput,
+  liveOutputAfterRead,
   markDisconnected,
+  markRunTextsDisconnected,
+  pruneRunTexts,
   type ProcessTraces,
   type RunTexts,
 } from "./executionOutput";
@@ -26,12 +32,17 @@ const isActive = (run: Run) =>
   run.status === "running" ||
   run.status === "waiting_approval";
 
+/** Executing (not waiting for a person): the daemon holds the vault open for it anyway. */
+const isExecuting = (run: Run) =>
+  run.status === "pending" || run.status === "running";
+
 /** Poll while a run is active or the event stream is down; otherwise events trigger reloads. */
 const ACTIVE_POLL_MS = 1000;
 const IDLE_POLL_MS = 5000;
 
 export function LiveExecutionPage() {
   const { route, navigate } = useNavigation();
+  const { connectionKey } = useAidexStatus();
   const session = useRpc(
     "conversation.get",
     { id: route.id ?? "" },
@@ -56,25 +67,42 @@ export function LiveExecutionPage() {
         );
     },
   );
+  // Another conversation, drive, or daemon: nothing shown so far belongs to it.
   useEffect(() => {
     setProcesses([]);
     setRunTexts([]);
     setSelected(undefined);
     setError(undefined);
-  }, [route.id]);
+  }, [route.id, connectionKey]);
   useEffect(() => {
-    if (!live.active) setProcesses(markDisconnected);
+    if (live.active) return;
+    setProcesses(markDisconnected);
+    setRunTexts(markRunTextsDisconnected);
   }, [live.active]);
-  const runs = session.data?.runs ?? [];
-  const running = runs.some(isActive);
+  // A read refused because the vault locked: the decrypted excerpts and transcript go with the
+  // snapshot (`useBridgeQuery` already dropped it), so nothing read before the lock stays on screen.
+  const sessionError = session.error;
   useEffect(() => {
-    if (!route.id) return;
-    const timer = setInterval(
-      session.refetch,
-      running || !live.active ? ACTIVE_POLL_MS : IDLE_POLL_MS,
-    );
-    return () => clearInterval(timer);
-  }, [route.id, running, live.active, session.refetch]);
+    if (!dropsLiveOutput(sessionError)) return;
+    setProcesses((previous) => liveOutputAfterRead(sessionError, previous));
+    setRunTexts((previous) => liveOutputAfterRead(sessionError, previous));
+    setSelected(undefined);
+  }, [sessionError]);
+  const runs = session.data?.runs ?? [];
+  // A run the snapshot reports as ended loses its excerpt; resumed, it starts a new one.
+  const snapshot = session.data;
+  useEffect(() => {
+    if (snapshot)
+      setRunTexts((previous) => pruneRunTexts(previous, snapshot.runs, isActive));
+  }, [snapshot]);
+  const running = runs.some(isActive);
+  // Reads decrypt the conversation (vault use): only while the user is present, except while a run
+  // executes, which holds the vault open anyway.
+  usePoll(
+    session.refetch,
+    running || !live.active ? ACTIVE_POLL_MS : IDLE_POLL_MS,
+    { enabled: !!route.id, whileAway: runs.some(isExecuting) },
+  );
   const selectedRun = runs.find((run) => run.id === selected);
   return (
     <PageFrame width="default">
@@ -104,7 +132,7 @@ export function LiveExecutionPage() {
         )}
         {runs.map((run) => {
           const liveText = isActive(run)
-            ? runTexts.find((entry) => entry.runId === run.id)?.text
+            ? runTexts.find((entry) => entry.runId === run.id)
             : undefined;
           return (
             <Card key={run.id} padding="md">
@@ -140,10 +168,16 @@ export function LiveExecutionPage() {
                   </Text>
                 )}
                 {run.error && <Notice tone="danger">{run.error}</Notice>}
-                {liveText && (
+                {liveText?.text && (
                   <Stack gap={2}>
                     <Text tone="muted">Live output · latest excerpt</Text>
-                    <Text>{liveText}</Text>
+                    {liveText.gap && (
+                      <Notice tone="warning">
+                        Text sent while reconnecting is missing from this
+                        excerpt; the saved transcript has it once the run ends.
+                      </Notice>
+                    )}
+                    <Text>{liveText.text}</Text>
                   </Stack>
                 )}
                 <Button
@@ -178,12 +212,14 @@ export function LiveExecutionPage() {
         {session.data?.runs_truncated && (
           <Notice>Only the most recent runs appear in this summary.</Notice>
         )}
-        <ProcessOutputPanel traces={processes} />
-        {selected && (
+        {/* Shown only next to the snapshot it belongs to: a failed or pending read shows none. */}
+        {session.data && <ProcessOutputPanel traces={processes} />}
+        {selected && session.data && (
           <HistoryMessages
             key={selected}
             scope={{ run_id: selected }}
             live={!!selectedRun && isActive(selectedRun)}
+            executing={!!selectedRun && isExecuting(selectedRun)}
           />
         )}
         <Stack direction="row" gap={2}>

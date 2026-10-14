@@ -127,6 +127,7 @@ export function LiveApprovalsPanel({ version, onChanged }: Props) {
               onDecide={(approved) => void decide(approval, approved)}
             />
           ))}
+          {/* Polls re-read this page in place and a new range starts empty, so paging never waits on a read. */}
           {page && page.total > 0 ? (
             <Stack gap={2}>
               <Stack direction="row" gap={3} align="center" justify="between">
@@ -134,7 +135,7 @@ export function LiveApprovalsPanel({ version, onChanged }: Props) {
                   variant="ghost"
                   size="md"
                   icon={<ChevronLeftIcon />}
-                  disabled={approvals.loading || !page.previous}
+                  disabled={!page.previous}
                   onClick={() => page.previous && setRange(page.previous)}
                 >
                   Previous
@@ -146,7 +147,7 @@ export function LiveApprovalsPanel({ version, onChanged }: Props) {
                   variant="ghost"
                   size="md"
                   trailing={<ChevronRightIcon />}
-                  disabled={approvals.loading || !page.next}
+                  disabled={!page.next}
                   onClick={() => page.next && setRange(page.next)}
                 >
                   Next

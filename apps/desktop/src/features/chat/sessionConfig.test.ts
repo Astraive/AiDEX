@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { AppPreferences } from "@aidex/client/dto/preferences";
 import type { ProviderModel } from "@aidex/client/dto/models";
 import type { SessionConfig } from "@aidex/client/dto/sessions";
-import { buildSessionConfig, type SessionConfigInput } from "./sessionConfig";
+import { buildSessionConfig, settingsConfiguration, type SessionConfigInput } from "./sessionConfig";
 import { fallbackModelOptions, sessionSettingsErrors } from "./sessionSettings";
 
 const defaults: AppPreferences = {
@@ -166,4 +166,59 @@ test("fallback choices are native chat models; agents need tool calling", () => 
     fallbackModelOptions({ ...base, current: "openai/gone" }).at(-1)?.label,
     "gone (not available now)",
   );
+});
+
+test("a settings-only save keeps the stored mode, project, permission, and model", () => {
+  const plan: SessionConfig = {
+    ...session,
+    mode: "plan",
+    workspace_id: "wsp_1",
+    permission_mode: "supervised",
+    provider_id: "anthropic",
+    model_id: "claude-main",
+    runtime_id: null,
+    fallback_model: "openai/gpt-fallback",
+    max_steps: 16,
+  };
+  // Whatever the page holds (a chat page that never synced, a global "auto" default), the write is
+  // built from the conversation itself.
+  const config = settingsConfiguration(plan, { ...defaults, permission_mode: "auto" }, { max_steps: 32 });
+  assert.equal(config.mode, "plan");
+  assert.equal(config.workspace_id, "wsp_1");
+  assert.equal(config.permission_mode, "supervised");
+  assert.equal(config.provider_id, "anthropic");
+  assert.equal(config.model_id, "claude-main");
+  assert.equal(config.runtime_id, null);
+  assert.equal(config.title, "Fix the build");
+  assert.equal(config.max_steps, 32);
+  assert.equal(config.fallback_model, "openai/gpt-fallback");
+  assert.equal(config.instructions, "Conversation instructions.");
+});
+
+test("a settings-only save keeps an explicit null fallback and can set one to null", () => {
+  const kept = settingsConfiguration({ ...session, fallback_model: null }, defaults, { max_tokens: 2048 });
+  assert.equal(kept.fallback_model, null, "the global fallback does not leak in");
+  assert.equal(kept.max_tokens, 2048);
+  const cleared = settingsConfiguration(
+    { ...session, fallback_model: "openai/gpt-fallback" },
+    defaults,
+    { fallback_model: null },
+  );
+  assert.equal(cleared.fallback_model, null);
+});
+
+test("a settings-only save of an external runtime conversation keeps its runtime", () => {
+  const external: SessionConfig = {
+    ...session,
+    mode: "agent",
+    permission_mode: "full_access",
+    provider_id: "runtime:codex",
+    model_id: "default",
+    runtime_id: "codex",
+  };
+  const config = settingsConfiguration(external, defaults, { instructions: "Be brief." });
+  assert.equal(config.runtime_id, "codex");
+  assert.equal(config.permission_mode, "full_access");
+  assert.equal(config.mode, "agent");
+  assert.equal(config.instructions, "Be brief.");
 });

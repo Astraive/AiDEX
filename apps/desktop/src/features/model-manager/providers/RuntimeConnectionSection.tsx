@@ -10,9 +10,11 @@ import { useProviderActions } from "./useProviderActions";
 
 /**
  * Executable and arguments of a runtime, with status and install helpers. Its account profile is
- * managed by sign-in and import in the Account section, never typed here.
+ * managed by sign-in and import in the Account section, never typed here: Save applies only these
+ * fields to the stored configuration, and waits while `accountBusy` (an import, sign-in, or sign-out
+ * in the Account section is about to bind or unbind the account).
  */
-export function RuntimeConnectionSection({ item }: { item: RuntimeItem }) {
+export function RuntimeConnectionSection({ item, accountBusy = false }: { item: RuntimeItem; accountBusy?: boolean }) {
   const catalog = useProviderCatalog();
   const actions = useProviderActions();
   const { runtime, driver, health } = item;
@@ -24,12 +26,9 @@ export function RuntimeConnectionSection({ item }: { item: RuntimeItem }) {
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!executable.trim()) return;
-    // The saved configuration keeps its account profile and sign-in as they are.
-    await actions.updateRuntime({
-      ...runtime,
-      executable: executable.trim(),
-      argv: parseArgv(argv),
-    });
+    if (accountBusy) return;
+    // Applied to the configuration as stored now, so its account profile and sign-in stay as they are.
+    await actions.updateRuntime(runtime.id, { executable: executable.trim(), argv: parseArgv(argv) });
   };
 
   const install = async () => {
@@ -108,7 +107,7 @@ export function RuntimeConnectionSection({ item }: { item: RuntimeItem }) {
             <Button
               type="submit"
               variant="primary"
-              disabled={!dirty || !executable.trim() || actions.busy !== null}
+              disabled={!dirty || !executable.trim() || actions.busy !== null || accountBusy}
             >
               {actions.busy === "update" ? "Saving…" : "Save"}
             </Button>

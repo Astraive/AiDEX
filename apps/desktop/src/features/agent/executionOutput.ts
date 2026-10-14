@@ -2,6 +2,7 @@
 // ephemeral (never stored or replayed), so these only cover what arrived while the page was
 // connected; final tool output and run transcripts stay in the encrypted session history.
 import type { EventEnvelope } from "@aidex/client/dto/daemon";
+import { ErrorKind } from "@aidex/client/errors";
 
 /** Characters of each process stream kept (the latest 64 KiB of ASCII output). */
 export const STREAM_LIMIT = 64 * 1024;
@@ -108,12 +109,54 @@ export function processStatus(trace: ProcessTrace): ProcessStatus {
   return { label: "Running", tone: "neutral" };
 }
 
+/**
+ * Live text of one run. `gap`: the stream dropped while the run was shown, and `agent.run_delta`
+ * is never replayed, so text sent meanwhile is missing from the excerpt.
+ */
+export type RunText = { runId: string; text: string; gap?: true };
+
 /** Live text by run id, oldest activity first. */
-export type RunTexts = readonly { runId: string; text: string }[];
+export type RunTexts = readonly RunText[];
 
 /** Append live text to its run, keeping the latest excerpt of the most recently active runs. */
 export function appendRunText(previous: RunTexts, runId: string, text: string): RunTexts {
-  const current = previous.find((entry) => entry.runId === runId)?.text ?? "";
+  const current = previous.find((entry) => entry.runId === runId);
   const others = previous.filter((entry) => entry.runId !== runId);
-  return [...others, { runId, text: tail(current + text, RUN_TEXT_LIMIT) }].slice(-RUN_LIMIT);
+  const next: RunText = { runId, text: tail((current?.text ?? "") + text, RUN_TEXT_LIMIT) };
+  if (current?.gap) next.gap = true;
+  return [...others, next].slice(-RUN_LIMIT);
+}
+
+/** The stream dropped: every excerpt kept so far misses whatever is sent until it is back. */
+export function markRunTextsDisconnected(previous: RunTexts): RunTexts {
+  if (previous.every((entry) => entry.gap)) return previous;
+  return previous.map((entry) => (entry.gap ? entry : { ...entry, gap: true }));
+}
+
+/**
+ * Drop the excerpts of runs a snapshot reports as no longer active (completed, failed, cancelled,
+ * interrupted), so a run resumed under the same id starts a new excerpt instead of extending its
+ * old one. Runs the snapshot does not list (just started, or beyond a truncated list) keep theirs.
+ */
+export function pruneRunTexts<R extends { id: string }>(
+  previous: RunTexts,
+  runs: readonly R[],
+  active: (run: R) => boolean,
+): RunTexts {
+  const ended = new Set(runs.filter((run) => !active(run)).map((run) => run.id));
+  if (!previous.some((entry) => ended.has(entry.runId))) return previous;
+  return previous.filter((entry) => !ended.has(entry.runId));
+}
+
+/**
+ * Whether a failed session read means the live excerpts must go: after the vault locked, decrypted
+ * command output and run text must not stay on screen (as `useBridgeQuery` drops the snapshot).
+ */
+export function dropsLiveOutput(error: { kind: string } | null | undefined): boolean {
+  return error?.kind === ErrorKind.vaultLocked;
+}
+
+/** The excerpts to keep after a session read: none once it failed because the vault locked. */
+export function liveOutputAfterRead<T>(error: { kind: string } | null | undefined, kept: readonly T[]): readonly T[] {
+  return dropsLiveOutput(error) && kept.length ? [] : kept;
 }

@@ -112,7 +112,7 @@ export function OverviewPanel({ status, onOpenTab }: Props) {
       <Card padding="md">
         <SettingRow
           title="Offline mode"
-          description="While on, AiDEX refuses provider, web search, and extension network requests. It does not confine processes that run with Full access."
+          description="While on, AiDEX refuses provider, web search, and extension network requests. Turning it on also stops the active runs and sign-ins of external runtimes such as Codex, whose own processes use the network. It does not confine processes that run with Full access."
           controlId={OFFLINE_ID}
           control={
             <Switch

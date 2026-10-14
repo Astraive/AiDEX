@@ -9,6 +9,7 @@ Reusable React hooks for the desktop app.
 | `useRpc(method, params, { enabled })` | A typed daemon method (`RpcMethods` in `@aidex/client/rpc`) through `rpc_call`; runs only while the daemon answers and refetches on reconnect. |
 | `useSubscription(method, params, onData, { enabled })` | A daemon stream through `rpc_subscribe`; unsubscribes on unmount and resubscribes when the daemon changes. |
 | `useSessionUpdates(sessionId, refresh, onEvent?)` | Follows one session's events: `{ active, reconnecting, error }`. See below. |
+| `usePoll(poll, intervalMs, { enabled, whileAway })` | Every timer that re-reads through the daemon. It polls only while the user is present (`presence.ts`: the window is visible and had keyboard, pointer, wheel, touch, or focus input in the last minute) and polls once at once when they come back. `whileAway` keeps a visible window polling without input; use it only for reads tied to work AiDEX Core already keeps the vault awake for (an executing run, not one waiting for an approval) or for reads that do not touch the vault. See below. |
 | `useCommandShortcut`, `useModifierKeyLabel` | Ctrl/⌘ shortcuts and the platform's command-key label. |
 | `useKeyChord(chord, handler, { enabled })` | Window-wide chords such as `Mod+Shift+M` (parsed by `lib/keyChord.ts`; `Mod` is ⌘ on Apple platforms, Ctrl elsewhere). |
 
@@ -26,5 +27,9 @@ The resume cursor follows the rules in `protocol/events/README.md`, implemented 
 - Events of another session are ignored.
 
 After the stream drops, the hook resubscribes after its cursor, so missed durable events are replayed once; ephemeral output sent meanwhile is lost (`reconnecting` is true until then). An `events.error` with `cursor_expired`, or a subscribe refused with `cursor_expired` or `cursor_ahead`, makes it re-read the snapshot and start again from `events.latest`. Reconnects back off from 1 s to 30 s; a stream that stayed up for 10 s resets the backoff, and a new drive or daemon starts over.
+
+## Polling and the vault's idle lock
+
+Most screen reads decrypt records (`conversation.list`, `conversation.get`, `approval.list`, `history.list`, `vault.secret.list`, ...), and AiDEX Core counts every read through the vault as use: it restarts the idle auto-lock. A window left open on a polling screen would therefore keep the vault unlocked for good. So polls go through `usePoll`, which stops them while the window is hidden or the user is away, and the idle lock can happen while a run waits for an approval. Event-driven re-reads (`useSessionUpdates`) need no gate: they follow work that is happening.
 
 Tests (`*.test.ts`, `node:test`) run with `bun test src/hooks`.

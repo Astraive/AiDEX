@@ -52,6 +52,8 @@ type Props = {
   managed: readonly string[];
   onSaved: (meta: SecretMeta) => void;
   onCancel?: () => void;
+  /** Told when a save starts and settles, so a dialog around the form can stay open while it saves. */
+  onBusyChange?: (busy: boolean) => void;
 };
 
 type Errors = { name?: string; value?: string; consumers?: string; form?: string };
@@ -82,7 +84,7 @@ function useConsumerOptions(): CheckboxOption[] {
  * The value goes straight to `vault.secret.set` and is cleared from state after every submit; it is
  * never read back, logged, or shown again.
  */
-export function AddSecretForm({ editing, existingNames, managed, onSaved, onCancel }: Props) {
+export function AddSecretForm({ editing, existingNames, managed, onSaved, onCancel, onBusyChange }: Props) {
   const [name, setName] = useState(editing?.name ?? "");
   const [kind, setKind] = useState<SecretKind>(editing?.kind ?? "api_key");
   const [value, setValue] = useState("");
@@ -121,6 +123,7 @@ export function AddSecretForm({ editing, existingNames, managed, onSaved, onCanc
     if (next.value || next.consumers) return;
 
     setBusy(true);
+    onBusyChange?.(true);
     try {
       const meta = await call("vault.secret.set", { name: trimmed, value, consumers, kind });
       if (!editing) {
@@ -134,6 +137,7 @@ export function AddSecretForm({ editing, existingNames, managed, onSaved, onCanc
     } finally {
       setValue("");
       setBusy(false);
+      onBusyChange?.(false);
     }
   };
 

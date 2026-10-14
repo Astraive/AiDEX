@@ -22,7 +22,7 @@ import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import { AddSecretForm, secretKindLabels } from "./AddSecretForm";
 import { PassphraseForm } from "./PassphraseForm";
 import { managedSecret, secretWriteError } from "./secretPolicy";
-import { useRefetchOnVersion, type SecurityStatus } from "./useSecurityStatus";
+import type { SecurityStatus } from "./useSecurityStatus";
 
 type Props = { status: SecurityStatus };
 
@@ -56,11 +56,12 @@ export function VaultPanel({ status }: Props) {
   const vault = status.vault.data;
   const state = vault?.state;
   const unlocked = state === "unlocked";
+  // Read when the vault unlocks and after every change made here, not on each Security poll: every
+  // read goes through the vault and would count as use, holding off its idle auto-lock.
   const secrets = useRpc("vault.secret.list", undefined, { enabled: unlocked });
-  useRefetchOnVersion(status.version, secrets.refetch);
   const [replacing, setReplacing] = useState<SecretMeta>();
   const [deleting, setDeleting] = useState<SecretMeta>();
-  const [busy, setBusy] = useState<"lock" | "delete">();
+  const [busy, setBusy] = useState<"lock" | "delete" | "replace">();
   // Lock failures show on the page; delete failures only inside the confirmation they belong to.
   const [lockError, setLockError] = useState<string>();
   const [deleteError, setDeleteError] = useState<string>();
@@ -113,6 +114,12 @@ export function VaultPanel({ status }: Props) {
     if (busy === "delete") return;
     setDeleting(undefined);
     setDeleteError(undefined);
+  };
+
+  // Like a delete, a replace keeps its dialog open while it saves, so a failure is shown in it.
+  const closeReplace = () => {
+    if (busy === "replace") return;
+    setReplacing(undefined);
   };
 
   const columns: readonly DataTableColumn<SecretMeta>[] = [
@@ -179,7 +186,8 @@ export function VaultPanel({ status }: Props) {
           ) : null}
           {unlocked ? (
             <Text tone="secondary">
-              Locking revokes every handle issued from the vault and returns to the unlock screen.
+              Locking cancels active agent runs and runtime sign-ins, stops agent runtimes and MCP servers, revokes
+              every handle issued from the vault, and returns to the unlock screen.
             </Text>
           ) : null}
           {state === "locked" || state === "missing" ? (
@@ -272,7 +280,7 @@ export function VaultPanel({ status }: Props) {
         size="lg"
         title={replacing ? `Replace ${replacing.name}` : "Replace secret"}
         description="Enter the new value and choose who can use it. The old value is overwritten and cannot be recovered."
-        onClose={() => setReplacing(undefined)}
+        onClose={closeReplace}
       >
         {replacing && unlocked ? (
           <AddSecretForm
@@ -280,7 +288,8 @@ export function VaultPanel({ status }: Props) {
             editing={replacing}
             existingNames={rows.map((row) => row.name)}
             managed={managed}
-            onCancel={() => setReplacing(undefined)}
+            onBusyChange={(saving) => setBusy(saving ? "replace" : undefined)}
+            onCancel={closeReplace}
             onSaved={(meta) => {
               setReplacing(undefined);
               notify(`Replaced ${meta.name}.`);

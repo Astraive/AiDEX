@@ -12,6 +12,8 @@ import { call, callUntyped } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
 import type { Checkpoint, ContentChunk } from "@aidex/client/dto/sessions";
 import { useNavigation } from "../../app/providers/navigation";
+import { useAidexStatus } from "../../hooks/useAidexStatus";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 import { useSessionUpdates } from "../../hooks/useSessionUpdates";
 import { pageRangeLabel } from "../sessions/pageRange";
@@ -19,16 +21,21 @@ import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import {
   newerWindow,
   olderWindow,
+  selectionDropped,
   shownWindow,
   type PageWindow,
 } from "./checkpointPages";
 import { createLatestRequest } from "./latestRequest";
 
-/** While the session's event stream is down, the list is re-read this often instead. */
+/**
+ * While the session's event stream is down, or a read failed (a locked vault, until it is unlocked
+ * again), the page is re-read this often instead, while the user is present.
+ */
 const POLL_MS = 5000;
 
 export function CheckpointsPage() {
   const { route, replace } = useNavigation();
+  const { connectionKey, daemonRunning } = useAidexStatus();
   const sessions = useRpc("conversation.list");
   const session = useRpc(
     "conversation.get",
@@ -48,12 +55,18 @@ export function CheckpointsPage() {
   const { refetch: refetchSession } = session;
   const { refetch: refetchList } = checkpoints;
   // Session events (a run editing files) re-read the list; a poll stands in while the stream is down.
+  // After a failed read it re-reads what failed, so the page recovers once the vault is unlocked
+  // again (the vault.unlocked event is drive-wide and never reaches this session's stream).
   const live = useSessionUpdates(route.id, refetchList);
-  useEffect(() => {
-    if (!listEnabled || live.active) return;
-    const timer = setInterval(refetchList, POLL_MS);
-    return () => clearInterval(timer);
-  }, [listEnabled, live.active, refetchList]);
+  const recovering = !!session.error || !!checkpoints.error;
+  usePoll(
+    () => {
+      if (session.error) refetchSession();
+      else refetchList();
+    },
+    POLL_MS,
+    { enabled: !!route.id && (recovering || (listEnabled && !live.active)) },
+  );
   // The newest page is placed by the conversation's count. When the list counts more, re-read the
   // conversation so that page moves on to the new checkpoints; when it counts fewer, re-read the list.
   useEffect(() => {
@@ -91,6 +104,26 @@ export function CheckpointsPage() {
     setError(undefined);
     // clearSelection only touches stable guards and state setters.
   }, [route.id]);
+  // The open checkpoint holds decrypted content read under one daemon and vault session: it closes
+  // when the daemon changes or stops (its vault is locked) and when a read is refused as locked.
+  useEffect(() => {
+    clearSelection();
+  }, [connectionKey, daemonRunning]);
+  const lockedOut = selectionDropped(
+    session.error,
+    checkpoints.error,
+    compare.error,
+  );
+  useEffect(() => {
+    if (lockedOut) clearSelection();
+  }, [lockedOut]);
+
+  // A content read refused as locked: close the selection and re-read the conversation, whose error
+  // then says why (and clears by itself once the vault is unlocked again).
+  const dropLocked = () => {
+    clearSelection();
+    refetchSession();
+  };
 
   const showPage = (next: PageWindow) => {
     clearSelection();
@@ -117,8 +150,10 @@ export function CheckpointsPage() {
         if (contentReads.isCurrent(token)) setBefore(content);
       })
       .catch((caught) => {
-        if (contentReads.isCurrent(token))
-          setError(toAidexError(caught).message);
+        if (!contentReads.isCurrent(token)) return;
+        const failure = toAidexError(caught);
+        if (selectionDropped(failure)) dropLocked();
+        else setError(failure.message);
       });
   };
   const open = async (checkpoint: Checkpoint) => {
@@ -142,8 +177,10 @@ export function CheckpointsPage() {
           : `${file.content ?? ""}${file.truncated ? "\n[excerpt]" : ""}`,
       );
     } catch (caught) {
-      if (selection.isCurrent(token))
-        setCurrent(`[Unavailable: ${toAidexError(caught).message}]`);
+      if (!selection.isCurrent(token)) return;
+      const failure = toAidexError(caught);
+      if (selectionDropped(failure)) dropLocked();
+      else setCurrent(`[Unavailable: ${failure.message}]`);
     }
   };
   const restore = async () => {

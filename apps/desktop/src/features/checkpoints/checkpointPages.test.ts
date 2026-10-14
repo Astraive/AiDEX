@@ -5,6 +5,7 @@ import {
   newerWindow,
   newestPageOffset,
   olderWindow,
+  selectionDropped,
   shownWindow,
   type CheckpointWindow,
 } from "./checkpointPages";
@@ -66,4 +67,12 @@ test("pages chosen before checkpoints were added still never overlap", () => {
   assert.deepEqual(last, { offset: 25, limit: CHECKPOINT_PAGE });
   const seen = [older, middle, last].flatMap((window) => listed(window, total));
   assert.deepEqual(seen, Array.from({ length: total }, (_, index) => index));
+});
+
+test("a vault_locked read closes the open checkpoint; other failures keep it", () => {
+  assert.equal(selectionDropped(null, { kind: "vault_locked" }, undefined), true);
+  assert.equal(selectionDropped({ kind: "vault_locked" }), true);
+  assert.equal(selectionDropped({ kind: "conflict" }, { kind: "daemon_unavailable" }), false);
+  assert.equal(selectionDropped(null, undefined), false);
+  assert.equal(selectionDropped(), false);
 });

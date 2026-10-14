@@ -36,6 +36,7 @@ import type {
 import { useNavigation } from "../../app/providers/navigation";
 import { usePreferences } from "../../app/providers/preferences";
 import { useToast } from "../../app/providers/toast";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 import { useShell } from "../../layouts/shell";
 import { useProviderCatalog } from "../model-manager/catalog/ProviderCatalog";
@@ -98,6 +99,7 @@ import {
   buildSessionConfig,
   configurationChanged,
   sessionTargetOf,
+  settingsConfiguration,
 } from "./sessionConfig";
 import { fallbackModelOptions, type SessionSettings } from "./sessionSettings";
 import styles from "./ConversationPage.module.css";
@@ -230,6 +232,9 @@ export function ConversationPage({
   const running =
     !!latestRun &&
     ["pending", "running", "waiting_approval"].includes(latestRun.status);
+  // Executing, not waiting for a person: the daemon holds the vault open for it anyway.
+  const executing =
+    !!latestRun && ["pending", "running"].includes(latestRun.status);
   const lastMessage = session.data?.messages.at(-1);
   const external = target?.kind === "runtime";
   // "Resume task" needs the engine's word that an external runtime can resume; it is asked only
@@ -364,11 +369,16 @@ export function ConversationPage({
     permissionTouched.current = true;
     setPermission("full_access");
   }, [route.id, resolved.key]);
-  useEffect(() => {
-    if (!route.id) return;
-    const timer = setInterval(session.refetch, running ? 250 : 1500);
-    return () => clearInterval(timer);
-  }, [route.id, running, session.refetch]);
+  // Each read decrypts the conversation, which counts as vault use: polls run while the user is
+  // present, and without input only while a run executes. A run waiting for an approval does not
+  // hold the vault open, so an unattended window lets the idle auto-lock happen.
+  usePoll(session.refetch, running ? 250 : 1500, {
+    enabled: !!route.id,
+    whileAway: executing,
+  });
+  // A failed project list is read again: until it answers, the page cannot place the conversation's
+  // project, and model, mode, and project changes are refused.
+  usePoll(workspaces.refetch, 5000, { enabled: !!workspaces.error });
   useEffect(() => {
     if (!workspaces.data) return;
     if (session.data) {
@@ -433,6 +443,14 @@ export function ConversationPage({
   ): SessionConfig => {
     if (route.id && !session.data)
       throw new Error("The conversation is still loading.");
+    // Mode, project, and permission are taken from the conversation once the project list answered;
+    // until then the page holds defaults, and a write would replace the stored values with them.
+    if (route.id && !workspaces.data)
+      throw new Error(
+        workspaces.error
+          ? `Projects could not be read: ${workspaces.error.message}`
+          : "Projects are still loading. Try again in a moment.",
+      );
     const nextTarget = changes.target ?? currentTarget();
     // Every external runtime accepts only agent mode with full access, so no write can carry
     // another combination (the engine would refuse it on the next run).
@@ -735,13 +753,21 @@ export function ConversationPage({
       });
     else setWorkspaceId(value);
   };
-  /** Conversation settings: one `agent.configuration.set` with the new values; throws for the dialog. */
+  /**
+   * Conversation settings: one `agent.configuration.set` with the new values, built from the stored
+   * conversation (`settingsConfiguration`) rather than page state; throws for the dialog.
+   */
   const saveSettings = async (settings: SessionSettings) => {
     const id = route.id;
     if (!id) return;
+    if (!session.data) throw new Error("The conversation is still loading.");
     await call("agent.configuration.set", {
       session_id: id,
-      configuration: configuration({ settings }),
+      configuration: settingsConfiguration(
+        session.data,
+        preferences.settings,
+        settings,
+      ),
     });
     session.refetch();
   };
@@ -1116,12 +1142,17 @@ export function ConversationPage({
               </Stack>
             )}
           </header>
-          {(error || session.error || catalog.error || localCatalog.error) && (
+          {(error ||
+            session.error ||
+            catalog.error ||
+            localCatalog.error ||
+            workspaces.error) && (
             <Notice tone="danger" role="alert">
               {error ??
                 session.error?.message ??
                 catalog.error ??
-                localCatalog.error?.message}
+                localCatalog.error?.message ??
+                `Projects could not be read: ${workspaces.error?.message}`}
             </Notice>
           )}
           <LocalInferenceNotice

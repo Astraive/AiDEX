@@ -8,8 +8,12 @@ import {
   STREAM_LIMIT,
   appendRunText,
   captureProcessEvent,
+  dropsLiveOutput,
+  liveOutputAfterRead,
   markDisconnected,
+  markRunTextsDisconnected,
   processStatus,
+  pruneRunTexts,
   tail,
   type ProcessTraces,
 } from "./executionOutput";
@@ -136,4 +140,36 @@ test("run text is appended per run and bounded", () => {
   for (let index = 0; index < RUN_LIMIT; index += 1) texts = appendRunText(texts, `run-${index}`, "x");
   assert.equal(texts.length, RUN_LIMIT);
   assert.equal(texts.find((entry) => entry.runId === "child"), undefined);
+});
+
+test("run text received after a disconnect stays marked as missing the text sent meanwhile", () => {
+  let texts = markRunTextsDisconnected(appendRunText([], "r", "I will now update the conf"));
+  assert.equal(texts[0]?.gap, true);
+  texts = appendRunText(texts, "r", " tests pass.");
+  assert.equal(texts[0]?.text, "I will now update the conf tests pass.");
+  assert.equal(texts[0]?.gap, true, "the splice stays marked until the run ends");
+  assert.equal(markRunTextsDisconnected(texts), texts, "already marked, nothing changes");
+  assert.equal(appendRunText([], "fresh", "a")[0]?.gap, undefined);
+});
+
+test("a snapshot that reports a run as ended drops its excerpt, so a resumed run starts over", () => {
+  const active = (run: { status: string }) => ["pending", "running", "waiting_approval"].includes(run.status);
+  const texts = appendRunText(appendRunText([], "r", "old"), "other", "x");
+  assert.deepEqual(pruneRunTexts(texts, [{ id: "r", status: "interrupted" }], active), [{ runId: "other", text: "x" }]);
+  assert.equal(pruneRunTexts(texts, [{ id: "r", status: "running" }], active), texts, "active runs keep theirs");
+  assert.equal(pruneRunTexts(texts, [], active), texts, "runs the snapshot does not list yet keep theirs");
+  const resumed = appendRunText(pruneRunTexts(texts, [{ id: "r", status: "interrupted" }], active), "r", "new");
+  assert.equal(resumed.find((entry) => entry.runId === "r")?.text, "new");
+});
+
+test("a vault_locked session read drops the live excerpts; other failures keep them", () => {
+  const traces = apply([], output("p", "stdout", "SECRET=1"));
+  assert.equal(dropsLiveOutput({ kind: "vault_locked" }), true);
+  assert.equal(dropsLiveOutput({ kind: "unavailable" }), false);
+  assert.equal(dropsLiveOutput(null), false);
+  assert.deepEqual(liveOutputAfterRead({ kind: "vault_locked" }, traces), []);
+  assert.equal(liveOutputAfterRead(null, traces), traces, "no error keeps the same list");
+  assert.equal(liveOutputAfterRead({ kind: "daemon_unavailable" }, traces), traces);
+  const empty: ProcessTraces = [];
+  assert.equal(liveOutputAfterRead({ kind: "vault_locked" }, empty), empty, "nothing to drop keeps the same list");
 });

@@ -3,6 +3,7 @@ import { CheckIcon, ClipboardCheckIcon, XIcon } from "@aidex/ui/icons";
 import { Button, Card, IconBadge, Stack, StatusIndicator } from "@aidex/ui/primitives";
 import type { Approval, ApprovalStatus } from "@aidex/client/dto/sessions";
 import { approvable } from "./approvalDecision";
+import { decisionLabels } from "./approvalLabels";
 
 type Props = {
   approval: Approval;
@@ -37,6 +38,7 @@ export function ApprovalRequestCard({ approval, busy = false, onDecide, showOrig
   const pending = approval.status === "pending";
   const truncated = approval.arguments_truncated || approval.preview_truncated;
   const origin = approval.runtime_id ? `Runtime ${approval.runtime_id}` : "AiDEX Native";
+  const labels = decisionLabels(approval, showOrigin);
 
   return (
     <Card padding="md">
@@ -44,6 +46,7 @@ export function ApprovalRequestCard({ approval, busy = false, onDecide, showOrig
         <MediaItem
           media={<IconBadge tone={pending ? "accent" : "neutral"} icon={<ClipboardCheckIcon />} />}
           title={`Approval: ${approval.tool_name}`}
+          titleLevel={3}
           description={showOrigin ? `${origin} · Run ${approval.run_id}` : undefined}
           trailing={<StatusIndicator tone={status.tone} label={status.label} />}
         />
@@ -54,13 +57,21 @@ export function ApprovalRequestCard({ approval, busy = false, onDecide, showOrig
         ) : null}
         {pending ? (
           <Stack direction="row" gap={2} justify="end">
-            <Button variant="outline" size="md" icon={<XIcon />} disabled={busy} onClick={() => onDecide(false)}>
+            <Button
+              variant="outline"
+              size="md"
+              icon={<XIcon />}
+              aria-label={labels.deny}
+              disabled={busy}
+              onClick={() => onDecide(false)}
+            >
               Deny
             </Button>
             <Button
               variant="primary"
               size="md"
               icon={<CheckIcon />}
+              aria-label={labels.approve}
               disabled={busy || !approvable(approval)}
               onClick={() => onDecide(true)}
             >
