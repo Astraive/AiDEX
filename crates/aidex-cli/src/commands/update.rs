@@ -16,21 +16,17 @@ use aidex_drive::{DrivePaths, resolve_root};
 use aidex_updater::{IntegrityReport, integrity_report};
 use aidexd::{
     ClientError,
+    client::UPDATE_CALL_TIMEOUT,
     methods::update::{
         APPLY, ApplyReport, CHECK, CheckReport, ROLLBACK, RollbackReport, STATUS, StatusResult,
     },
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 /// Host-side opt-in shared with the launcher: accept a bundle without `bundle.sig`.
 pub const ALLOW_UNSIGNED_ENV: &str = "AIDEX_ALLOW_UNSIGNED";
-/// Staging, hashing, and the self-test of a large package can take minutes on USB.
-const UPDATE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const RESTART_HINT: &str = "restart AiDEX (close it, then start AiDEX.exe or ./aidex again; run `aidex daemon stop` first if the daemon is running) to use it";
 
 #[derive(Debug, Args)]
@@ -195,7 +191,7 @@ fn status(drive: Option<&Path>, output: Output) -> Result<Exit, CliError> {
 fn check(drive: Option<&Path>, package: &PackageArgs, output: Output) -> Result<Exit, CliError> {
     let mut client = connect(drive)?;
     let report: CheckReport = client
-        .call_with_timeout(CHECK, package_params(package)?, UPDATE_TIMEOUT)
+        .call_with_timeout(CHECK, package_params(package)?, UPDATE_CALL_TIMEOUT)
         .and_then(|value| {
             serde_json::from_value(value).map_err(|error| ClientError::Protocol(error.to_string()))
         })
@@ -225,7 +221,7 @@ fn apply(drive: Option<&Path>, package: &PackageArgs, output: Output) -> Result<
     }
     let mut client = connect(drive)?;
     let report: ApplyReport = client
-        .call_with_timeout(APPLY, package_params(package)?, UPDATE_TIMEOUT)
+        .call_with_timeout(APPLY, package_params(package)?, UPDATE_CALL_TIMEOUT)
         .and_then(|value| {
             serde_json::from_value(value).map_err(|error| ClientError::Protocol(error.to_string()))
         })
@@ -261,7 +257,7 @@ fn rollback(drive: Option<&Path>, allow_unsigned: bool, output: Output) -> Resul
         .call_with_timeout(
             ROLLBACK,
             json!({ "allow_unsigned": allow_unsigned }),
-            UPDATE_TIMEOUT,
+            UPDATE_CALL_TIMEOUT,
         )
         .and_then(|value| {
             serde_json::from_value(value).map_err(|error| ClientError::Protocol(error.to_string()))

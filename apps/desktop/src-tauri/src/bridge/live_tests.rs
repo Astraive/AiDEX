@@ -1,12 +1,15 @@
 //! Bridge behaviour against an in-process daemon on a temporary drive.
 
-use super::{Bridge, EndedPayload, NotificationEmitter, NotificationPayload};
+use super::{
+    connection::call_dedicated, Bridge, Connection, EndedPayload, NotificationEmitter,
+    NotificationPayload,
+};
 use crate::error::kind;
 use aidexd::{Daemon, DaemonHandle, DaemonOptions};
 use serde_json::{json, Value};
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -40,15 +43,68 @@ fn temp_drive() -> tempfile::TempDir {
     root
 }
 
+/// Holds `test.slow` calls until it is opened, and counts the calls that arrived.
+#[derive(Default)]
+struct Gate {
+    state: Mutex<(usize, bool)>,
+    changed: Condvar,
+}
+
+impl Gate {
+    /// Called by the handler: wait (bounded) until the gate opens.
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 += 1;
+        self.changed.notify_all();
+        let deadline = Instant::now() + PATIENCE;
+        while !state.1 && Instant::now() < deadline {
+            state = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+    }
+
+    fn wait_for_calls(&self, calls: usize) {
+        let deadline = Instant::now() + PATIENCE;
+        let mut state = self.state.lock().unwrap();
+        while state.0 < calls {
+            assert!(Instant::now() < deadline, "the slow call never arrived");
+            state = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.changed.notify_all();
+    }
+}
+
 /// A daemon with `test.count` (emits `count` notifications, then ends) and
 /// `test.forever` (ticks until unsubscribed).
 fn start_daemon(root: &Path) -> DaemonHandle {
+    start_gated_daemon(root, Arc::new(Gate::default()))
+}
+
+/// [`start_daemon`] plus `test.slow`, which answers only once `gate` opens.
+fn start_gated_daemon(root: &Path, gate: Arc<Gate>) -> DaemonHandle {
     let options = DaemonOptions {
         poll_interval: Duration::from_millis(10),
         ..DaemonOptions::default()
     };
     let mut daemon = Daemon::with_options(root, options).unwrap();
     let router = daemon.router_mut();
+    router
+        .register("test.slow", move |_, _| {
+            gate.pass();
+            Ok(json!({ "done": true }))
+        })
+        .unwrap();
     router
         .register_stream("test.count", |_, params, sink| {
             let count = params["count"].as_u64().unwrap_or(0);
@@ -153,6 +209,54 @@ fn a_restarted_daemon_is_reconnected_without_resending_failed_calls() {
         .call(root.path(), "daemon.ping", Value::Null)
         .unwrap();
     assert_eq!(pong, json!({ "pong": true }));
+}
+
+#[test]
+fn a_slow_call_times_out_the_shared_connection_but_not_its_own() {
+    let root = temp_drive();
+    let gate = Arc::new(Gate::default());
+    let _daemon = start_gated_daemon(root.path(), Arc::clone(&gate));
+
+    // The shared connection gives up after its limit and drops the connection, although the
+    // daemon is still working on the call: this is why updates do not go through it.
+    let shared = Connection::with_call_timeout(Duration::from_millis(200));
+    shared
+        .call(root.path(), "daemon.ping", Value::Null)
+        .unwrap();
+    let error = shared
+        .call(root.path(), "test.slow", Value::Null)
+        .unwrap_err();
+    assert_eq!(error.kind, kind::IO, "{error}");
+    assert!(
+        !shared.is_connected(),
+        "a timed-out call drops the connection"
+    );
+
+    // On a connection of its own, the same call waits for its answer, and the shared
+    // connection keeps answering meanwhile.
+    let shared = Connection::default();
+    shared
+        .call(root.path(), "daemon.ping", Value::Null)
+        .unwrap();
+    let drive = root.path().to_path_buf();
+    let long = thread::spawn(move || {
+        call_dedicated(&drive, "test.slow", Value::Null, Duration::from_secs(60))
+    });
+    gate.wait_for_calls(2);
+    let pong = shared
+        .call(root.path(), "daemon.ping", Value::Null)
+        .unwrap();
+    assert_eq!(pong, json!({ "pong": true }));
+    assert!(
+        !long.is_finished(),
+        "the long call is still waiting at the gate"
+    );
+    gate.open();
+    assert_eq!(long.join().unwrap().unwrap(), json!({ "done": true }));
+    assert!(
+        shared.is_connected(),
+        "the shared connection was never touched"
+    );
 }
 
 #[test]

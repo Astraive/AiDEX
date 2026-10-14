@@ -6,7 +6,7 @@ pub mod reports;
 
 use crate::{
     bridge::{
-        EndedPayload, NotificationEmitter, NotificationPayload, Subscribed, ENDED_EVENT,
+        call_long, EndedPayload, NotificationEmitter, NotificationPayload, Subscribed, ENDED_EVENT,
         NOTIFICATION_EVENT,
     },
     error::BridgeError,
@@ -30,6 +30,7 @@ pub const COMMANDS: &[&str] = &[
     "daemon_start",
     "daemon_stop",
     "rpc_call",
+    "rpc_call_long",
     "rpc_subscribe",
     "rpc_unsubscribe",
     "select_drive",
@@ -115,6 +116,23 @@ pub async fn rpc_call(
             .bridge
             .connection
             .call(&drive.root, &method, params.unwrap_or(Value::Null))
+    })
+    .await
+}
+
+/// Call `update.check`, `update.apply`, or `update.rollback` (refusing anything else) on a
+/// connection of its own with the 30-minute update limit, so a slow package on a USB drive
+/// neither times out nor holds up every other call on the shared connection.
+#[tauri::command]
+pub async fn rpc_call_long(
+    state: Shared<'_>,
+    method: String,
+    params: Option<Value>,
+) -> Result<Value, BridgeError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let drive = state.drive.require()?;
+        call_long(&drive.root, &method, params.unwrap_or(Value::Null))
     })
     .await
 }

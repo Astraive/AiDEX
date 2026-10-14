@@ -1,21 +1,54 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { Dialog, KeyValueList, Notice, SectionHeader, SettingRow } from "@aidex/ui/components";
 import { RefreshIcon, ShieldCheckIcon } from "@aidex/ui/icons";
 import { Button, Card, Stack, StatusIndicator, Switch, Text, TextField } from "@aidex/ui/primitives";
 import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
-import type { ApplyReport, CheckReport, RollbackReport, SignatureState, UpdateStatus } from "@aidex/client/dto/updates";
+import type {
+  ApplyReport,
+  CheckReport,
+  JournalOperation,
+  RollbackReport,
+  SignatureState,
+  UpdateStatus,
+} from "@aidex/client/dto/updates";
 import { useAidexStatus } from "../../hooks/useAidexStatus";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 import { CoreStatusNotice } from "../system/CoreStatusNotice";
-import { absoluteUpdateSource, applySelectionReason, sameCandidate } from "./updateSelection";
-
-/** While an operation runs or an update is unfinished, the journal state is re-read this often. */
-const PROGRESS_POLL_MS = 2000;
+import { callUpdate, mayStillRun } from "./updateCalls";
+import {
+  absoluteUpdateSource,
+  applySelectionReason,
+  countUnchangedReads,
+  followedOutcome,
+  journalProgressKey,
+  progressPollInterval,
+  reviewReducer,
+  sameCandidate,
+} from "./updateSelection";
 
 const DOWNGRADE_ID = "setting-update-downgrade";
 
-type Review = "apply" | "rollback";
+/** An apply or rollback whose call stopped waiting while AiDEX Core may still be working on it. */
+class StoppedWaiting extends Error {
+  constructor(
+    readonly operation: JournalOperation,
+    readonly failure: unknown,
+  ) {
+    super(toAidexError(failure).message);
+  }
+}
+
+/** Sends an apply or rollback; a lost or timed-out call becomes `StoppedWaiting` (it may still finish). */
+async function runOperation<T>(operation: JournalOperation, send: () => Promise<T>): Promise<T> {
+  try {
+    return await send();
+  } catch (caught) {
+    if (mayStillRun(toAidexError(caught))) throw new StoppedWaiting(operation, caught);
+    throw caught;
+  }
+}
 
 const signatureLabel = (signature: SignatureState | null): string =>
   !signature
@@ -47,7 +80,9 @@ function integrityRows(status: UpdateStatus) {
  * bundle's integrity, checking and applying a manually supplied signed package, and rolling back to the
  * recorded previous version. Every source must be an absolute local path, unsigned packages are never
  * accepted, and apply and rollback re-check what was reviewed before they change anything. A switch
- * takes effect on the next launch.
+ * takes effect on the next launch. Check, apply, and rollback run on a bridge connection of their own
+ * (`callUpdate`); when one stops waiting while AiDEX Core is still working, the page follows the update
+ * journal until it ends instead of reporting a failure.
  */
 export function UpdatesPanel() {
   const status = useRpc("update.status");
@@ -59,38 +94,76 @@ export function UpdatesPanel() {
   const [allowDowngrade, setAllowDowngrade] = useState(false);
   const [checked, setChecked] = useState<CheckReport>();
   const [result, setResult] = useState<ApplyReport | RollbackReport>();
-  const [review, setReview] = useState<Review>();
+  const [{ review, error }, dispatch] = useReducer(reviewReducer, {});
+  const setError = (message: string | undefined) => dispatch({ type: "error", error: message });
+  const closeReview = () => dispatch({ type: "close" });
   const [busy, setBusy] = useState<string>();
-  const [error, setError] = useState<string>();
+  // An apply or rollback the page stopped waiting for, followed through the journal until it ends.
+  // `afterRead`: only status reads that arrive after it describe the followed operation.
+  const [following, setFollowing] = useState<{ operation: JournalOperation; since: number; afterRead: number }>();
+  const [outcome, setOutcome] = useState<ReturnType<typeof followedOutcome>>();
 
   useEffect(() => {
     setChecked(undefined);
     setResult(undefined);
-    setReview(undefined);
-    setError(undefined);
+    dispatch({ type: "reset" });
+    setFollowing(undefined);
+    setOutcome(undefined);
   }, [connectionKey]);
 
   const pending = status.data?.pending ?? false;
+  // Every status read hashes the bundle's critical files: poll only while the journal can move, more
+  // slowly once it stopped moving, and only while the window is visible.
+  const [unchangedReads, setUnchangedReads] = useState<{ key: string; count: number }>();
+  const statusData = status.data;
+  const statusReads = useRef(0);
   useEffect(() => {
-    if (!busy && !pending) return;
-    const timer = setInterval(status.refetch, PROGRESS_POLL_MS);
-    return () => clearInterval(timer);
-  }, [busy, pending, status.refetch]);
+    if (!statusData) return;
+    statusReads.current += 1;
+    setUnchangedReads((previous) => countUnchangedReads(previous, journalProgressKey(statusData.journal)));
+  }, [statusData]);
+  const pollMs = progressPollInterval({
+    busy: busy !== undefined || following !== undefined,
+    pending,
+    recoveryError: !!statusData?.recovery_error,
+    unchangedReads: unchangedReads?.count ?? 0,
+  });
+  usePoll(status.refetch, pollMs ?? 0, { enabled: pollMs !== undefined, whileAway: true });
+
+  // The followed operation ended: report what the journal says.
+  useEffect(() => {
+    if (!following || !statusData || statusData.pending || statusReads.current <= following.afterRead) return;
+    setOutcome(followedOutcome(following.operation, following.since, statusData.journal));
+    setFollowing(undefined);
+  }, [following, statusData]);
 
   /** Runs one operation; `perform` gets a guard that is false once the connection changed. */
   const act = async (label: string, perform: (current: () => boolean) => Promise<void>) => {
     const key = connectionKey;
     const current = () => connection.current === key;
+    // A little before the call, so a journal the daemon starts right away still counts as this one.
+    const since = Date.now() - 5000;
     setBusy(label);
     setError(undefined);
+    setOutcome(undefined);
     try {
       await perform(current);
     } catch (caught) {
-      if (current()) {
-        const failure = toAidexError(caught);
-        const reason = (failure.data as { reason?: string } | undefined)?.reason;
-        setError(reason ? `${failure.message} (${reason.replace(/_/g, " ")})` : failure.message);
+      if (!current()) return;
+      if (caught instanceof StoppedWaiting) {
+        // AiDEX Core keeps working when its caller goes away: follow the journal, unless it shows
+        // nothing running (then the call failed, and its error says why).
+        const fresh = await call("update.status").catch(() => undefined);
+        if (!current()) return;
+        if (fresh?.pending) {
+          closeReview();
+          setFollowing({ operation: caught.operation, since, afterRead: statusReads.current });
+          return;
+        }
       }
+      const failure = toAidexError(caught instanceof StoppedWaiting ? caught.failure : caught);
+      const reason = (failure.data as { reason?: string } | undefined)?.reason;
+      setError(reason ? `${failure.message} (${reason.replace(/_/g, " ")})` : failure.message);
     } finally {
       if (current()) status.refetch();
       setBusy(undefined);
@@ -105,7 +178,11 @@ export function UpdatesPanel() {
           "Enter the absolute path of a package or release folder on this computer. URLs, relative paths, and network shares are not supported; copy a shared package to this computer first.",
         );
       }
-      const report = await call("update.check", { source: path, allow_downgrade: allowDowngrade, allow_unsigned: false });
+      const report = await callUpdate("update.check", {
+        source: path,
+        allow_downgrade: allowDowngrade,
+        allow_unsigned: false,
+      });
       if (!current()) return;
       setChecked(report);
       setResult(undefined);
@@ -116,18 +193,18 @@ export function UpdatesPanel() {
       const refusal = applySelectionReason(checked, status.data?.target, pending);
       if (refusal || !checked) throw new Error(refusal ?? "Check a signed package first.");
       const params = { source: checked.package, allow_downgrade: allowDowngrade, allow_unsigned: false };
-      const refreshed = await call("update.check", params);
+      const refreshed = await callUpdate("update.check", params);
       if (!current()) return;
       if (!sameCandidate(checked, refreshed)) {
         setChecked(refreshed);
-        setReview(undefined);
+        closeReview();
         throw new Error("The package changed since you reviewed it. Review the new check result before applying it.");
       }
-      const report = await call("update.apply", params);
+      const report = await runOperation("apply", () => callUpdate("update.apply", params));
       if (!current()) return;
       setResult(report);
       setChecked(undefined);
-      setReview(undefined);
+      closeReview();
     });
 
   const rollback = () =>
@@ -144,14 +221,14 @@ export function UpdatesPanel() {
         previous.dir !== reviewed.dir ||
         previous.manifest_sha256 !== reviewed.manifest_sha256
       ) {
-        setReview(undefined);
+        closeReview();
         throw new Error("The previous version or the update state changed. Review the rollback again.");
       }
-      const report = await call("update.rollback", { allow_unsigned: false });
+      const report = await runOperation("rollback", () => callUpdate("update.rollback", { allow_unsigned: false }));
       if (!current()) return;
       setResult(report);
       setChecked(undefined);
-      setReview(undefined);
+      closeReview();
     });
 
   const data = status.data;
@@ -177,6 +254,18 @@ export function UpdatesPanel() {
         </Notice>
       ) : null}
       {busy && review === undefined ? <Notice role="status">{busy}</Notice> : null}
+      {following ? (
+        <Notice role="status">
+          This page stopped waiting, but AiDEX Core is still{" "}
+          {following.operation === "apply" ? "applying the package" : "rolling back"}. The update status is re-read
+          until it finishes.
+        </Notice>
+      ) : null}
+      {outcome ? (
+        <Notice tone={outcome.tone} role={outcome.tone === "danger" ? "alert" : "status"}>
+          {outcome.text}
+        </Notice>
+      ) : null}
 
       <section>
         <SectionHeader title="Version" />
@@ -199,10 +288,17 @@ export function UpdatesPanel() {
               </Notice>
             ) : null}
             {data.pending ? (
-              <Notice tone="warning">
-                An update is unfinished ({data.journal?.state.replace(/_/g, " ") ?? "unknown step"}). AiDEX Core must recover
-                it before another package is applied.
-              </Notice>
+              busy !== undefined || following ? (
+                <Text tone="secondary">Current step: {data.journal?.state.replace(/_/g, " ") ?? "starting"}.</Text>
+              ) : (
+                <Notice tone="warning">
+                  An update is unfinished ({data.journal?.state.replace(/_/g, " ") ?? "unknown step"}).{" "}
+                  {data.recovery_error
+                    ? "AiDEX Core must recover it when it starts again"
+                    : "It may still be running, for example from the command line; otherwise AiDEX Core must recover it"}{" "}
+                  before another package is applied.
+                </Notice>
+              )
             ) : null}
             {data.restart_required || result?.restart_required ? (
               <Notice tone="warning">
@@ -310,7 +406,12 @@ export function UpdatesPanel() {
                 </Text>
                 {applyRefusal ? <Notice>{applyRefusal}</Notice> : null}
                 <Stack direction="row" justify="end">
-                  <Button variant="primary" size="md" disabled={!idle || !!applyRefusal} onClick={() => setReview("apply")}>
+                  <Button
+                    variant="primary"
+                    size="md"
+                    disabled={!idle || !!applyRefusal}
+                    onClick={() => dispatch({ type: "open", review: "apply" })}
+                  >
                     Apply…
                   </Button>
                 </Stack>
@@ -328,7 +429,7 @@ export function UpdatesPanel() {
               variant="outline"
               size="md"
               disabled={!idle || !data?.previous || pending}
-              onClick={() => setReview("rollback")}
+              onClick={() => dispatch({ type: "open", review: "rollback" })}
             >
               Roll back…
             </Button>
@@ -364,7 +465,7 @@ export function UpdatesPanel() {
         title={review === "apply" ? "Apply this signed package?" : "Roll back to the previous version?"}
         description={`Drive: ${driveRoot ?? "unknown"}`}
         onClose={() => {
-          if (idle) setReview(undefined);
+          if (idle) closeReview();
         }}
       >
         <Stack gap={4}>
@@ -401,7 +502,7 @@ export function UpdatesPanel() {
             </>
           )}
           <Stack direction="row" gap={2} justify="end">
-            <Button variant="ghost" disabled={!idle} onClick={() => setReview(undefined)}>
+            <Button variant="ghost" disabled={!idle} onClick={closeReview}>
               Cancel
             </Button>
             {review === "apply" ? (
