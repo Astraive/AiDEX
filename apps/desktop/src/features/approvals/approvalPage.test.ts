@@ -34,7 +34,7 @@ const middle = "approval_01J9Z0000100000000000000AA";
 const newer = "approval_01J9Z0000200000000000000AA";
 
 test("each page lists its requests newest first, across the conversations it holds", () => {
-  // Conversation B (newer) first, its requests in request order; then conversation A.
+  // Shown newest first whatever order the page arrives in.
   const view = approvalPageView(page([middle, newer, older], 0, 3, null));
   assert.deepEqual(
     view.approvals.map((item) => item.id),
@@ -43,7 +43,7 @@ test("each page lists its requests newest first, across the conversations it hol
   assert.deepEqual(newestApprovalsFirst([]), []);
 });
 
-test("paging starts at offset 0, the newest conversations, and moves forward", () => {
+test("paging starts at offset 0, the oldest requests, and moves forward", () => {
   assert.deepEqual(firstApprovalRange, { offset: 0, limit: APPROVAL_PAGE_SIZE });
   const ids = Array.from({ length: 20 }, (_, index) => `approval_${String(index).padStart(26, "0")}`);
 

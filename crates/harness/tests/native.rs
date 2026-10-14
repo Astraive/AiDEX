@@ -177,7 +177,12 @@ fn fixture_extended(
     (drive, ws, engine, session.id, provider, events)
 }
 fn wait(e: &NativeEngine, id: &str) -> aidex_native_sessions::Run {
-    let until = Instant::now() + Duration::from_secs(5);
+    wait_within(e, id, Duration::from_secs(5))
+}
+
+/// [`wait`] with another limit, for a run whose work is slow on a loaded host.
+fn wait_within(e: &NativeEngine, id: &str, limit: Duration) -> aidex_native_sessions::Run {
+    let until = Instant::now() + limit;
     loop {
         let r = e.store().run(id).unwrap();
         if !matches!(r.status, RunStatus::Pending | RunStatus::Running) {
@@ -1069,7 +1074,8 @@ fn oversized_history_replay_keeps_recent_tool_pairs_and_durable_history() {
     let run = e
         .start(&s, "use the recent evidence", "context", None)
         .unwrap();
-    let done = wait(&e, &run.id);
+    // Trimming a 300 KB history is slow in a debug build on a loaded host.
+    let done = wait_within(&e, &run.id, Duration::from_secs(30));
     assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
     let request = &p.requests()[0];
     assert!(

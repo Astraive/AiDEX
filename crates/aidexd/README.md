@@ -146,14 +146,19 @@ handlers without sockets.
   `vault.secret.set|delete` refuse the records AiDEX owns
   (`methods::vault::managed_secret`) with `policy_denied`/`managed_secret`, and
   `vault.secret.list` names them in `managed`. A keep-alive thread
-  (`services/keep_alive.rs`) counts agent work as vault use: while
-  `NativeEngine::has_active()`, a runtime process runs, or the session store's
-  plaintext run index lists a run of this vault session waiting for an approval
-  (native or external), it calls `VaultService::keep_alive` at least four times
-  per idle period (at most once a second), so the idle auto-lock follows the end
-  of the work. It never reads the vault file. The lock cleanup records the runs
-  still listed as active when a session ends; one the next unlock could not
-  settle keeps that status and so never holds the vault open. The one
+  (`services/keep_alive.rs`) counts executing agent work as vault use: while
+  `NativeEngine::has_executing()` (a run's thread works on it, native or
+  external), it calls `VaultService::keep_alive` at least four times per idle
+  period (at most once a second), so the idle auto-lock follows the end of the
+  work. It reads in-memory engine state only, never the vault file. Work that
+  waits for a person does not count: a run waiting for an approval (native, or
+  an external runtime paused with its vendor process) and a pending official
+  login. When the user walks away the idle auto-lock happens as usual, the lock
+  cleanup cancels that work, and the next unlock settles the waiting run as
+  `interrupted`, which `run.resume` continues as before. A native parent
+  waiting for its active children still executes, so a child waiting for an
+  approval keeps the vault awake through it until that wait ends (at most ten
+  minutes). The one
   exception: `vault.unlock` while a session is open whose `vault.json` changed on
   disk replaces that session without a notice or cleanup, because the vault never
   locks. Errors that dropped the session carry `data.session_dropped: true`.

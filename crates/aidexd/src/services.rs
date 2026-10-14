@@ -212,15 +212,13 @@ impl Services {
             &models,
         )
         .map_err(|error| error.to_string());
-        // Runs the index lists as active now are left over from an earlier
-        // daemon: the vault is locked until the first unlock settles them.
-        let activity = keep_alive::RunActivity::new(native.store());
         // Every end of the vault session (lock, idle auto-lock, a dropped session)
         // cancels native runs, aborts uploads, ends runtime logins and vendor
         // processes, and records `vault.locked`.
-        vault_lock::clean_up_on_lock(&vault, &native, runtime.as_ref().ok(), &activity, &events);
-        // Active runs count as vault use, so the idle auto-lock waits for them.
-        keep_alive::spawn(&vault, &native, runtime.as_ref().ok(), &activity, &shutdown);
+        vault_lock::clean_up_on_lock(&vault, &native, runtime.as_ref().ok(), &events);
+        // Executing runs count as vault use, so the idle auto-lock waits for
+        // them; a run waiting for an approval does not hold it off.
+        keep_alive::spawn(&vault, &native, &shutdown);
         let inference = inference::open_inference(&paths, &models)?;
         let updates = open_updates(&paths, &events, updater);
         Ok(Self {

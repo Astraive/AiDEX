@@ -81,11 +81,12 @@ pub enum EventKind {
     },
     #[serde(rename = "agent.message")]
     AgentMessage { role: MessageRole, content: String },
-    /// Live-only incremental output; never stored or replayed.
+    /// Live-only incremental output of a conversation's root runs (a child
+    /// run's output is only in `agent.run_delta`); never stored or replayed.
     #[serde(rename = "agent.delta")]
     AgentDelta { text: String },
     /// Live-only incremental output of one run (`agent_id` is the run id),
-    /// child runs included; never stored or replayed.
+    /// for every run, root and child; never stored or replayed.
     #[serde(rename = "agent.run_delta")]
     AgentRunDelta { agent_id: EntityId, text: String },
     #[serde(rename = "agent.subagent.created")]

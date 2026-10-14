@@ -72,13 +72,14 @@ export type EventEnvelope = {
 };
 
 /**
- * `data` of the ephemeral `agent.delta` event: live output text in the event's conversation.
+ * `data` of the ephemeral `agent.delta` event: live output text of the event conversation's root
+ * runs only (a child run's output arrives only as `agent.run_delta`, which carries every run).
  * Ephemeral events are never stored or replayed and carry the latest durable cursor, so never
  * acknowledge or deduplicate by their cursor; the saved transcript is authoritative.
  */
 export type AgentDelta = { text: string };
 
-/** `data` of the ephemeral `agent.run_delta` event: live output of run `agent_id`, root or child. */
+/** `data` of the ephemeral `agent.run_delta` event: live output of run `agent_id`, for every run, root or child. */
 export type AgentRunDelta = { agent_id: string; text: string };
 
 /** Result of `events.replay`, ascending by cursor. */

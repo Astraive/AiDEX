@@ -242,7 +242,7 @@ impl VaultService {
 
     /// Count now as use of the unlocked session, as a secret operation does: the
     /// idle auto-lock starts its period again. For work that needs the vault later
-    /// without using it now (the daemon calls this while agent runs are active).
+    /// without using it now (the daemon calls this while agent runs execute).
     /// Returns whether the vault is unlocked. It never unlocks and never reads the
     /// vault file, and a session already past its idle period still ends here.
     pub fn keep_alive(&self) -> bool {

@@ -2,7 +2,8 @@
 //! emergency stop, going offline, the vault keep-alive, and loading a runtime
 //! before a run continues. Account peers are the adapters' Python fixtures
 //! (`AIDEX_TEST_PYTHON`, as in CI) under the runtime sandbox; runs that must
-//! stay active use an in-process runtime that blocks until it is cancelled.
+//! stay active use an in-process runtime that blocks until it is cancelled,
+//! and runs that wait for an approval one that pauses for it.
 
 use super::*;
 use crate::{
@@ -13,8 +14,10 @@ use aidex_core::CancelToken;
 use aidex_events::{Cursor, EventFilter};
 use aidex_native_sessions::{
     Mode, PermissionMode, RUNTIME_DEFAULT_MODEL, RUNTIME_PROVIDER_ID, RunStatus, RuntimeControl,
-    RuntimeDescriptor, RuntimeEvent, RuntimeExecutor, RuntimeRequest, RuntimeResponse,
+    RuntimeDescriptor, RuntimeEvent, RuntimeExecutor, RuntimeOperation, RuntimeRequest,
+    RuntimeResponse, RuntimeStatus,
 };
+use aidex_providers::ChatMessage;
 use aidex_vault::KdfParams;
 use serde_json::Value;
 use std::{
@@ -236,6 +239,17 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 struct Blocking {
     launches: AtomicUsize,
     cancelled: AtomicUsize,
+}
+
+impl Blocking {
+    /// Assert that the runtime saw its run cancelled once. The run's status
+    /// can settle before the runtime's next check, so this waits for it.
+    fn assert_cancelled_once(&self) {
+        wait_until("the runtime sees the cancel", || {
+            self.cancelled.load(Ordering::SeqCst) > 0
+        });
+        assert_eq!(self.cancelled.load(Ordering::SeqCst), 1);
+    }
 }
 
 impl RuntimeExecutor for Blocking {
@@ -590,7 +604,7 @@ fn emergency_stop_ends_runtime_work_and_holds_launches_until_resume() {
     let report = f.ok("emergency.stop", json!({}));
     assert_eq!(report["vault_locked"], false);
     assert_eq!(f.wait_inactive(&run), RunStatus::Cancelled);
-    assert_eq!(runtime.cancelled.load(Ordering::SeqCst), 1);
+    runtime.assert_cancelled_once();
     assert!(!f.manager().has_pending_logins());
     assert!(f.manager().process_registry().is_empty());
     assert_eq!(
@@ -679,24 +693,25 @@ fn going_offline_cancels_external_runs_but_not_local_ones() {
 
     f.ok("network.offline", json!({"enabled": true}));
     assert_eq!(f.wait_inactive(&external_run), RunStatus::Cancelled);
-    assert_eq!(runtime.cancelled.load(Ordering::SeqCst), 1);
+    runtime.assert_cancelled_once();
     assert!(f.run_status(&local_run).active(), "a local run keeps going");
     assert_eq!(f.wait_inactive(&local_run), RunStatus::Completed);
 }
 
 #[test]
-fn the_keep_alive_holds_the_vault_open_during_a_run_and_the_idle_lock_follows_it() {
+fn an_executing_run_holds_the_vault_open_and_the_idle_lock_follows_its_end() {
     let f = fixture();
     f.services
         .vault()
         .set_idle_timeout(Some(Duration::from_secs(2)));
     let (_runtime, run) = blocking_run(&f);
+    assert!(f.services.native().has_executing());
     // Nothing but the keep-alive uses the vault while the runtime works.
     std::thread::sleep(Duration::from_millis(4500));
     assert_eq!(
         f.services.vault().status().state,
         VaultState::Unlocked,
-        "an active run is vault use"
+        "an executing run is vault use"
     );
     assert!(f.run_status(&run).active());
     f.ok("run.cancel", json!({"id": run}));
@@ -706,8 +721,20 @@ fn the_keep_alive_holds_the_vault_open_during_a_run_and_the_idle_lock_follows_it
     });
 }
 
+/// The vault's idle period is `idle`, and nothing uses the vault: wait until
+/// the idle auto-lock happens, then unlock it again (which settles the runs
+/// the lock stopped) with no idle period left to race the rest of the test.
+fn idle_lock_and_unlock(f: &Fixture, idle: Duration) {
+    f.services.vault().set_idle_timeout(Some(idle));
+    wait_until("the idle lock", || {
+        f.services.vault().status().state == VaultState::Locked
+    });
+    f.services.vault().set_idle_timeout(None);
+    f.ok("vault.unlock", json!({"passphrase": PASSPHRASE}));
+}
+
 #[test]
-fn a_native_run_waiting_for_an_approval_holds_the_vault_open_until_it_ends() {
+fn a_native_run_waiting_for_an_approval_lets_the_idle_lock_happen_and_stays_resumable() {
     use aidex_providers::{
         FakeProvider, FakeScript, FakeTurn, Locality, ModelDescriptor, ModelId, ModelRef,
         ProviderId, ToolCallSupport,
@@ -726,10 +753,14 @@ fn a_native_run_waiting_for_an_approval_holds_the_vault_open_until_it_ends() {
                 )
                 .with_tool_calls(ToolCallSupport::Native),
             )
-            .with_script(FakeScript::new().then(FakeTurn::tool_call(
-                "fs_write",
-                r#"{"path":"effect.txt","content":"new"}"#,
-            ))),
+            .with_script(
+                FakeScript::new()
+                    .then(FakeTurn::tool_call(
+                        "fs_write",
+                        r#"{"path":"effect.txt","content":"new"}"#,
+                    ))
+                    .then(FakeTurn::text("resumed")),
+            ),
     );
     f.services
         .models()
@@ -750,57 +781,119 @@ fn a_native_run_waiting_for_an_approval_holds_the_vault_open_until_it_ends() {
     wait_until("the run waits for its approval", || {
         f.run_status(&run) == RunStatus::WaitingApproval
     });
-    // Only the run index tells: the waiting run has no thread.
-    wait_until("the run thread ends", || !f.services.native().has_active());
-    f.services
-        .vault()
-        .set_idle_timeout(Some(Duration::from_secs(1)));
-    std::thread::sleep(Duration::from_millis(2500));
+    assert!(!f.services.native().has_executing());
+    // A person who walks away from the approval: the vault locks as usual,
+    // and its cleanup stops the run.
+    idle_lock_and_unlock(&f, Duration::from_secs(1));
+    assert_eq!(f.run_status(&run), RunStatus::Interrupted);
+    let approvals = f.ok("approval.list", json!({"run_id": run}));
     assert_eq!(
-        f.services.vault().status().state,
-        VaultState::Unlocked,
-        "a run waiting for an approval is vault use"
+        approvals["approvals"][0]["status"], "expired",
+        "{approvals}"
     );
-    assert_eq!(f.run_status(&run), RunStatus::WaitingApproval);
-    f.ok("run.cancel", json!({"id": run}));
-    assert_eq!(f.wait_inactive(&run), RunStatus::Cancelled);
-    wait_until("the idle lock", || {
-        f.services.vault().status().state == VaultState::Locked
-    });
+    // An explicit resume continues it, without the unapproved write.
+    f.ok("run.resume", json!({"id": run}));
+    assert_eq!(f.wait_inactive(&run), RunStatus::Completed);
     assert!(!f._workspace.path().join("effect.txt").exists());
 }
 
+/// The in-process runtime that pauses for an approval.
+const APPROVING: &str = "approving-fixture";
+
+/// An external runtime that pauses for one approval, as a vendor process
+/// does, and completes once its run is resumed.
+#[derive(Default)]
+struct Approving {
+    resumed: AtomicUsize,
+}
+
+impl RuntimeExecutor for Approving {
+    fn descriptor(&self) -> RuntimeDescriptor {
+        RuntimeDescriptor {
+            id: APPROVING.into(),
+            name: "Approving fixture".into(),
+            modes: vec![Mode::Agent],
+            permission_modes: vec![
+                PermissionMode::Supervised,
+                PermissionMode::AutoAcceptEdits,
+                PermissionMode::Auto,
+                PermissionMode::FullAccess,
+            ],
+            supports_resume: true,
+            supports_approvals: true,
+        }
+    }
+
+    fn validate(&self, _: &RuntimeRequest) -> Result<(), aidex_adapters::RuntimeError> {
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        request: &RuntimeRequest,
+        on: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+        _: &CancelToken,
+    ) -> Result<RuntimeResponse, aidex_adapters::RuntimeError> {
+        let reference = resumable_reference(APPROVING);
+        if request.operation == RuntimeOperation::Resume {
+            self.resumed.fetch_add(1, Ordering::SeqCst);
+            return Ok(RuntimeResponse {
+                status: RuntimeStatus::Completed,
+                runtime_ref: Some(reference),
+                message: Some(ChatMessage::assistant("resumed")),
+            });
+        }
+        let control = on(&RuntimeEvent::ApprovalRequest {
+            request_id: "request-1".into(),
+            tool_name: "shell".into(),
+            arguments: json!({"command": "echo fixture"}),
+            summary: "run a command".into(),
+            runtime_ref: reference.clone(),
+        });
+        if control != RuntimeControl::Pause {
+            return Err(aidex_adapters::RuntimeError {
+                code: "not_paused".into(),
+                message: "Fixture runtime was not paused".into(),
+            });
+        }
+        Ok(RuntimeResponse {
+            status: RuntimeStatus::WaitingApproval,
+            runtime_ref: Some(reference),
+            message: None,
+        })
+    }
+}
+
 #[test]
-fn a_waiting_run_left_from_an_earlier_vault_session_does_not_hold_the_vault_open() {
+fn an_external_run_paused_for_an_approval_lets_the_idle_lock_happen_and_stays_resumable() {
     let f = fixture();
-    let session = f.ok(
-        "conversation.create",
-        json!({"provider_id": "fixture", "model_id": "small", "mode": "agent", "workspace_id": f.workspace_id}),
-    )["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let run = f.insert_run(&session, "waiting_approval", None);
-    let vault = f.services.vault();
-    vault.set_idle_timeout(Some(Duration::from_secs(1)));
-    std::thread::sleep(Duration::from_millis(2500));
-    assert_eq!(
-        vault.status().state,
-        VaultState::Unlocked,
-        "a run of this session waiting for an approval is vault use"
-    );
-    // The session ends. Unlocking outside `vault.unlock` settles nothing, as
-    // when settling the run failed: it is still listed as waiting.
-    vault.set_idle_timeout(None);
-    vault.lock();
-    vault
-        .unlock(&aidex_vault::SecretString::from(PASSPHRASE.to_owned()))
+    let runtime = Arc::new(Approving::default());
+    f.services
+        .native()
+        .register_runtime(APPROVING, runtime.clone())
         .unwrap();
-    assert_eq!(f.run_status(&run), RunStatus::WaitingApproval);
-    vault.set_idle_timeout(Some(Duration::from_secs(1)));
-    wait_until("the idle lock", || {
-        vault.status().state == VaultState::Locked
+    let session = f.runtime_session(APPROVING);
+    let run = f.send(&session, "approving-1");
+    wait_until("the runtime pauses for its approval", || {
+        f.run_status(&run) == RunStatus::WaitingApproval
     });
+    // The paused runtime is still live (a vendor process would be), but it
+    // is not executing.
+    assert!(f.services.native().has_active());
+    assert!(!f.services.native().has_executing());
+    idle_lock_and_unlock(&f, Duration::from_secs(1));
+    assert!(!f.services.native().has_active());
+    assert_eq!(f.run_status(&run), RunStatus::Interrupted);
+    let approvals = f.ok("approval.list", json!({"run_id": run}));
+    assert_eq!(
+        approvals["approvals"][0]["status"], "expired",
+        "{approvals}"
+    );
+    assert_eq!(f.ok("run.get", json!({"id": run}))["has_runtime_ref"], true);
+    // An explicit resume continues the runtime's own thread.
+    f.ok("run.resume", json!({"id": run}));
+    assert_eq!(f.wait_inactive(&run), RunStatus::Completed);
+    assert_eq!(runtime.resumed.load(Ordering::SeqCst), 1);
 }
 
 /// A Codex runtime whose official CLI is the adapters' account peer behind a

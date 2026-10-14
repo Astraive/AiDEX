@@ -487,13 +487,17 @@ fn has_active_is_true_only_while_a_run_is_live() {
         false,
     );
     assert!(!f.engine.has_active());
+    assert!(!f.engine.has_executing());
     let first = f.engine.start(&f.session, "hi", "first", None).unwrap();
     assert!(f.engine.has_active());
+    assert!(f.engine.has_executing());
     assert_eq!(f.settled(&first.id).status, RunStatus::Completed);
     f.idle();
-    // A native run waiting for approval has no thread.
+    // A native run waiting for approval has no thread, and is not executing
+    // from the moment its pause is saved.
     let second = f.engine.start(&f.session, "write", "second", None).unwrap();
     assert_eq!(f.settled(&second.id).status, RunStatus::WaitingApproval);
+    assert!(!f.engine.has_executing());
     f.idle();
     f.engine.cancel(&second.id).unwrap();
     assert!(!f.engine.has_active());
@@ -504,8 +508,9 @@ fn cancelling_a_paused_runtime_refuses_its_approval() {
     let f = fixture(vec![], true);
     let runtime = f.pausing_runtime();
     let (run, approval) = f.paused("write", None);
-    // Its process may still hold credentials.
+    // Its process may still hold credentials, but it is not executing.
     assert!(f.engine.has_active());
+    assert!(!f.engine.has_executing());
     assert_eq!(
         f.engine.cancel(&run.id).unwrap().status,
         RunStatus::Cancelled

@@ -1040,6 +1040,15 @@ impl NativeEngine {
     pub fn has_active(&self) -> bool {
         !relock(&self.live).is_empty()
     }
+    /// Whether any run is executing: its thread works on it (an external
+    /// run's thread drives its vendor process). A run waiting for an approval
+    /// does not count, native or external, even while its paused runtime
+    /// process keeps it in [`Self::has_active`]. A native parent waiting for
+    /// its active children still executes, so it counts until that wait ends
+    /// (at most ten minutes), even while a child waits for an approval.
+    pub fn has_executing(&self) -> bool {
+        relock(&self.live).values().any(|run| run.executing)
+    }
     /// Settle runs whose final state could not be saved while the vault was
     /// locked. Every active run with no working thread, with a cancelled one,
     /// or waiting on a native approval whose plan is gone (or was planned by

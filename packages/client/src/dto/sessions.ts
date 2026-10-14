@@ -110,6 +110,10 @@ export type Run = {
   effective_max_tokens: number | null;
   estimated_input_tokens: number | null;
   model_used: string | null;
+  /**
+   * Whether the run saved an external runtime reference `run.resume` can continue (bound to a
+   * native branch and snapshot); never the reference itself.
+   */
   has_runtime_ref: boolean;
   transcript_omitted: boolean;
   pending_call_count: number;
@@ -243,9 +247,9 @@ export type CheckpointList = PageInfo & {
 /** Params of `approval.list`: one run's approvals or all of them, optionally of one status. */
 export type ApprovalListParams = PageParams & { run_id?: string; status?: ApprovalStatus };
 /**
- * Result of `approval.list`. Approvals come grouped by conversation (in `conversation.list` order),
- * each conversation's in request order. Without `offset` the last page is returned, and
- * `truncated` is also true when items exist before `offset`.
+ * Result of `approval.list`: approvals oldest first by creation time, across conversations (ties
+ * keep conversation and request order). Without `offset` the last page, holding the newest
+ * approvals, is returned, and `truncated` is also true when items exist before `offset`.
  */
 export type ApprovalList = PageInfo & {
   approvals: Approval[];

@@ -36,8 +36,9 @@ type Props = {
 
 /**
  * The broker approval center: one status per view, filtered by the daemon (`approval.list` with
- * `status`). Pages start at offset 0, the newest conversations, and each page lists its requests newest
- * first (`approvalPage.ts`). Decisions go to `approval.respond` with the request's exact id and
+ * `status`). The daemon orders requests oldest first by creation time across conversations; pages
+ * start at offset 0, the oldest requests, and each page lists its requests newest first
+ * (`approvalPage.ts`). Decisions go to `approval.respond` with the request's exact id and
  * fingerprint and a fresh command id; nothing is decided or remembered locally.
  */
 export function LiveApprovalsPanel({ version, onChanged }: Props) {
@@ -153,8 +154,8 @@ export function LiveApprovalsPanel({ version, onChanged }: Props) {
               </Stack>
               {page.previous || page.next ? (
                 <Text tone="muted">
-                  Requests are grouped by conversation, newest conversation first; each page lists its requests newest
-                  first.
+                  Pages run from the oldest requests to the newest, across conversations; each page lists its
+                  requests newest first.
                 </Text>
               ) : null}
               {truncated ? (

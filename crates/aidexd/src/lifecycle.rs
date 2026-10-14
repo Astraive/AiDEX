@@ -32,8 +32,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How long `launch` waits for a spawned daemon to answer `daemon.status`.
-pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long `launch` waits for a spawned daemon to answer `daemon.status`:
+/// generous, for a slow drive or a loaded host. A daemon that exits during
+/// startup is reported at once.
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long `stop` waits for the daemon to remove its endpoint.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);

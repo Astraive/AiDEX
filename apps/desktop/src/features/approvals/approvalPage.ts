@@ -1,7 +1,7 @@
-// Paging for the approval center. Without a `run_id`, `approval.list` lists approvals grouped by
-// conversation, newest conversation first (`conversation.list` order), and each conversation's in request
-// order. So the panel pages forward from offset 0, which holds the newest conversations, and orders each
-// page by approval id: ids are `approval_<ULID>`, which sort by creation time.
+// Paging for the approval center. `approval.list` lists approvals oldest first by creation time, across
+// conversations (ties keep conversation and request order); without an `offset` it returns the last page,
+// the newest. The panel pages forward from offset 0, which holds the oldest requests, and orders each page
+// newest first by approval id: ids are `approval_<ULID>`, which sort by creation time.
 import type { Approval, ApprovalList } from "@aidex/client/dto/sessions";
 
 /** Approvals per page. */
@@ -10,7 +10,7 @@ export const APPROVAL_PAGE_SIZE = 20;
 /** The `offset` and `limit` sent to `approval.list`. */
 export type ApprovalRange = { offset: number; limit: number };
 
-/** The first page: offset 0, the newest conversations. */
+/** The first page: offset 0, the oldest requests. */
 export const firstApprovalRange: ApprovalRange = { offset: 0, limit: APPROVAL_PAGE_SIZE };
 
 export type ApprovalPageView = {

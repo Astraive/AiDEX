@@ -12,16 +12,15 @@
 //! vendor process still running is terminated (the runtime gate, which needs an
 //! unlocked vault, already refuses new launches). MCP servers are stopped by
 //! their own lock observer, with a polling watchdog as a backstop
-//! (`services/mcp.rs`). The runs still listed as active once the native runs
-//! were cancelled are recorded as left over from this session, so none of them
-//! holds the next session open (`keep_alive`). Further cleanups that must
-//! follow the vault belong here.
+//! (`services/mcp.rs`). Only executing runs hold the idle auto-lock off
+//! (`keep_alive`), so this cleanup is also what stops a run left waiting for
+//! an approval when the user walks away. Further cleanups that must follow the
+//! vault belong here.
 //!
 //! One replacement is not reported: `vault.unlock` while a session is open whose
 //! `vault.json` changed on disk swaps in a session for the new header, because
 //! the vault never locks in between. Nothing here runs then.
 
-use super::keep_alive::RunActivity;
 use aidex_adapters::RuntimeManager;
 use aidex_events::{EventKind, EventLog, EventScope};
 use aidex_harness::NativeEngine;
@@ -39,18 +38,15 @@ pub fn clean_up_on_lock(
     vault: &VaultService,
     native: &Arc<NativeEngine>,
     runtime: Option<&Arc<RuntimeManager>>,
-    activity: &Arc<RunActivity>,
     events: &EventLog,
 ) {
     let native = Arc::downgrade(native);
     let runtime = runtime.map(Arc::downgrade);
-    let activity = Arc::clone(activity);
     let events = events.clone();
     vault.add_lock_observer(move |notice| {
         if let Some(native) = native.upgrade() {
             native.cancel_all();
             native.store().abort_all_uploads();
-            activity.session_ended(native.store());
         }
         if let Some(runtime) = runtime.as_ref().and_then(|runtime| runtime.upgrade()) {
             // Best effort: a login whose process cannot be confirmed ended is

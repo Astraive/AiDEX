@@ -11,7 +11,7 @@ DPAPI credential (via PowerShell), so another Windows account cannot use it.
 
 `aidexd start` / `aidex daemon start` call `lifecycle::launch`, which first runs
 stale-endpoint recovery and then spawns `aidexd run --drive <root>` detached and
-waits (up to 15 s) for an authenticated `daemon.status`. Unix spawns it in a new
+waits (up to 30 s) for an authenticated `daemon.status`. Unix spawns it in a new
 process group. On Windows the daemon is started through PowerShell
 `Start-Process` because `std::process::Command` always enables handle
 inheritance, which would leak a caller's stdout pipe into the daemon and keep
