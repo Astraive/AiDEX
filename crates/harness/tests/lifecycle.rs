@@ -189,15 +189,22 @@ fn fixture(turns: Vec<FakeTurn>, runtime: bool) -> Fixture {
 }
 
 impl Fixture {
-    /// The run's state once it stops pending or running.
+    /// The run's state once it stops pending or running. A read refused
+    /// because a hook is locking and unlocking the vault on the run's thread
+    /// is tried again until the deadline; any other error fails at once.
     fn settled(&self, id: &str) -> Run {
         let until = Instant::now() + Duration::from_secs(5);
         loop {
-            let r = self.engine.store().run(id).unwrap();
-            if !matches!(r.status, RunStatus::Pending | RunStatus::Running) {
-                return r;
-            }
-            assert!(Instant::now() < until, "run {id} never settled");
+            let last = match self.engine.store().run(id) {
+                Ok(r) if !matches!(r.status, RunStatus::Pending | RunStatus::Running) => return r,
+                Ok(r) => format!("{:?}", r.status),
+                Err(error) if locked_out(&error) => error,
+                Err(error) => panic!("run {id} could not be read: {error}"),
+            };
+            assert!(
+                Instant::now() < until,
+                "run {id} never settled (last read: {last})"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -270,6 +277,14 @@ impl Fixture {
             })
             .count()
     }
+}
+
+/// Whether a store read was refused only because the vault is locked, or was
+/// locked and unlocked again while the read held a key handle: what a hook
+/// that locks and unlocks the vault on a run's thread leaves a concurrent
+/// reader to see until the unlock.
+fn locked_out(error: &str) -> bool {
+    error == "the vault is locked" || error.starts_with("secret handle denied")
 }
 
 fn write_call() -> FakeTurn {
