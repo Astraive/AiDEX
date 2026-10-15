@@ -1843,6 +1843,7 @@ fn effect_free_planning_error_reaches_model_for_repair() {
     assert_eq!(count(&events, "tool.started"), 0);
 }
 
+#[cfg(windows)]
 #[test]
 fn shell_runs_publish_session_process_events_without_the_command_line() {
     let (_drive, _ws, e, s, _p, events) = fixture(
@@ -1892,6 +1893,7 @@ fn shell_runs_publish_session_process_events_without_the_command_line() {
     );
 }
 
+#[cfg(windows)]
 /// Settle a run that may start a real process (slower than the fake model).
 fn wait_long(e: &NativeEngine, id: &str) -> aidex_native_sessions::Run {
     let until = Instant::now() + Duration::from_secs(30);
@@ -1905,6 +1907,7 @@ fn wait_long(e: &NativeEngine, id: &str) -> aidex_native_sessions::Run {
     }
 }
 
+#[cfg(windows)]
 #[test]
 fn public_events_never_contain_tool_arguments_or_results() {
     let (_drive, ws, e, s, _p, events) = fixture(
