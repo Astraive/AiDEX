@@ -5,6 +5,10 @@ use aidex_sandbox::ManagedProcess;
 use serde_json::Value;
 use std::{collections::VecDeque, thread, time::Duration};
 pub(crate) const MAX_FRAME: usize = 1024 * 1024;
+/// Protocol output one launch may produce. The process capture buffer gets
+/// the same size: output the reader has not taken yet (a vendor replaying a
+/// long history while the reader parses) must not be dropped as truncated.
+pub(crate) const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 pub(crate) struct Transport {
     pub process: std::sync::Arc<ManagedProcess>,
     pending: Vec<u8>,
@@ -78,7 +82,7 @@ impl Transport {
         self.stderr_truncated |= kept < output.stderr.bytes.len();
         drop(zeroize::Zeroizing::new(output.stderr.bytes));
         self.total = self.total.saturating_add(output.stdout.bytes.len() as u64);
-        if output.stdout.truncated || self.total > 16 * 1024 * 1024 {
+        if output.stdout.truncated || self.total > MAX_OUTPUT as u64 {
             self.stop();
             return Err(error(
                 "output_limit",

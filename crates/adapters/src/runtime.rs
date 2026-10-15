@@ -688,7 +688,7 @@ impl ExternalRuntime {
             .with_network(NetworkMode::Normal)
             .with_limits(ResourceLimits {
                 wall_timeout: Some(Duration::from_secs(300)),
-                max_output_bytes: crate::transport::MAX_FRAME,
+                max_output_bytes: crate::transport::MAX_OUTPUT,
                 ..Default::default()
             });
         let mut args = self.config.argv.clone();
