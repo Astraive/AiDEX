@@ -7,7 +7,88 @@ use aidex_drive::DrivePaths;
 use aidex_providers::OfflineMode;
 use aidex_sandbox::Sandbox;
 use aidex_vault::{VaultService, VaultState};
-use std::sync::{Arc, Weak};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc, Mutex, PoisonError, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+/// No full load of the runtimes has happened yet.
+const NEVER_LOADED: u64 = u64::MAX;
+
+/// What the daemon keeps about the external runtimes it loaded into the native
+/// engine: the runtime manager's configuration generation
+/// (`RuntimeManager::generation`) at the last full load, so a change the
+/// engine has not seen yet (a login that connected from its worker thread
+/// while the load was refused) is noticed before the next turn; and the
+/// runtimes whose managed account is being changed (an import or a sign-out
+/// while the official CLI runs), which stay out of the engine until the change
+/// ended. In memory only.
+#[derive(Debug)]
+pub(crate) struct RuntimeSync {
+    loaded: AtomicU64,
+    changing: Mutex<BTreeSet<String>>,
+}
+
+impl Default for RuntimeSync {
+    fn default() -> Self {
+        Self {
+            loaded: AtomicU64::new(NEVER_LOADED),
+            changing: Mutex::new(BTreeSet::new()),
+        }
+    }
+}
+
+impl RuntimeSync {
+    /// The manager generation the engine's runtimes were last fully loaded
+    /// from, if they ever were.
+    pub(crate) fn loaded(&self) -> Option<u64> {
+        Some(self.loaded.load(Ordering::SeqCst)).filter(|generation| *generation != NEVER_LOADED)
+    }
+
+    pub(crate) fn set_loaded(&self, generation: u64) {
+        self.loaded.store(generation, Ordering::SeqCst);
+    }
+
+    fn changing_ids(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.changing.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Mark the accounts of runtimes `ids` as being changed, all or none,
+    /// until the returned guard is dropped (also by a panic); `None` (and
+    /// nothing marked) when one of them already is.
+    pub(crate) fn begin_change(&self, ids: BTreeSet<String>) -> Option<AccountChange<'_>> {
+        let mut changing = self.changing_ids();
+        if ids.iter().any(|id| changing.contains(id)) {
+            return None;
+        }
+        changing.extend(ids.iter().cloned());
+        Some(AccountChange { sync: self, ids })
+    }
+
+    /// Whether runtime `id`'s account is being changed now.
+    pub(crate) fn changing(&self, id: &str) -> bool {
+        self.changing_ids().contains(id)
+    }
+}
+
+/// Runtimes whose account is being changed ([`RuntimeSync::begin_change`]),
+/// until this is dropped.
+pub(crate) struct AccountChange<'a> {
+    sync: &'a RuntimeSync,
+    ids: BTreeSet<String>,
+}
+
+impl Drop for AccountChange<'_> {
+    fn drop(&mut self) {
+        let mut changing = self.sync.changing_ids();
+        for id in &self.ids {
+            changing.remove(id);
+        }
+    }
+}
 
 /// Open the runtime manager with `gate` ([`runtime_gate`]). It admits vendor
 /// processes and official logins only while the drive is online, the vault is

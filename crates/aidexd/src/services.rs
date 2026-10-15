@@ -17,6 +17,7 @@ mod web;
 
 pub use extensions::DaemonExtensions;
 pub use models::{EventsModelObserver, ModelServices, VaultCredentials, model_event_kind};
+pub(crate) use runtime::RuntimeSync;
 pub use web::WebServices;
 
 use crate::{endpoint, lifecycle::ShutdownSignal};
@@ -81,6 +82,7 @@ pub struct Services {
     plugins: Arc<aidex_plugins::PluginStore>,
     runtime: Result<Arc<aidex_adapters::RuntimeManager>, String>,
     runtime_gate: RuntimeGate,
+    runtime_sync: RuntimeSync,
     mcp: Result<Arc<aidex_mcp::McpSupervisor>, String>,
     updates: Result<Arc<Updater>, String>,
     update_recovery: Mutex<Option<Result<UpdateRecovery, String>>>,
@@ -242,6 +244,7 @@ impl Services {
             plugins,
             runtime,
             runtime_gate,
+            runtime_sync: RuntimeSync::default(),
             mcp,
             updates,
             update_recovery: Mutex::new(None),
@@ -343,6 +346,11 @@ impl Services {
     /// given this same gate.
     pub fn runtime_gate_open(&self) -> bool {
         (self.runtime_gate)()
+    }
+    /// What the daemon keeps about the runtimes it loaded into the engine
+    /// (`methods/runtime.rs`).
+    pub(crate) fn runtime_sync(&self) -> &RuntimeSync {
+        &self.runtime_sync
     }
     /// MCP server supervision (`aidex-mcp`), or why it could not be opened at startup.
     pub fn mcp(&self) -> Result<&Arc<aidex_mcp::McpSupervisor>, &str> {

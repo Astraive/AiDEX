@@ -26,7 +26,7 @@ use aidex_router::{
 };
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 pub const MODEL_LIST: &str = "model.list";
 pub const MODEL_PROVIDERS: &str = "model.providers";
@@ -566,29 +566,16 @@ fn open_link_error(error: AuthError) -> RpcError {
 
 /// Going offline stops network work already admitted that no per-request
 /// check would catch: active runs of conversations on an external runtime (a
-/// vendor process makes its own network calls) and pending official runtime
-/// logins. Native runs keep going: their remote model calls pass the offline
-/// switch on each request, and runs on local models are unaffected. Best
-/// effort: a run that cannot be cancelled is also stopped by the runtime gate,
-/// which closes with the switch.
+/// vendor process makes its own network calls), pending official runtime
+/// logins, and every vendor process and official CLI command still running
+/// (an account status, import or sign-out), whose launches parked for an
+/// approval are released too. Native runs keep going: their remote model calls
+/// pass the offline switch on each request, and runs on local models are
+/// unaffected. Best effort: a run that cannot be cancelled is also stopped by
+/// the runtime gate, which closes with the switch.
 fn stop_external_work(services: &Services) {
-    let native = services.native();
-    if let Ok(runs) = native.store().run_summaries() {
-        let mut external = HashMap::new();
-        for run in runs.into_iter().filter(|run| run.status.active()) {
-            let on_runtime = *external.entry(run.session_id.clone()).or_insert_with(|| {
-                native.store().get(&run.session_id).is_ok_and(|detail| {
-                    super::runtime::uses_external_runtime(&detail.configuration)
-                })
-            });
-            if on_runtime {
-                let _ = native.cancel(&run.id);
-            }
-        }
-    }
-    if let Ok(runtime) = services.runtime() {
-        let _ = runtime.cancel_logins();
-    }
+    super::runtime::cancel_external_runs(services);
+    super::runtime::stop_runtime_processes(services, aidex_sandbox::StopReason::Cancelled);
 }
 
 fn network_status(services: &Services) -> NetworkStatus {
@@ -691,16 +678,22 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     router.register(NETWORK_OFFLINE, move |_context, params| {
         let params: OfflineParams = parse_params(params)?;
         let models = shared.models();
-        models
-            .offline()
-            .set_offline(params.enabled)
-            .map_err(|error| RpcError::service(error.code(), error.to_string()))?;
-        models.observer().observe(&ModelEvent::NetworkModeChanged {
-            offline: params.enabled,
-        });
+        if params.enabled {
+            // Before the gate closes, so they settle as cancelled rather than
+            // failed by their vendor process ending first.
+            super::runtime::cancel_external_runs(&shared);
+        }
+        let set = models.offline().set_offline(params.enabled);
+        if set.is_ok() {
+            models.observer().observe(&ModelEvent::NetworkModeChanged {
+                offline: params.enabled,
+            });
+        }
+        // Going offline is in effect even when persisting it failed.
         if params.enabled {
             stop_external_work(&shared);
         }
+        set.map_err(|error| RpcError::service(error.code(), error.to_string()))?;
         to_result(&network_status(&shared))
     })?;
     let shared = Arc::clone(services);

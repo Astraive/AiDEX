@@ -23,12 +23,12 @@ use aidex_adapters::{
     Driver, RuntimeAccountStatus, RuntimeAuth, RuntimeConfig, RuntimeError, RuntimeHealth,
     RuntimeManager,
 };
-use aidex_native_sessions::SessionConfig;
+use aidex_native_sessions::{RuntimeExecutor, SessionConfig};
 use aidex_vault::VaultState;
 use serde::Deserialize;
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -109,31 +109,112 @@ fn error(e: RuntimeError) -> RpcError {
     .with_data(json!({"reason":e.code}))
 }
 
-/// Run an account change that the native engine must not see mid-run: refused
-/// (`conflict`) while an external run is active, and the engine reloads the
-/// runtimes afterwards (an account change rebuilds the runtime's executor).
-fn mutate_account<T>(
+/// A refused engine swap that no runtime error explains: `vault_locked` while
+/// the vault is not unlocked (the engine could not read the runs it checks, as
+/// after an idle lock that left a run active), otherwise `conflict` with
+/// `data.reason = "runtime_busy"` (an external run or approval is active). The
+/// engine's own text is not returned: it can be a store error.
+fn swap_refused(services: &Services) -> RpcError {
+    if services.vault().status().state != VaultState::Unlocked {
+        return error(RuntimeError {
+            code: "vault_locked".into(),
+            message: "Unlock the vault before changing external runtimes".into(),
+        });
+    }
+    error(RuntimeError {
+        code: "runtime_busy".into(),
+        message: "Cancel active external runs and approvals before changing external runtimes"
+            .into(),
+    })
+}
+
+/// The refusal of a turn or account command of a runtime whose managed account
+/// is being changed (an import or a sign-out while the official CLI runs).
+fn account_changing() -> RpcError {
+    error(RuntimeError {
+        code: "runtime_busy".into(),
+        message: "This runtime's account is being changed; try again once that has finished".into(),
+    })
+}
+
+/// The manager's current executors, without those of runtimes whose account
+/// is being changed, and the configuration generation they reflect (read
+/// first, so a change that lands meanwhile makes the next turn load again).
+fn current_executors(
+    services: &Services,
+    manager: &RuntimeManager,
+) -> Result<(u64, Vec<Arc<dyn RuntimeExecutor>>), RuntimeError> {
+    let generation = manager.generation();
+    let sync = services.runtime_sync();
+    let executors = manager
+        .executors()?
+        .into_iter()
+        .filter(|executor| !sync.changing(&executor.descriptor().id))
+        .collect();
+    Ok((generation, executors))
+}
+
+/// Run a runtime change and reload the engine's runtimes with the result, as
+/// one step the engine refuses while an external run is active. Refusals are
+/// the change's own runtime error, or [`swap_refused`].
+fn change_runtimes<T>(
     services: &Services,
     change: impl FnOnce(&RuntimeManager) -> Result<T, RuntimeError>,
 ) -> Result<T, RpcError> {
     let manager = manager(services)?;
     let mut domain_error = None;
-    services
-        .native()
-        .mutate_runtimes(|| {
-            let value = change(manager).map_err(|e| {
-                domain_error = Some(error(e));
-                "Runtime account change refused".to_owned()
-            })?;
-            let executors = manager.executors().map_err(|e| {
-                domain_error = Some(error(e));
-                "Runtime registry unavailable".to_owned()
-            })?;
-            Ok((value, executors))
-        })
-        .map_err(|message| {
-            domain_error.unwrap_or_else(|| RpcError::new(ErrorCode::Conflict, message))
-        })
+    let changed = services.native().mutate_runtimes(|| {
+        let value = change(manager).map_err(|e| {
+            domain_error = Some(error(e));
+            "Runtime change refused".to_owned()
+        })?;
+        let (generation, executors) = current_executors(services, manager).map_err(|e| {
+            domain_error = Some(error(e));
+            "Runtime registry unavailable".to_owned()
+        })?;
+        Ok(((value, generation), executors))
+    });
+    match changed {
+        Ok((value, generation)) => {
+            services.runtime_sync().set_loaded(generation);
+            Ok(value)
+        }
+        Err(_) => Err(domain_error.unwrap_or_else(|| swap_refused(services))),
+    }
+}
+
+/// Change runtime `id`'s managed account with its official CLI (an import or
+/// a sign-out, which can take about 25 s) without holding the engine's
+/// operations for that long. The runtime, and every other runtime configured
+/// with the same account profile, first leaves the engine, in a step the
+/// engine refuses while an external run is active, as for any account change;
+/// until the change has ended no turn of them starts (`runtime_busy`) and the
+/// engine does not load them again. Afterwards the engine loads them with the
+/// account they have now (best effort: a refused load leaves that to their
+/// next turn, which loads them before it starts).
+fn change_account<T>(
+    services: &Services,
+    id: &str,
+    change: impl FnOnce(&RuntimeManager) -> Result<T, RuntimeError>,
+) -> Result<T, RpcError> {
+    let manager = manager(services)?;
+    let profile = manager.get(id).map_err(error)?.profile;
+    let mut ids = manager
+        .list()
+        .map_err(error)?
+        .into_iter()
+        .filter(|config| profile.is_some() && config.profile == profile)
+        .map(|config| config.id)
+        .collect::<BTreeSet<_>>();
+    ids.insert(id.to_owned());
+    let Some(changing) = services.runtime_sync().begin_change(ids) else {
+        return Err(account_changing());
+    };
+    let result =
+        change_runtimes(services, |_| Ok(())).and_then(|()| change(manager).map_err(error));
+    drop(changing);
+    let _ = sync_runtimes(services);
+    result
 }
 
 /// The runtime manager, or `unavailable` when it failed to open at startup.
@@ -155,13 +236,58 @@ pub(crate) fn uses_external_runtime(config: &SessionConfig) -> bool {
         .is_some_and(|id| id != "native")
 }
 
+/// Cancel the active runs of conversations on an external runtime (going
+/// offline, an emergency stop). Called before the runtime gate closes as well:
+/// a run settles as `cancelled` only when its own cancel came before the gate
+/// ended its vendor process, which the run thread would otherwise report as a
+/// failure. Best effort: a run that cannot be read or cancelled (a locked
+/// vault) is also stopped by the gate.
+pub(crate) fn cancel_external_runs(services: &Services) {
+    let native = services.native();
+    let Ok(runs) = native.store().run_summaries() else {
+        return;
+    };
+    let mut external = std::collections::HashMap::new();
+    for run in runs.into_iter().filter(|run| run.status.active()) {
+        let on_runtime = *external.entry(run.session_id.clone()).or_insert_with(|| {
+            native
+                .store()
+                .get(&run.session_id)
+                .is_ok_and(|detail| uses_external_runtime(&detail.configuration))
+        });
+        if on_runtime {
+            let _ = native.cancel(&run.id);
+        }
+    }
+}
+
+/// End the external runtime work a closed gate must stop at once (going
+/// offline, an emergency stop): pending official logins are cancelled, every
+/// vendor process and official CLI command still running is terminated (with
+/// `reason`, waiting up to the registry's grace period), and every launch
+/// parked for an approval is released, so its temporary home is gone when
+/// this returns. The runtime registry's report, or `None` without runtimes.
+pub(crate) fn stop_runtime_processes(
+    services: &Services,
+    reason: aidex_sandbox::StopReason,
+) -> Option<aidex_sandbox::TerminationReport> {
+    let runtime = services.runtime().ok()?;
+    // Best effort: a login whose process cannot be confirmed ended reports
+    // `process_shutdown_failed` through its own `runtime.login.status`.
+    let _ = runtime.cancel_logins();
+    let report = runtime.process_registry().terminate_all(reason);
+    runtime.release_paused();
+    Some(report)
+}
+
 /// Load every enabled configured runtime into the native engine.
 ///
 /// A no-op (and not an error) while the vault is locked, because the runtime
 /// configuration is sealed with a vault key; when no runtime configuration
 /// was ever saved (reading one would create that key, so a plain unlock must
 /// not); and when the runtime manager is unavailable. The engine refuses the
-/// swap while an external run is active.
+/// swap while an external run is active. A runtime whose account is being
+/// changed is left out until that change has ended.
 pub(crate) fn sync_runtimes(services: &Services) -> Result<(), String> {
     let Ok(manager) = services.runtime() else {
         return Ok(());
@@ -170,29 +296,51 @@ pub(crate) fn sync_runtimes(services: &Services) -> Result<(), String> {
     {
         return Ok(());
     }
-    services.native().mutate_runtimes(|| {
-        let executors = manager.executors().map_err(|e| e.to_string())?;
-        Ok(((), executors))
-    })
+    let generation = services.native().mutate_runtimes(|| {
+        let (generation, executors) =
+            current_executors(services, manager).map_err(|e| e.to_string())?;
+        Ok((generation, executors))
+    })?;
+    services.runtime_sync().set_loaded(generation);
+    Ok(())
 }
 
 /// Load runtimes before a session that needs `config`'s external runtime is
-/// created, started or continued, unless the engine already has it. Best
-/// effort: the engine reports a runtime it still lacks.
-pub(crate) fn ensure_session_runtime(services: &Services, config: &SessionConfig) {
+/// created, started or continued: when the engine lacks the runtime, and when
+/// a runtime configuration changed since the engine last loaded them (a login
+/// that connected while the load was refused, for one), so a turn does not
+/// launch an executor made for the previous account. When an active external
+/// run refuses the full load, just this runtime is loaded: added when the
+/// engine lacks it, or its executor replaced when none of its own runs is
+/// active (an executor a run of it still uses stays, and an outdated one
+/// refuses to launch, `account_changed`). Best effort: the engine reports a
+/// runtime it still lacks. Refused (`runtime_busy`) only while the runtime's
+/// account is being changed.
+pub(crate) fn ensure_session_runtime(
+    services: &Services,
+    config: &SessionConfig,
+) -> Result<(), RpcError> {
     if !uses_external_runtime(config) {
-        return;
+        return Ok(());
     }
     let Some(id) = config.runtime_id.as_deref() else {
-        return;
+        return Ok(());
     };
-    if engine_has_runtime(services, id) {
-        return;
+    let Ok(manager) = services.runtime() else {
+        return Ok(());
+    };
+    if services.runtime_sync().changing(id) {
+        return Err(account_changing());
+    }
+    let current = || services.runtime_sync().loaded() == Some(manager.generation());
+    if engine_has_runtime(services, id) && current() {
+        return Ok(());
     }
     let _ = sync_runtimes(services);
-    if !engine_has_runtime(services, id) {
-        add_missing_runtime(services, id);
+    if !engine_has_runtime(services, id) || !current() {
+        load_runtime(services, id);
     }
+    Ok(())
 }
 
 fn engine_has_runtime(services: &Services, id: &str) -> bool {
@@ -203,24 +351,35 @@ fn engine_has_runtime(services: &Services, id: &str) -> bool {
         .any(|descriptor| descriptor.id == id)
 }
 
-/// Add just runtime `id` to the engine when a full swap was refused because an
-/// external run is active (for example the run an `approval.respond` answers).
-/// Adding a missing runtime leaves every executor a run holds in place.
-fn add_missing_runtime(services: &Services, id: &str) {
+/// Load just runtime `id`'s current executor when a full swap was refused
+/// because an external run is active (for example the run an
+/// `approval.respond` answers, or another runtime's). A missing runtime is
+/// added, which leaves every executor a run holds in place; one the engine has
+/// is replaced only while none of its own runs is active
+/// (`NativeEngine::replace_runtime`), so a paused launch keeps its executor.
+fn load_runtime(services: &Services, id: &str) {
     let Ok(manager) = services.runtime() else {
         return;
     };
-    if services.vault().status().state != VaultState::Unlocked || !manager.has_saved_configuration()
+    if services.vault().status().state != VaultState::Unlocked
+        || !manager.has_saved_configuration()
+        || services.runtime_sync().changing(id)
     {
         return;
     }
-    if let Some(executor) = manager.executors().ok().and_then(|executors| {
+    let Some(executor) = manager.executors().ok().and_then(|executors| {
         executors
             .into_iter()
             .find(|executor| executor.descriptor().id == id)
-    }) {
-        let _ = services.native().register_runtime(id, executor);
-    }
+    }) else {
+        return;
+    };
+    let native = services.native();
+    let _ = if engine_has_runtime(services, id) {
+        native.replace_runtime(id, executor)
+    } else {
+        native.register_runtime(id, executor)
+    };
 }
 
 fn provider(services: &Services, id: &str) -> Result<String, RpcError> {
@@ -258,6 +417,25 @@ impl AccountStatuses {
 
     fn forget(&self, id: &str) {
         self.entries().remove(id);
+    }
+
+    /// A login of runtime `id` connected: its official CLI confirmed the
+    /// credential just before it was bound (the login's `login status`), so
+    /// that is the account's last confirmed status.
+    fn connected(&self, config: &RuntimeConfig, profile: &str) {
+        if config.profile.as_deref() != Some(profile) {
+            self.forget(&config.id);
+            return;
+        }
+        self.remember(&RuntimeAccountStatus {
+            id: config.id.clone(),
+            driver: config.driver,
+            profile: config.profile.clone(),
+            authenticated: true,
+            credential_present: true,
+            evidence: "native_credential_and_cli_exit_status".into(),
+            status: "authenticated_cached".into(),
+        });
     }
 
     /// The last confirmed status of `config`'s current profile.
@@ -350,7 +528,8 @@ fn executable_installed(root: &Path, executable: &str) -> bool {
 /// `runtime.health` of a managed account while the runtime gate is closed:
 /// what the adapter reports then (the model probe is refused, so the protocol
 /// is not ready), with the account's last confirmed status instead of a new
-/// `login status` from the official CLI.
+/// `login status` from the official CLI, in health's documented codes
+/// (`RuntimeAccountStatus::health_status`).
 fn paused_health(
     services: &Services,
     config: &RuntimeConfig,
@@ -359,7 +538,7 @@ fn paused_health(
     let installed = executable_installed(services.paths().root(), &config.executable);
     let (authenticated, status) = match statuses.confirmed(config) {
         _ if !installed => (false, "binary_missing".to_owned()),
-        Some(account) => (account.authenticated, account.status),
+        Some(account) => (account.authenticated, account.health_status().to_owned()),
         None => (false, "installed_auth_unverified".to_owned()),
     };
     RuntimeHealth {
@@ -384,7 +563,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         to_result(&aidex_adapters::catalog())
     })?;
     let s = services.clone();
-    router.register(RUNTIME_LIST, move |_, p| {
+    router.register_passive(RUNTIME_LIST, move |_, p| {
         expect_no_params(&p)?;
         let runtimes = manager(&s)?.list().map_err(error)?;
         // Best effort: a refused swap (an external run is active) keeps the
@@ -412,47 +591,23 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             if method == RUNTIME_UPDATE {
                 manager.get(&config.id).map_err(error)?;
             }
-            let mut domain_error = None;
-            let result = s.native().mutate_runtimes(|| {
-                let config = manager.save(config).map_err(|e| {
-                    domain_error = Some(error(e));
-                    "Runtime configuration was refused".to_owned()
-                })?;
-                let executors = manager.executors().map_err(|e| {
-                    domain_error = Some(error(e));
-                    "Runtime registry unavailable".to_owned()
-                })?;
-                Ok((config, executors))
-            });
-            match result {
-                Ok(value) => to_result(&value),
-                Err(message) => {
-                    Err(domain_error.unwrap_or_else(|| RpcError::new(ErrorCode::Conflict, message)))
-                }
+            if s.runtime_sync().changing(&config.id) {
+                return Err(account_changing());
             }
+            to_result(&change_runtimes(&s, |manager| manager.save(config))?)
         })?;
     }
     let s = services.clone();
+    let accounts = Arc::clone(&statuses);
     router.register(RUNTIME_REMOVE, move |_, p| {
         let p: Id = parse_params(p)?;
-        let manager = manager(&s)?;
-        let mut domain_error = None;
-        let removed = s
-            .native()
-            .mutate_runtimes(|| {
-                let removed = manager.remove(&p.id).map_err(|e| {
-                    domain_error = Some(error(e));
-                    "Runtime removal refused".to_owned()
-                })?;
-                let executors = manager.executors().map_err(|e| {
-                    domain_error = Some(error(e));
-                    "Runtime registry unavailable".to_owned()
-                })?;
-                Ok((removed, executors))
-            })
-            .map_err(|message| {
-                domain_error.unwrap_or_else(|| RpcError::new(ErrorCode::Conflict, message))
-            })?;
+        manager(&s)?;
+        if s.runtime_sync().changing(&p.id) {
+            return Err(account_changing());
+        }
+        let removed = change_runtimes(&s, |manager| manager.remove(&p.id))?;
+        // The removed runtime's account went with it.
+        accounts.forget(&p.id);
         Ok(json!({"removed":removed}))
     })?;
     let s = services.clone();
@@ -462,7 +617,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     })?;
     let s = services.clone();
     let accounts = Arc::clone(&statuses);
-    router.register(RUNTIME_HEALTH, move |_, p| {
+    router.register_passive(RUNTIME_HEALTH, move |_, p| {
         let p: Id = parse_params(p)?;
         let manager = manager(&s)?;
         // Otherwise the adapter starts nothing: its model probe is refused
@@ -473,7 +628,21 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                 return to_result(&paused_health(&s, &config, &accounts));
             }
         }
-        to_result(&manager.health(&p.id).map_err(error)?)
+        let health = manager.health(&p.id).map_err(error)?;
+        // When the health check got a managed account's status from the
+        // official CLI (it reports one exactly then: `authenticated`, or
+        // `auth_required`), keep it as the account's last confirmed status, as
+        // `runtime.account.status` does. The adapter answers this from the
+        // status it has just cached, so the CLI does not run again.
+        if (health.authenticated || health.status == "auth_required")
+            && s.runtime_gate_open()
+            && let Ok(config) = manager.get(&p.id)
+            && managed_account(&config)
+            && let Ok(status) = manager.account_status(&p.id)
+        {
+            accounts.remember(&status);
+        }
+        to_result(&health)
     })?;
     let s = services.clone();
     router.register(RUNTIME_MODELS, move |_, p| {
@@ -553,7 +722,7 @@ fn register_accounts(
 ) -> Result<(), RouterError> {
     let s = services.clone();
     let accounts = Arc::clone(statuses);
-    router.register(RUNTIME_ACCOUNT_STATUS, move |_, p| {
+    router.register_passive(RUNTIME_ACCOUNT_STATUS, move |_, p| {
         let p: Id = parse_params(p)?;
         let manager = manager(&s)?;
         if let Some(config) = account_paused(&s, manager, &p.id)? {
@@ -570,27 +739,41 @@ fn register_accounts(
         if account_paused(&s, manager(&s)?, &p.id)?.is_some() {
             return Err(cli_paused());
         }
-        let status = mutate_account(&s, |manager| manager.import_profile(&p.id, &p.source))?;
+        let status = change_account(&s, &p.id, |manager| {
+            manager.import_profile(&p.id, &p.source)
+        })?;
         accounts.remember(&status);
         to_result(&status)
     })?;
     let s = services.clone();
     router.register(RUNTIME_LOGIN_START, move |_, p| {
         let p: Id = parse_params(p)?;
-        to_result(&mutate_account(&s, |manager| manager.login_start(&p.id))?)
+        // The login's official CLI may not start now: refused before the
+        // engine is asked, as for an import or a sign-out.
+        if account_paused(&s, manager(&s)?, &p.id)?.is_some() {
+            return Err(cli_paused());
+        }
+        if s.runtime_sync().changing(&p.id) {
+            return Err(account_changing());
+        }
+        to_result(&change_runtimes(&s, |manager| manager.login_start(&p.id))?)
     })?;
     let s = services.clone();
     let accounts = Arc::clone(statuses);
-    router.register(RUNTIME_LOGIN_STATUS, move |_, p| {
+    router.register_passive(RUNTIME_LOGIN_STATUS, move |_, p| {
         let p: Flow = parse_params(p)?;
-        let status = manager(&s)?
-            .login_status(&p.id, &p.flow_id)
-            .map_err(error)?;
-        // A connected login switched the runtime to its profile. Best effort:
-        // while an external run is active the engine keeps its executors and a
-        // later sync loads the new one; the poll itself never fails for it.
+        let manager = manager(&s)?;
+        let status = manager.login_status(&p.id, &p.flow_id).map_err(error)?;
+        // A connected login switched the runtime to its profile once its
+        // official CLI confirmed the credential. Best effort: while an
+        // external run is active the engine keeps its executors, and the next
+        // turn of this runtime loads the new one before it starts; the poll
+        // itself never fails for it.
         if status.state == "connected" {
-            accounts.forget(&p.id);
+            match manager.get(&p.id) {
+                Ok(config) => accounts.connected(&config, &status.profile),
+                Err(_) => accounts.forget(&p.id),
+            }
             let _ = sync_runtimes(&s);
         }
         to_result(&status)
@@ -612,7 +795,7 @@ fn register_accounts(
         if account_paused(&s, manager(&s)?, &p.id)?.is_some() {
             return Err(cli_paused());
         }
-        let status = mutate_account(&s, |manager| manager.logout(&p.id))?;
+        let status = change_account(&s, &p.id, |manager| manager.logout(&p.id))?;
         accounts.remember(&status);
         to_result(&status)
     })?;

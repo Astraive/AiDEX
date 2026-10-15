@@ -6,10 +6,10 @@ use crate::{
     rpc::{expect_no_params, parse_params, to_result},
     services::Services,
 };
-use aidex_native_sessions::{MAX_ATTACHMENTS_PER_MESSAGE, Mode, SessionConfig};
+use aidex_native_sessions::{MAX_ATTACHMENTS_PER_MESSAGE, Mode, SessionConfig, SessionDetail};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::sync::Arc;
+use serde_json::{Value, json};
+use std::{collections::BTreeSet, sync::Arc};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdParams {
@@ -150,14 +150,16 @@ pub(crate) fn native_error(message: String) -> RpcError {
 /// Load the runtime of the conversation `run_id` belongs to before the engine
 /// continues that run (`run.resume`, `approval.respond`), as `message.send`
 /// does: an unlock whose runtime sync was refused leaves the engine without it.
-/// Best effort: the engine reports a runtime it still lacks.
-fn ensure_run_runtime(services: &Services, run_id: &str) {
+/// Best effort: the engine reports a runtime it still lacks. Refused only
+/// while the runtime's account is being changed.
+fn ensure_run_runtime(services: &Services, run_id: &str) -> Result<(), RpcError> {
     let store = services.native().store();
     if let Ok(run) = store.run(run_id)
         && let Ok(detail) = store.get(&run.session_id)
     {
-        super::runtime::ensure_session_runtime(services, &detail.configuration);
+        super::runtime::ensure_session_runtime(services, &detail.configuration)?;
     }
+    Ok(())
 }
 /// The configuration of the conversation whose run waits on approval `id`.
 /// Only conversations with a run waiting for an approval are decrypted (the
@@ -193,6 +195,92 @@ fn ends_runtime_thread(old: &SessionConfig, new: &SessionConfig) -> bool {
         || old.permission_mode != new.permission_mode
         || old.instructions != new.instructions
 }
+/// Every external runtime reference `detail` saves: the conversation's, its
+/// runs', and its approvals' (only those still `pending` when
+/// `pending_approvals_only`).
+fn saved_references(detail: &SessionDetail, pending_approvals_only: bool) -> Vec<Value> {
+    let approvals = detail
+        .approvals
+        .iter()
+        .filter(|approval| !pending_approvals_only || approval.status == "pending")
+        .filter_map(|approval| approval.runtime_ref.clone());
+    detail
+        .runtime_ref
+        .iter()
+        .cloned()
+        .chain(detail.runs.iter().filter_map(|run| run.runtime_ref.clone()))
+        .chain(approvals)
+        .collect()
+}
+
+/// The native snapshot a saved reference names, with the runtime it belongs to.
+fn snapshot_of(reference: &Value) -> Option<(&str, &str)> {
+    Some((
+        reference.get("runtime_id")?.as_str()?,
+        reference.get("snapshot_id")?.as_str()?,
+    ))
+}
+
+/// Remove the native session snapshots (sealed vendor homes) `dropped` names
+/// that nothing in `kept` still names: a vendor thread a configuration change
+/// ended, or a deleted conversation's. Only a branch snapshot of the
+/// reference's own runtime is ever removed (`RuntimeManager::forget_snapshot`
+/// checks the name). Best effort: it never fails the call.
+fn forget_snapshots(services: &Services, dropped: &[Value], kept: &[Value]) {
+    let Ok(manager) = services.runtime() else {
+        return;
+    };
+    let kept = kept.iter().filter_map(snapshot_of).collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    for reference in dropped {
+        if let Some(snapshot) = snapshot_of(reference)
+            && !kept.contains(&snapshot)
+            && seen.insert(snapshot)
+        {
+            manager.forget_snapshot(reference);
+        }
+    }
+}
+
+/// After `conversation.delete`: a launch still parked for one of its runs
+/// (none should be: a cancel releases it), then every snapshot the
+/// conversation's references name, and the one a daemon from before branch
+/// snapshots kept for it under each runtime it used. Best effort.
+fn forget_conversation_snapshots(services: &Services, detail: &SessionDetail) {
+    let Ok(manager) = services.runtime() else {
+        return;
+    };
+    for run in &detail.runs {
+        manager.release_run(&run.id);
+    }
+    let references = saved_references(detail, false);
+    forget_snapshots(services, &references, &[]);
+    let runtimes = references
+        .iter()
+        .filter_map(|reference| reference.get("runtime_id").and_then(Value::as_str))
+        .chain(
+            detail
+                .configuration
+                .runtime_id
+                .as_deref()
+                .filter(|id| *id != "native"),
+        )
+        .collect::<BTreeSet<_>>();
+    for runtime in runtimes {
+        manager.forget_legacy_snapshot(runtime, &detail.id);
+    }
+}
+
+/// Release the runtime launch parked for run `id`'s approval, if any: after a
+/// cancel no thread is left to end it, so its process tree and temporary home
+/// (with the restored snapshot and managed credential) go now rather than when
+/// its watcher notices. The run stays resumable from its saved reference.
+fn release_parked(services: &Services, id: &str) {
+    if let Ok(manager) = services.runtime() {
+        manager.release_run(id);
+    }
+}
+
 pub(crate) fn validate_workspace(
     services: &Services,
     config: &SessionConfig,
@@ -209,7 +297,7 @@ pub(crate) fn validate_workspace(
 }
 pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<(), RouterError> {
     let s = services.clone();
-    router.register("conversation.list", move |_, p| {
+    router.register_passive("conversation.list", move |_, p| {
         let p:view::PageParams=if p.is_null(){Default::default()}else{parse_params(p)?};let sessions=s.native().store().list().map_err(native_error)?;let total=sessions.len();let offset=p.offset.unwrap_or(0).min(total);let end=(offset+view::page_limit(p.limit)?).min(total);view::bounded(json!({"sessions":&sessions[offset..end],"total_sessions":total,"offset":offset,"next_offset":(end<total).then_some(end),"truncated":end<total}),false)
     })?;
     let s = services.clone();
@@ -217,7 +305,9 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         let mut config: SessionConfig = parse_params(p)?;
         config.validate().map_err(native_error)?;
         validate_workspace(&s, &config)?;
-        super::runtime::ensure_session_runtime(&s, &config);
+        // Best effort: a runtime whose account is being changed is loaded by
+        // the conversation's first message instead.
+        let _ = super::runtime::ensure_session_runtime(&s, &config);
         if config.title.trim().is_empty() {
             config.title = "New conversation".into();
         }
@@ -229,7 +319,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         )
     })?;
     let s = services.clone();
-    router.register("conversation.get", move |_, p| {
+    router.register_passive("conversation.get", move |_, p| {
         let p: view::GetParams = parse_params(p)?;
         let detail = s.native().store().get(&p.id).map_err(native_error)?;
         let attachments = s
@@ -247,7 +337,13 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let s = services.clone();
     router.register("conversation.delete", move |_, p| {
         let p: IdParams = parse_params(p)?;
-        to_result(&json!({"deleted":s.native().store().delete(&p.id).map_err(native_error)?}))
+        // Read first: the snapshots its references name go with it.
+        let detail = s.native().store().get(&p.id).ok();
+        let deleted = s.native().store().delete(&p.id).map_err(native_error)?;
+        if deleted && let Some(detail) = detail {
+            forget_conversation_snapshots(&s, &detail);
+        }
+        to_result(&json!({"deleted":deleted}))
     })?;
     let s = services.clone();
     router.register("conversation.pin", move |_, p| {
@@ -290,7 +386,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                 ))
                 .with_data(json!({"reason": "skill_unavailable"})));
             }
-            super::runtime::ensure_session_runtime(&s, &config);
+            super::runtime::ensure_session_runtime(&s, &config)?;
             let options = aidex_harness::RunOptions {
                 skills,
                 web_search: p.web_search.unwrap_or(false),
@@ -310,7 +406,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         })?;
     }
     let s = services.clone();
-    router.register("run.get", move |_, p| {
+    router.register_passive("run.get", move |_, p| {
         let p: IdParams = parse_params(p)?;
         to_result(&view::run(
             &s.native().store().run(&p.id).map_err(native_error)?,
@@ -319,16 +415,20 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     let s = services.clone();
     router.register("run.cancel", move |_, p| {
         let p: IdParams = parse_params(p)?;
-        to_result(&view::run(&s.native().cancel(&p.id).map_err(native_error)?))
+        let run = s.native().cancel(&p.id).map_err(native_error)?;
+        if !run.status.active() {
+            release_parked(&s, &p.id);
+        }
+        to_result(&view::run(&run))
     })?;
     let s = services.clone();
     router.register("run.resume", move |_, p| {
         let p: IdParams = parse_params(p)?;
-        ensure_run_runtime(&s, &p.id);
+        ensure_run_runtime(&s, &p.id)?;
         to_result(&view::run(&s.native().resume(&p.id).map_err(native_error)?))
     })?;
     let s = services.clone();
-    router.register("approval.list", move |_, p| {
+    router.register_passive("approval.list", move |_, p| {
         let p: ApprovalsParams = if p.is_null() {
             ApprovalsParams { run_id: None,offset:None,limit:None,status:None }
         } else {
@@ -347,7 +447,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             .is_ok_and(|manager| manager.has_saved_configuration())
             && let Some(configuration) = approval_configuration(&s, &p.id)
         {
-            super::runtime::ensure_session_runtime(&s, &configuration);
+            super::runtime::ensure_session_runtime(&s, &configuration)?;
         }
         to_result(&view::run(
             &s.native()
@@ -371,7 +471,8 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
         let p: ConfigurationParams = parse_params(p)?;
         p.configuration.validate().map_err(native_error)?;
         validate_workspace(&s, &p.configuration)?;
-        s.native()
+        let (dropped, kept) = s
+            .native()
             .store()
             .update(&p.session_id, |detail| {
                 if detail.runs.iter().any(|r| r.status.active()) {
@@ -385,25 +486,28 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                             .into(),
                     );
                 }
+                let mut dropped = Vec::new();
                 if ends_runtime_thread(&detail.configuration, &p.configuration) {
                     // No run is active here, so none of these references is
                     // in use: an interrupted run cannot resume the old thread
                     // either.
-                    detail.runtime_ref = None;
+                    dropped.extend(detail.runtime_ref.take());
                     for run in &mut detail.runs {
-                        run.runtime_ref = None;
+                        dropped.extend(run.runtime_ref.take());
                     }
                 }
                 detail.configuration = p.configuration.clone();
-                Ok(())
+                Ok((dropped, saved_references(detail, true)))
             })
             .map_err(native_error)?;
+        // Nothing continues the ended thread: its snapshots go too.
+        forget_snapshots(&s, &dropped, &kept);
         to_result(&p.configuration)
     })?;
     let s = services.clone();
-    router.register("execution.status",move|_,p|{expect_no_params(&p)?;let sessions=s.native().store().list().map_err(native_error)?;let runs=s.native().store().run_summaries().map_err(native_error)?;view::bounded(json!({"capabilities":s.native().capabilities(),"total_sessions":sessions.len(),"sessions":sessions.into_iter().take(100).collect::<Vec<_>>(),"total_runs":runs.len(),"runs":runs.into_iter().take(1000).collect::<Vec<_>>(),"runtime_descriptors":s.native().runtime_descriptors()}),false)})?;
+    router.register_passive("execution.status",move|_,p|{expect_no_params(&p)?;let sessions=s.native().store().list().map_err(native_error)?;let runs=s.native().store().run_summaries().map_err(native_error)?;view::bounded(json!({"capabilities":s.native().capabilities(),"total_sessions":sessions.len(),"sessions":sessions.into_iter().take(100).collect::<Vec<_>>(),"total_runs":runs.len(),"runs":runs.into_iter().take(1000).collect::<Vec<_>>(),"runtime_descriptors":s.native().runtime_descriptors()}),false)})?;
     let s = services.clone();
-    router.register("checkpoint.list",move|_,p|{#[derive(Deserialize)]#[serde(deny_unknown_fields)]struct Params{session_id:String,#[serde(default)]offset:Option<usize>,#[serde(default)]limit:Option<usize>}let p:Params=parse_params(p)?;let s=s.native().store().get(&p.session_id).map_err(native_error)?;let total=s.checkpoints.len();let offset=p.offset.unwrap_or(0).min(total);let end=(offset+view::page_limit(p.limit)?).min(total);view::bounded(json!({"checkpoints":s.checkpoints[offset..end].iter().map(view::checkpoint).collect::<Vec<_>>(),"offset":offset,"total_checkpoints":total,"next_offset":(end<total).then_some(end),"truncated":end<total}),false)})?;
+    router.register_passive("checkpoint.list",move|_,p|{#[derive(Deserialize)]#[serde(deny_unknown_fields)]struct Params{session_id:String,#[serde(default)]offset:Option<usize>,#[serde(default)]limit:Option<usize>}let p:Params=parse_params(p)?;let s=s.native().store().get(&p.session_id).map_err(native_error)?;let total=s.checkpoints.len();let offset=p.offset.unwrap_or(0).min(total);let end=(offset+view::page_limit(p.limit)?).min(total);view::bounded(json!({"checkpoints":s.checkpoints[offset..end].iter().map(view::checkpoint).collect::<Vec<_>>(),"offset":offset,"total_checkpoints":total,"next_offset":(end<total).then_some(end),"truncated":end<total}),false)})?;
     let s = services.clone();
     router.register("checkpoint.compare", move |_, p| {
         let p: CheckpointParams = parse_params(p)?;

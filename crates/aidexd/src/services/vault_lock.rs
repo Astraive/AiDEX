@@ -8,9 +8,12 @@
 //! always did: native runs are cancelled, attachment uploads in flight are
 //! aborted (their partial sealed files are deleted and later chunks are
 //! refused), and `vault.locked` is recorded. External runtimes lose their
-//! credentials with the vault: pending official logins are cancelled and every
+//! credentials with the vault: pending official logins are cancelled, every
 //! vendor process still running is terminated (the runtime gate, which needs an
-//! unlocked vault, already refuses new launches). MCP servers are stopped by
+//! unlocked vault, already refuses new launches), and every launch parked for
+//! an approval is released before the notice is handled, so no temporary home
+//! with a restored snapshot or managed credential outlives the lock (those
+//! runs stay resumable from their saved references). MCP servers are stopped by
 //! their own lock observer, with a polling watchdog as a backstop
 //! (`services/mcp.rs`). Only executing runs hold the idle auto-lock off
 //! (`keep_alive`), so this cleanup is also what stops a run left waiting for
@@ -55,6 +58,9 @@ pub fn clean_up_on_lock(
             runtime
                 .process_registry()
                 .terminate_all_within(StopReason::Cancelled, RUNTIME_TERMINATION_GRACE);
+            // Parked approvals hold decrypted homes until their watchers notice
+            // the ended trees: removed here, before the lock is reported done.
+            runtime.release_paused();
         }
         // Best effort by design: the session has already ended, and nothing
         // waits for this notice to report a failure to.

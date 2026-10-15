@@ -1206,3 +1206,647 @@ fn switching_mode_permission_or_instructions_ends_the_runtime_thread() {
     set(&|config| config["instructions"] = json!("Answer briefly."));
     assert_eq!(thread(), (false, 0));
 }
+
+/// A runtime of the adapters' protocol peer (`peer.py`) for `driver` in
+/// `scenario` (`approval` pauses for one approval; `normal` completes).
+fn peer_runtime(id: &str, driver: &str, scenario: &str) -> Value {
+    json!({
+        "id": id, "driver": driver, "executable": python(),
+        "argv": ["-u", adapter_fixture("peer.py"), driver, scenario],
+    })
+}
+
+/// Wait until the runtime manager holds no launch parked for an approval and
+/// no temporary home (the homes' removal can lag their release slightly).
+fn wait_released(f: &Fixture, why: &str) {
+    wait_until(why, || {
+        f.manager().parked_runs() == 0
+            && f.manager().temporary_homes() == 0
+            && f.manager().process_registry().is_empty()
+    });
+}
+
+#[test]
+fn a_vendor_process_paused_for_an_approval_is_released_by_a_lock_a_stop_or_going_offline() {
+    let f = fixture();
+    f.ok(
+        "runtime.add",
+        peer_runtime("acp-approval", "acp", "approval"),
+    );
+    let pause = |command: &str| {
+        let session = f.runtime_session("acp-approval");
+        let run = f.send(&session, command);
+        wait_until("the vendor process pauses for its approval", || {
+            f.run_status(&run) == RunStatus::WaitingApproval
+        });
+        // The paused launch keeps its home: the restored native state.
+        assert_eq!(f.manager().parked_runs(), 1);
+        assert!(f.manager().temporary_homes() >= 1);
+        run
+    };
+
+    // The idle auto-lock (the walk-away case) releases it with the lock.
+    let run = pause("approval-lock");
+    f.services.vault().lock();
+    wait_released(&f, "the lock releases the paused launch");
+    f.ok("vault.unlock", json!({"passphrase": PASSPHRASE}));
+    assert_eq!(f.run_status(&run), RunStatus::Interrupted);
+    // The documented continuation reaches the vendor again instead of
+    // failing on the released launch (`runtime_busy`).
+    f.ok("run.resume", json!({"id": run}));
+    wait_until("the resumed run pauses again or ends", || {
+        !matches!(f.run_status(&run), RunStatus::Running | RunStatus::Pending)
+    });
+    let resumed = f.services.native().store().run(&run).unwrap();
+    assert_ne!(resumed.status, RunStatus::Failed, "{:?}", resumed.error);
+    // Cancelling a paused run releases its launch at once.
+    if resumed.status.active() {
+        f.ok("run.cancel", json!({"id": run}));
+        assert_eq!(f.wait_inactive(&run), RunStatus::Cancelled);
+    }
+    wait_released(&f, "the cancel releases the paused launch");
+
+    // An emergency stop.
+    let run = pause("approval-stop");
+    f.ok("emergency.stop", json!({}));
+    wait_released(&f, "the emergency stop releases the paused launch");
+    assert_eq!(f.wait_inactive(&run), RunStatus::Cancelled);
+    f.ok("emergency.resume", Value::Null);
+
+    // Going offline.
+    let run = pause("approval-offline");
+    f.ok("network.offline", json!({"enabled": true}));
+    wait_released(&f, "going offline releases the paused launch");
+    assert_eq!(f.wait_inactive(&run), RunStatus::Cancelled);
+    f.assert_no_credential_text();
+}
+
+/// The in-process runtime that stops only when the runtime gate closes.
+const GATE_BOUND: &str = "gate-bound-fixture";
+
+/// An external runtime that fails as soon as the runtime gate closes without
+/// looking at its cancel token, as a vendor process the gate's watcher kills.
+struct GateBound {
+    gate: Arc<dyn Fn() -> bool + Send + Sync>,
+    launches: AtomicUsize,
+}
+
+impl RuntimeExecutor for GateBound {
+    fn descriptor(&self) -> RuntimeDescriptor {
+        RuntimeDescriptor {
+            id: GATE_BOUND.into(),
+            ..Blocking::default().descriptor()
+        }
+    }
+
+    fn validate(&self, _: &RuntimeRequest) -> Result<(), aidex_adapters::RuntimeError> {
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        _: &RuntimeRequest,
+        _: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+        _: &CancelToken,
+    ) -> Result<RuntimeResponse, aidex_adapters::RuntimeError> {
+        self.launches.fetch_add(1, Ordering::SeqCst);
+        let until = Instant::now() + Duration::from_secs(60);
+        while (self.gate)() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(aidex_adapters::RuntimeError {
+            code: "offline_refused".into(),
+            message: "Fixture vendor process ended by the closed gate".into(),
+        })
+    }
+}
+
+#[test]
+fn an_emergency_stop_or_going_offline_settles_external_runs_as_cancelled() {
+    for trigger in ["emergency.stop", "network.offline"] {
+        let f = fixture();
+        let runtime = Arc::new(GateBound {
+            gate: crate::services::runtime_gate_for(&f.services),
+            launches: AtomicUsize::new(0),
+        });
+        f.services
+            .native()
+            .register_runtime(GATE_BOUND, runtime.clone())
+            .unwrap();
+        let session = f.runtime_session(GATE_BOUND);
+        let run = f.send(&session, "gate-1");
+        wait_until("the runtime works", || {
+            runtime.launches.load(Ordering::SeqCst) == 1
+        });
+        match trigger {
+            "emergency.stop" => f.ok(trigger, json!({})),
+            _ => f.ok(trigger, json!({"enabled": true})),
+        };
+        assert_eq!(f.wait_inactive(&run), RunStatus::Cancelled, "{trigger}");
+        let events = f
+            .services
+            .events()
+            .replay(&EventFilter::all(), Cursor::ZERO, 256)
+            .unwrap()
+            .events;
+        let names = events.iter().map(|e| e.name()).collect::<Vec<_>>();
+        assert!(names.contains(&"task.cancelled"), "{trigger}: {names:?}");
+        assert!(!names.contains(&"task.failed"), "{trigger}: {names:?}");
+    }
+}
+
+/// A Codex runtime whose official CLI is the account peer behind a wrapper
+/// that makes `login status` and `logout` take `delay` seconds while the file
+/// [`slow_marker`] of `folder` exists.
+fn slow_account_runtime(id: &str, folder: &Path, delay: f64) -> Value {
+    let wrapper = folder.join("slow_peer.py");
+    std::fs::write(
+        &wrapper,
+        "import os, runpy, sys, time\n\
+         marker, delay, peer = sys.argv[1], float(sys.argv[2]), sys.argv[3]\n\
+         if os.path.exists(marker) and ('status' in sys.argv or 'logout' in sys.argv):\n    time.sleep(delay)\n\
+         sys.argv = [peer] + sys.argv[4:]\n\
+         runpy.run_path(peer, run_name='__main__')\n",
+    )
+    .unwrap();
+    let argv = [
+        "-u".to_owned(),
+        wrapper.to_string_lossy().into_owned(),
+        slow_marker(folder).to_string_lossy().into_owned(),
+        delay.to_string(),
+        adapter_fixture("account_peer.py"),
+    ];
+    json!({"id": id, "driver": "codex", "executable": python(), "argv": argv})
+}
+
+/// While this file exists, [`slow_account_runtime`]'s account commands are slow.
+fn slow_marker(folder: &Path) -> std::path::PathBuf {
+    folder.join("slow")
+}
+
+/// A native conversation on a local fake model that answers at once.
+fn native_conversation(f: &Fixture) -> String {
+    use aidex_providers::{
+        FakeProvider, FakeScript, FakeTurn, Locality, ModelDescriptor, ModelId, ModelRef,
+        ProviderId,
+    };
+    let fake = Arc::new(
+        FakeProvider::new(ProviderId::new("fixture").unwrap(), Locality::Local)
+            .with_model(ModelDescriptor::new(
+                ModelRef::new(
+                    ProviderId::new("fixture").unwrap(),
+                    ModelId::new("small").unwrap(),
+                ),
+                Locality::Local,
+                2048,
+            ))
+            .with_script(FakeScript::new().then(FakeTurn::text("local answer"))),
+    );
+    f.services
+        .models()
+        .registry()
+        .register_shared(fake)
+        .unwrap();
+    f.ok(
+        "conversation.create",
+        json!({"provider_id": "fixture", "model_id": "small"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// A credential file the account peer accepts, in `folder`.
+fn fixture_credential(folder: &Path) -> std::path::PathBuf {
+    let credential = folder.join("auth.json");
+    std::fs::write(
+        &credential,
+        json!({"tokens": {"access_token": "fixture-opaque-secret"}}).to_string(),
+    )
+    .unwrap();
+    credential
+}
+
+#[test]
+fn an_import_runs_the_official_cli_without_holding_up_other_conversations() {
+    let f = fixture();
+    let folder = tempfile::tempdir().unwrap();
+    // Two runtimes configured with the same account profile.
+    let mut config = slow_account_runtime("codex-account", folder.path(), 3.0);
+    config["profile"] = json!("account-shared");
+    f.ok("runtime.add", config.clone());
+    config["id"] = json!("codex-twin");
+    f.ok("runtime.add", config);
+    let account_session = f.runtime_session("codex-account");
+    let twin_session = f.runtime_session("codex-twin");
+    let native = native_conversation(&f);
+    let credential = fixture_credential(folder.path());
+    std::fs::write(slow_marker(folder.path()), b"").unwrap();
+    std::thread::scope(|scope| {
+        let import = scope.spawn(|| {
+            f.call(
+                RUNTIME_PROFILE_IMPORT,
+                json!({"id": "codex-account", "source": credential.to_string_lossy()}),
+            )
+        });
+        wait_until("the official CLI checks the credential", || {
+            !f.manager().process_registry().is_empty()
+        });
+        // Another conversation goes on meanwhile...
+        let started = Instant::now();
+        let run = f.send(&native, "native-1");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "message.send waited {:?} for the import",
+            started.elapsed()
+        );
+        assert!(
+            !f.manager().process_registry().is_empty(),
+            "the import was still running"
+        );
+        // ...while the runtimes whose account changes take no turn.
+        for session in [&account_session, &twin_session] {
+            assert_eq!(
+                f.refused(
+                    "message.send",
+                    json!({"session_id": session, "content": "hi", "command_id": "during"})
+                ),
+                (Some(ErrorCode::Conflict), "runtime_busy".into())
+            );
+        }
+        assert_eq!(
+            f.refused(RUNTIME_REMOVE, json!({"id": "codex-twin"})),
+            (Some(ErrorCode::Conflict), "runtime_busy".into())
+        );
+        assert_eq!(
+            f.refused(RUNTIME_LOGIN_LOGOUT, json!({"id": "codex-account"})),
+            (Some(ErrorCode::Conflict), "runtime_busy".into())
+        );
+        assert_eq!(f.wait_inactive(&run), RunStatus::Completed);
+        let imported = import.join().unwrap().unwrap();
+        assert_eq!(imported["status"], "authenticated_cached", "{imported}");
+    });
+    // The engine has the runtimes again, with their new account.
+    let mut runtimes = f.engine_runtimes();
+    runtimes.sort();
+    assert_eq!(runtimes, ["codex-account", "codex-twin"]);
+    assert!(f.manager().get("codex-account").unwrap().profile.is_some());
+    assert_eq!(
+        f.services.runtime_sync().loaded(),
+        Some(f.manager().generation())
+    );
+    f.assert_no_credential_text();
+}
+
+#[test]
+fn going_offline_ends_an_official_cli_command_already_running() {
+    let f = fixture();
+    let folder = tempfile::tempdir().unwrap();
+    f.ok(
+        "runtime.add",
+        slow_account_runtime("codex-account", folder.path(), 15.0),
+    );
+    // A signed-in account, so its status runs the official CLI's `login
+    // status` (the import leaves no cached status).
+    let credential = fixture_credential(folder.path());
+    f.ok(
+        RUNTIME_PROFILE_IMPORT,
+        json!({"id": "codex-account", "source": credential.to_string_lossy()}),
+    );
+    std::fs::write(slow_marker(folder.path()), b"").unwrap();
+    for (method, params) in [
+        (RUNTIME_ACCOUNT_STATUS, json!({"id": "codex-account"})),
+        (RUNTIME_LOGIN_LOGOUT, json!({"id": "codex-account"})),
+    ] {
+        std::thread::scope(|scope| {
+            let command = scope.spawn(|| f.call(method, params.clone()));
+            wait_until("the official CLI runs", || {
+                !f.manager().process_registry().is_empty()
+            });
+            let offline = Instant::now();
+            f.ok("network.offline", json!({"enabled": true}));
+            assert!(f.manager().process_registry().is_empty(), "{method}");
+            // The account command ends with its process, not after its
+            // timeout (15 s, then a 5 s kill grace).
+            let _ = command.join().unwrap();
+            assert!(
+                offline.elapsed() < Duration::from_secs(5),
+                "{method}: the official CLI kept running for {:?}",
+                offline.elapsed()
+            );
+        });
+        f.ok("network.offline", json!({"enabled": false}));
+    }
+    f.assert_no_credential_text();
+}
+
+#[test]
+fn a_runtime_change_the_engine_has_not_seen_is_loaded_before_the_next_turn() {
+    let f = fixture();
+    f.ok("runtime.add", account_runtime("codex-account", None));
+    let session = f.runtime_session("codex-account");
+    let other = f.runtime_session(BLOCKING);
+    let folder = tempfile::tempdir().unwrap();
+    let credential = fixture_credential(folder.path());
+    // An external run of another runtime is active, so the engine cannot
+    // reload its runtimes while the account binds outside any daemon call (as
+    // a login's worker does once it connects).
+    let active = f.insert_run(&other, "running", None);
+    f.manager()
+        .import_profile("codex-account", &credential)
+        .unwrap();
+    f.ok(RUNTIME_LIST, Value::Null);
+    assert_ne!(
+        f.services.runtime_sync().loaded(),
+        Some(f.manager().generation())
+    );
+    let launched_error = |run: &str| {
+        f.wait_inactive(run);
+        f.services
+            .native()
+            .store()
+            .run(run)
+            .unwrap()
+            .error
+            .unwrap_or_default()
+    };
+    // The next turn replaces just this runtime's executor with the one made
+    // for the new account instead of launching the one the engine had
+    // (`account_changed`), while the other run goes on.
+    let run = f.send(&session, "during-other-run");
+    let error = launched_error(&run);
+    assert!(!error.contains("account_changed"), "{error}");
+    assert!(f.run_status(&active).active());
+    f.services
+        .native()
+        .store()
+        .update(&other, |detail| {
+            detail.runs[0].status = RunStatus::Completed;
+            Ok(())
+        })
+        .unwrap();
+    // Once no external run is active, the next turn loads every runtime.
+    let run = f.send(&session, "after-other-run");
+    assert_eq!(
+        f.services.runtime_sync().loaded(),
+        Some(f.manager().generation())
+    );
+    let error = launched_error(&run);
+    assert!(!error.contains("account_changed"), "{error}");
+}
+
+#[test]
+fn engine_refusals_after_an_idle_lock_are_vault_locked_and_otherwise_runtime_busy() {
+    let f = fixture();
+    let config = account_runtime("codex-account", None);
+    f.ok("runtime.add", config.clone());
+    let session = f.runtime_session("codex-account");
+    // A runtime without a managed profile has nothing to sign out.
+    assert_eq!(
+        f.refused(RUNTIME_LOGIN_LOGOUT, json!({"id": "codex-account"})),
+        (
+            Some(ErrorCode::InvalidArgument),
+            "invalid_request".to_owned()
+        )
+    );
+    // A run left waiting for an approval: the lock cannot save its cancel.
+    f.insert_run(&session, "waiting_approval", None);
+    let mut other = config.clone();
+    other["id"] = json!("other");
+    let busy = (Some(ErrorCode::Conflict), "runtime_busy".to_owned());
+    assert_eq!(
+        f.refused(RUNTIME_LOGIN_START, json!({"id": "codex-account"})),
+        busy
+    );
+    assert_eq!(
+        f.refused(RUNTIME_REMOVE, json!({"id": "codex-account"})),
+        busy
+    );
+    assert_eq!(f.refused(RUNTIME_CONFIG_SAVE, other.clone()), busy);
+    // As the idle auto-lock does.
+    f.services.vault().lock();
+    let locked = (Some(ErrorCode::VaultLocked), "vault_locked".to_owned());
+    assert_eq!(
+        f.refused(RUNTIME_LOGIN_START, json!({"id": "codex-account"})),
+        locked
+    );
+    assert_eq!(
+        f.refused(RUNTIME_REMOVE, json!({"id": "codex-account"})),
+        locked
+    );
+    assert_eq!(f.refused(RUNTIME_CONFIG_SAVE, other), locked);
+}
+
+#[test]
+fn account_statuses_the_cli_confirmed_through_health_or_a_login_are_kept() {
+    let f = fixture();
+    f.ok("runtime.add", account_runtime("codex-account", None));
+    let folder = tempfile::tempdir().unwrap();
+    let credential = fixture_credential(folder.path());
+    f.ok(
+        RUNTIME_PROFILE_IMPORT,
+        json!({"id": "codex-account", "source": credential.to_string_lossy()}),
+    );
+    // A daemon whose cache never saw the import (as after a restart) learns
+    // the account's status from a health check.
+    let mut router = Router::new();
+    register(&mut router, &f.services).unwrap();
+    crate::methods::models::register(&mut router, &f.services).unwrap();
+    let call = |method: &str, params: Value| router.call(&f.context, method, params).unwrap();
+    let health = call(RUNTIME_HEALTH, json!({"id": "codex-account"}));
+    assert_eq!(health["authenticated"], true, "{health}");
+    call("network.offline", json!({"enabled": true}));
+    let health = call(RUNTIME_HEALTH, json!({"id": "codex-account"}));
+    assert_eq!(health["authenticated"], true, "{health}");
+    assert_eq!(health["status"], "installed_auth_unverified");
+    let account = call(RUNTIME_ACCOUNT_STATUS, json!({"id": "codex-account"}));
+    assert_eq!(account["status"], "authenticated_cached", "{account}");
+    call("network.offline", json!({"enabled": false}));
+
+    // A login that connected is the CLI's confirmation too.
+    f.ok("runtime.add", account_runtime("codex-login", None));
+    let flow = f.ok(RUNTIME_LOGIN_START, json!({"id": "codex-login"}))["flow_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_until("the login connects", || {
+        f.ok(
+            RUNTIME_LOGIN_STATUS,
+            json!({"id": "codex-login", "flow_id": flow}),
+        )["state"]
+            == "connected"
+    });
+    f.ok("network.offline", json!({"enabled": true}));
+    let account = f.ok(RUNTIME_ACCOUNT_STATUS, json!({"id": "codex-login"}));
+    assert_eq!(account["status"], "authenticated_cached", "{account}");
+    assert_eq!(account["authenticated"], true);
+    // A signed-out account reports a documented health code while offline.
+    f.ok("network.offline", json!({"enabled": false}));
+    f.ok(RUNTIME_LOGIN_LOGOUT, json!({"id": "codex-login"}));
+    f.ok("network.offline", json!({"enabled": true}));
+    let health = f.ok(RUNTIME_HEALTH, json!({"id": "codex-login"}));
+    assert_eq!(health["status"], "auth_required", "{health}");
+    assert_eq!(health["authenticated"], false);
+    // A removed runtime's confirmed status goes with it.
+    f.ok("network.offline", json!({"enabled": false}));
+    f.ok(RUNTIME_REMOVE, json!({"id": "codex-login"}));
+    let mut again = account_runtime("codex-login", None);
+    again["profile"] = account["profile"].clone();
+    f.ok("runtime.add", again);
+    f.ok("network.offline", json!({"enabled": true}));
+    assert_eq!(
+        f.refused(RUNTIME_ACCOUNT_STATUS, json!({"id": "codex-login"})),
+        (Some(ErrorCode::Unavailable), "offline_refused".into())
+    );
+    f.assert_no_credential_text();
+}
+
+/// The branch snapshots of runtime `id` on the drive.
+fn branch_snapshots(f: &Fixture, id: &str) -> Vec<String> {
+    let prefix = format!("runtime-{}-", aidex_native_sessions::digest(id.as_bytes()));
+    std::fs::read_dir(f.drive.path().join("private"))
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&prefix))
+        .collect()
+}
+
+/// The snapshot a run's saved reference names.
+fn run_snapshot(f: &Fixture, run: &str) -> String {
+    let run = f.services.native().store().run(run).unwrap();
+    run.runtime_ref.unwrap()["snapshot_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn an_ended_runtime_thread_and_a_deleted_conversation_take_their_snapshots_with_them() {
+    let f = fixture();
+    f.ok("runtime.add", peer_runtime("codex-snap", "codex", "normal"));
+    let first = f.runtime_session("codex-snap");
+    let second = f.runtime_session("codex-snap");
+    let run = f.send(&first, "first-1");
+    assert_eq!(f.wait_inactive(&run), RunStatus::Completed);
+    let ended = run_snapshot(&f, &run);
+    let other = f.send(&second, "second-1");
+    assert_eq!(f.wait_inactive(&other), RunStatus::Completed);
+    let kept = run_snapshot(&f, &other);
+    assert_eq!(branch_snapshots(&f, "codex-snap").len(), 2);
+
+    // New instructions end the first conversation's thread, and its snapshot.
+    let mut config = f.ok("agent.configuration.get", json!({"session_id": first}));
+    config["instructions"] = json!("Answer briefly.");
+    f.ok(
+        "agent.configuration.set",
+        json!({"session_id": first, "configuration": config}),
+    );
+    assert_eq!(
+        branch_snapshots(&f, "codex-snap"),
+        std::slice::from_ref(&kept)
+    );
+    assert_ne!(ended, kept);
+
+    // A new thread, and one a daemon from before branch snapshots saved.
+    let run = f.send(&first, "first-2");
+    assert_eq!(f.wait_inactive(&run), RunStatus::Completed);
+    assert_eq!(branch_snapshots(&f, "codex-snap").len(), 2);
+    let legacy = f.drive.path().join("private").join(format!(
+        "runtime-{}.sealed",
+        aidex_native_sessions::digest(format!("codex-snap:{first}").as_bytes())
+    ));
+    std::fs::write(&legacy, vec![0u8; 64]).unwrap();
+    assert_eq!(
+        f.ok("conversation.delete", json!({"id": first})),
+        json!({"deleted": true})
+    );
+    // Only the other conversation's snapshot is left.
+    assert_eq!(branch_snapshots(&f, "codex-snap"), [kept]);
+    assert!(!legacy.exists());
+}
+
+#[test]
+fn background_reads_let_the_idle_lock_happen_while_actions_hold_it_off() {
+    use aidex_providers::{
+        FakeProvider, FakeScript, FakeTurn, Locality, ModelDescriptor, ModelId, ModelRef,
+        ProviderId, ToolCallSupport,
+    };
+    let f = fixture();
+    let fake = Arc::new(
+        FakeProvider::new(ProviderId::new("fixture").unwrap(), Locality::Local)
+            .with_model(
+                ModelDescriptor::new(
+                    ModelRef::new(
+                        ProviderId::new("fixture").unwrap(),
+                        ModelId::new("small").unwrap(),
+                    ),
+                    Locality::Local,
+                    65536,
+                )
+                .with_tool_calls(ToolCallSupport::Native),
+            )
+            .with_script(FakeScript::new().then(FakeTurn::tool_call(
+                "fs_write",
+                r#"{"path":"effect.txt","content":"new"}"#,
+            ))),
+    );
+    f.services
+        .models()
+        .registry()
+        .register_shared(fake)
+        .unwrap();
+    let session = f.ok(
+        "conversation.create",
+        json!({
+            "provider_id": "fixture", "model_id": "small", "mode": "agent",
+            "permission_mode": "supervised", "workspace_id": f.workspace_id,
+        }),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let run = f.send(&session, "write-1");
+    wait_until("the run waits for its approval", || {
+        f.run_status(&run) == RunStatus::WaitingApproval
+    });
+    // A person's action (here a secret write) holds the idle lock off...
+    f.services
+        .vault()
+        .set_idle_timeout(Some(Duration::from_millis(800)));
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(1600) {
+        f.ok(
+            "vault.secret.set",
+            json!({"name": "fixture-action", "value": "fixture-value", "consumers": ["provider:fixture"]}),
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    assert_eq!(f.services.vault().status().state, VaultState::Unlocked);
+    // ...while the desktop's background polls, however frequent, do not.
+    let polls = [
+        ("vault.status", Value::Null),
+        ("vault.secret.list", Value::Null),
+        ("conversation.list", Value::Null),
+        ("conversation.get", json!({"id": session})),
+        ("approval.list", json!({"status": "pending", "limit": 1})),
+        ("execution.status", Value::Null),
+        ("run.get", json!({"id": run})),
+        ("history.list", json!({"session_id": session})),
+        ("checkpoint.list", json!({"session_id": session})),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while f.services.vault().status().state == VaultState::Unlocked {
+        assert!(
+            Instant::now() < deadline,
+            "background polls held the vault open"
+        );
+        for (method, params) in &polls {
+            let _ = f.call(method, params.clone());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The lock cleanup stopped the waiting run, as when nobody polls.
+    f.services.vault().set_idle_timeout(None);
+    f.ok("vault.unlock", json!({"passphrase": PASSPHRASE}));
+    assert_eq!(f.run_status(&run), RunStatus::Interrupted);
+}

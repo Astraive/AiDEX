@@ -3,9 +3,12 @@
 //!
 //! Besides the broker's stop (tool calls, approvals, managed tool processes,
 //! vault handles), `emergency.stop` cancels every native and external run and
-//! every pending official runtime login, and terminates every vendor process.
-//! The runtime gate stays closed while the stop is in effect, so no runtime
-//! launches until `emergency.resume`; the runtimes themselves stay usable.
+//! every pending official runtime login, terminates every vendor process and
+//! official CLI command, and releases every launch parked for an approval (its
+//! temporary home is removed). Its report counts the vendor process trees with
+//! the broker's own. The runtime gate stays closed while the stop is in effect,
+//! so no runtime launches until `emergency.resume`; the runtimes themselves
+//! stay usable.
 
 use crate::{
     methods::approvals::broker_error,
@@ -14,7 +17,7 @@ use crate::{
     services::Services,
 };
 use aidex_broker::Principal;
-use aidex_sandbox::StopReason;
+use aidex_sandbox::{StopReason, TerminationReport};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -46,19 +49,21 @@ pub struct ResumeResult {
 
 /// End agent work the broker does not own: native and external runs are
 /// cancelled (not shut down, so `emergency.resume` leaves the engine and the
-/// runtimes usable), pending official logins are cancelled, and vendor
-/// processes still running are terminated. The broker's stop already closed the
-/// runtime gate, so nothing new launches meanwhile.
-fn stop_agent_work(services: &Services) {
+/// runtimes usable), pending official logins are cancelled, vendor processes
+/// and official CLI commands still running are terminated, and launches parked
+/// for an approval are released. The broker's stop already closed the runtime
+/// gate, so nothing new launches meanwhile. Returns the runtime process
+/// registry's report (`None` without runtimes); a tree it could not confirm
+/// ended is logged as one fixed line, without ids or vendor text.
+fn stop_agent_work(services: &Services) -> Option<TerminationReport> {
     services.native().cancel_all();
-    if let Ok(runtime) = services.runtime() {
-        // Best effort: a login whose process cannot be confirmed ended reports
-        // `process_shutdown_failed` through its own `runtime.login.status`.
-        let _ = runtime.cancel_logins();
-        runtime
-            .process_registry()
-            .terminate_all(StopReason::EmergencyStop);
+    let report = super::runtime::stop_runtime_processes(services, StopReason::EmergencyStop)?;
+    if !report.is_clean() {
+        eprintln!(
+            "aidexd: an emergency stop could not confirm that every external runtime process ended"
+        );
     }
+    Some(report)
 }
 
 pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<(), RouterError> {
@@ -71,20 +76,29 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .unwrap_or(DEFAULT_REASON);
-        // The broker freezes before anything else, so even when it fails later
-        // (recording its approvals or events) the stop is in effect: agent work
-        // still ends and the vault still locks as asked before the error is
-        // reported.
+        // Runs on external runtimes are cancelled while the runtime gate is
+        // still open: the broker's stop closes it, which ends their vendor
+        // processes, and a run whose own cancel did not come first settles as
+        // failed. This cannot fail. Then the broker freezes, so even when it
+        // fails later (recording its approvals or events) the stop is in
+        // effect: agent work still ends and the vault still locks as asked
+        // before the error is reported.
+        super::runtime::cancel_external_runs(&shared);
         let stopped = shared
             .broker()
             .emergency_stop(reason, &Principal::LocalUser);
-        stop_agent_work(&shared);
+        let runtime_report = stop_agent_work(&shared);
         let locked = params.lock_vault.then(|| {
             // As `vault.lock`: native runs are cancelled, uploads in flight are
             // aborted (files deleted), and `vault.locked` is recorded.
             super::vault::lock_vault(&shared)
         });
         let mut report = stopped.map_err(|error| broker_error(&error))?;
+        // The vendor process trees count with the broker's own.
+        if let Some(runtime) = runtime_report {
+            report.terminated_processes += runtime.terminated.len();
+            report.failed_terminations += runtime.failed.len();
+        }
         if let Some(outcome) = locked {
             report.vault_locked = true;
             report.revoked_handles += outcome.revoked_handles;
