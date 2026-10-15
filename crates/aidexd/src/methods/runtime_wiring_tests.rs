@@ -1137,6 +1137,46 @@ fn run_resume_and_approval_respond_load_a_runtime_the_engine_lost() {
 }
 
 #[test]
+fn run_resume_of_an_external_run_is_refused_while_runtimes_may_not_start() {
+    let f = fixture();
+    let executable = f.drive.path().join("missing").join("codex.exe");
+    f.ok(
+        "runtime.add",
+        json!({"id": "codex-fixture", "driver": "codex", "executable": executable.to_string_lossy()}),
+    );
+    let session = f.runtime_session("codex-fixture");
+    let run = f.insert_run(
+        &session,
+        "interrupted",
+        Some(resumable_reference("codex-fixture")),
+    );
+    let refused = (Some(ErrorCode::Unavailable), "offline_refused".to_owned());
+
+    // Offline: refused up front, and the run stays as it was.
+    f.ok("network.offline", json!({"enabled": true}));
+    assert_eq!(f.refused("run.resume", json!({"id": run})), refused);
+    assert_eq!(f.run_status(&run), RunStatus::Interrupted);
+    f.ok("network.offline", json!({"enabled": false}));
+
+    // The same during an emergency stop.
+    f.ok("emergency.stop", json!({}));
+    assert_eq!(f.refused("run.resume", json!({"id": run})), refused);
+    assert_eq!(f.run_status(&run), RunStatus::Interrupted);
+    f.ok("emergency.resume", Value::Null);
+
+    // Once runtimes may start again the resume is accepted.
+    f.ok("run.resume", json!({"id": run}));
+    f.wait_inactive(&run);
+
+    // A native conversation's run is not the runtime gate's business.
+    let native = native_conversation(&f);
+    let local = f.insert_run(&native, "interrupted", None);
+    f.ok("network.offline", json!({"enabled": true}));
+    f.ok("run.resume", json!({"id": local}));
+    f.wait_inactive(&local);
+}
+
+#[test]
 fn switching_mode_permission_or_instructions_ends_the_runtime_thread() {
     let f = fixture();
     f.services.models().offline().set_offline(true).unwrap();

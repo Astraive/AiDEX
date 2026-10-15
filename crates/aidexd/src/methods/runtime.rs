@@ -477,6 +477,17 @@ fn cli_paused() -> RpcError {
     })
 }
 
+/// The refusal of a `run.resume` that would launch an external runtime while
+/// the runtime gate is closed (the runtime itself would refuse it the same way).
+pub(crate) fn launches_paused() -> RpcError {
+    error(RuntimeError {
+        code: "offline_refused".into(),
+        message: "External runtimes do not run while offline, while the vault is locked, or \
+                  during an emergency stop"
+            .into(),
+    })
+}
+
 /// Only Codex has a verified official login, as the adapter checks it.
 fn account_supported(config: &RuntimeConfig) -> Result<(), RpcError> {
     if config.driver == Driver::Codex {

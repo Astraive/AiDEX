@@ -148,16 +148,28 @@ pub(crate) fn native_error(message: String) -> RpcError {
     RpcError::new(code, aidex_events::redact_text(&message).into_owned())
 }
 /// Load the runtime of the conversation `run_id` belongs to before the engine
-/// continues that run (`run.resume`, `approval.respond`), as `message.send`
-/// does: an unlock whose runtime sync was refused leaves the engine without it.
-/// Best effort: the engine reports a runtime it still lacks. Refused only
-/// while the runtime's account is being changed.
+/// continues that run (`run.resume`), as `message.send` does: an unlock whose
+/// runtime sync was refused leaves the engine without it. Best effort: the
+/// engine reports a runtime it still lacks. Refused while the runtime's
+/// account is being changed (`runtime_busy`), and, for a run on an external
+/// runtime that could resume, while vendor processes may not start (offline,
+/// an emergency stop): `offline_refused` up front, rather than a run that goes
+/// `pending` only for its runtime to refuse it back to `interrupted`.
 fn ensure_run_runtime(services: &Services, run_id: &str) -> Result<(), RpcError> {
     let store = services.native().store();
     if let Ok(run) = store.run(run_id)
         && let Ok(detail) = store.get(&run.session_id)
     {
         super::runtime::ensure_session_runtime(services, &detail.configuration)?;
+        if matches!(
+            run.status,
+            aidex_native_sessions::RunStatus::Interrupted
+                | aidex_native_sessions::RunStatus::WaitingApproval
+        ) && super::runtime::uses_external_runtime(&detail.configuration)
+            && !services.runtime_gate_open()
+        {
+            return Err(super::runtime::launches_paused());
+        }
     }
     Ok(())
 }
