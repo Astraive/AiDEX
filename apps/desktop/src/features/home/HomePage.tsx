@@ -72,11 +72,11 @@ export function HomePage({ autoFocus = false }: Props) {
 
   return (
     <Container size="md" verticallyCentered>
-      <Stack gap={11}>
+      <Stack gap={8}>
         <Stack direction="row" justify="center">
           <SegmentedControl label="Conversation mode" options={modeOptions} value={mode} onValueChange={setMode} />
         </Stack>
-        <Stack gap={10}>
+        <Stack gap={6}>
           <Stack gap={3}>
             <Heading level={1} size="display" align="center">
               Welcome to AiDEX
@@ -85,7 +85,7 @@ export function HomePage({ autoFocus = false }: Props) {
               Your AI workspace for deeper thinking, faster building, and greater outcomes.
             </Text>
           </Stack>
-          <Stack gap={7}>
+          <Stack gap={5}>
             {problem && (
               <Notice tone="danger" role="alert">
                 {problem}
@@ -114,7 +114,7 @@ export function HomePage({ autoFocus = false }: Props) {
             />
             <Stack direction="row" gap={4} justify="center" wrap role="group" aria-label="Suggestions">
               {suggestions.map(({ label, Icon, prompt }) => (
-                <Button key={label} variant="outline" size="lg" icon={<Icon />} onClick={() => applySuggestion(prompt)}>
+                <Button key={label} variant="outline" size="md" icon={<Icon />} onClick={() => applySuggestion(prompt)}>
                   {label}
                 </Button>
               ))}
