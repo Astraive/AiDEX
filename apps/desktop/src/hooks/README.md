@@ -10,5 +10,6 @@ Reusable React hooks for the desktop app.
 | `useSubscription(method, params, onData, { enabled })` | A daemon stream through `rpc_subscribe`; unsubscribes on unmount and resubscribes when the daemon changes. |
 | `useCommandShortcut`, `useModifierKeyLabel` | Ctrl/⌘ shortcuts and the platform's command-key label. |
 | `useKeyChord(chord, handler, { enabled })` | Window-wide chords such as `Mod+Shift+M` (parsed by `lib/keyChord.ts`; `Mod` is ⌘ on Apple platforms, Ctrl elsewhere). |
+| `useMediaQuery(query)` | Whether a CSS media query matches, live as the window or its zoom changes (true while prerendering); the shell docks the sidebar with it. |
 
 Errors are `AidexError` (`@aidex/client/errors`): branch on `kind` (`bridge_unavailable`, `no_drive`, `daemon_unavailable`, `method_not_found`, ...), never on message text.
