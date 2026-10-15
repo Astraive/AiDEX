@@ -9,10 +9,10 @@ use aidex_policy::{
 };
 use aidex_sandbox::{Sandbox, SandboxLevel};
 use aidex_tools::{
-    ExecutionPermit, PermitIssuer, PlanFingerprint, ToolContext, ToolError, ToolOutput, ToolPlan,
-    ToolRegistry,
+    ExecutionPermit, PermitIssuer, PlanFingerprint, ToolContext, ToolError, ToolId, ToolOutput,
+    ToolPlan, ToolRegistry,
 };
-use aidex_workspace::WorkspaceRegistry;
+use aidex_workspace::{WorkspaceHandle, WorkspaceRegistry};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -90,6 +90,14 @@ fn planning_error(error: ToolError) -> PrepareError {
         PrepareError::Fatal(error.to_string())
     }
 }
+/// The policy profile a permission mode is evaluated under.
+fn profile_for(mode: PermissionMode) -> Profile {
+    if mode == PermissionMode::FullAccess {
+        Profile::Autonomous
+    } else {
+        Profile::Balanced
+    }
+}
 pub(crate) struct Prepared {
     pub context: ToolContext,
     pub plan: ToolPlan,
@@ -161,13 +169,8 @@ impl Broker {
             .transpose()
             .map_err(|e| e.to_string())?;
         let (policies, _) = self.policy_state(root.as_deref(), workspace.as_ref())?;
-        let profile = if config.permission_mode == PermissionMode::FullAccess {
-            Profile::Autonomous
-        } else {
-            Profile::Balanced
-        };
         let context = EvaluationContext::new(
-            profile,
+            profile_for(config.permission_mode),
             PrivacyMode::Hybrid,
             HostTrust::Trusted,
             NetworkMode::Unrestricted,
@@ -255,6 +258,10 @@ impl Broker {
         let input: serde_json::Value = serde_json::from_str(&call.arguments).map_err(|_| {
             PrepareError::repairable("invalid_input", "tool arguments are not valid JSON")
         })?;
+        // A repairable error is first checked against policy for the path it
+        // is about ([`Self::guard_repairable`]): its text may tell what is
+        // (or is not) in a file the model may not read.
+        let guard = |error: PrepareError| self.guard_repairable(s, &handle, tool, &input, error);
         if tool.as_str() == "fs.delete" {
             if input
                 .get("recursive")
@@ -263,37 +270,46 @@ impl Broker {
             {
                 return Err("native deletion never removes directories recursively".into());
             }
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or("delete path is required")?;
+            let path = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                PrepareError::repairable("invalid_input", "delete path is required")
+            })?;
             let absolute = handle
                 .resolve(
                     &WorkspacePath::new(path).map_err(|e| e.to_string())?,
                     aidex_workspace::Access::Create,
                 )
                 .map_err(|e| e.to_string())?;
-            if !std::fs::symlink_metadata(&absolute)
-                .map_err(|e| e.to_string())?
-                .is_file()
-            {
-                return Err(
-                    "native deletion requires a regular file; directories and links are refused"
-                        .into(),
-                );
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(metadata) if metadata.is_dir() => {
+                    return Err(guard(PrepareError::repairable(
+                        "wrong_kind",
+                        "native deletion requires a regular file; directories are refused",
+                    )));
+                }
+                Ok(_) => {
+                    return Err(
+                        "native deletion requires a regular file; links and special files are \
+                         refused"
+                            .into(),
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(guard(PrepareError::Repairable {
+                        code: "not_found".into(),
+                        message: format!("`{path}` does not exist"),
+                    }));
+                }
+                Err(error) => return Err(error.to_string().into()),
             }
         }
         let plan = self
             .tools
-            .plan(&context, tool, input)
-            .map_err(planning_error)?;
+            .plan(&context, tool, input.clone())
+            .map_err(|error| guard(planning_error(error)))?;
         let (policies, policy_fingerprint) =
             self.policy_state(Some(&handle.root().display_root()), Some(handle.id()))?;
-        let profile = if s.configuration.permission_mode == PermissionMode::FullAccess {
-            Profile::Autonomous
-        } else {
-            Profile::Balanced
-        };
+        let profile = profile_for(s.configuration.permission_mode);
         // A plan that reaches the network (a push, a networked command) is
         // refused while offline or stopped, and its intents meet the drive's
         // privacy, host-trust, and network-mode floors; other plans keep the
@@ -388,6 +404,79 @@ impl Broker {
             network,
             level,
         })
+    }
+    /// `error`, unless it is repairable and about a path the model may not
+    /// read. A planning error's text (a patch that does not apply, how often
+    /// a string occurs, a missing file, the wrong kind of entry) tells what
+    /// is, or is not, in the file, so it reaches the model only when policy
+    /// lets the session read the call's `path` without an approval and does
+    /// not deny the tool's own action there. Otherwise the call fails the
+    /// run: with the policy's denial, or with a fixed text when reading needs
+    /// an approval or is rate limited. Errors of calls without a `path`
+    /// argument are kept.
+    fn guard_repairable(
+        &self,
+        s: &SessionDetail,
+        handle: &WorkspaceHandle,
+        tool: &ToolId,
+        input: &serde_json::Value,
+        error: PrepareError,
+    ) -> PrepareError {
+        if !matches!(error, PrepareError::Repairable { .. }) {
+            return error;
+        }
+        let Some(path) = input.get("path").and_then(serde_json::Value::as_str) else {
+            return error;
+        };
+        match self.readable_path(s, handle, tool, path) {
+            Ok(()) => error,
+            Err(refusal) => PrepareError::Fatal(refusal),
+        }
+    }
+    /// Whether policy lets the session read `path` without an approval, and
+    /// does not deny `tool`'s own action there.
+    fn readable_path(
+        &self,
+        s: &SessionDetail,
+        handle: &WorkspaceHandle,
+        tool: &ToolId,
+        path: &str,
+    ) -> Result<(), String> {
+        const PROTECTED: &str = "the call could not be planned for a protected path";
+        let scope = aidex_tools::path_scope(handle.root(), path).map_err(|_| PROTECTED)?;
+        let action = self
+            .tools
+            .descriptor(tool)
+            .map(|descriptor| descriptor.risk.action)
+            .ok_or(PROTECTED)?;
+        let (policies, _) =
+            self.policy_state(Some(&handle.root().display_root()), Some(handle.id()))?;
+        let context = EvaluationContext::new(
+            profile_for(s.configuration.permission_mode),
+            PrivacyMode::Hybrid,
+            HostTrust::Trusted,
+            NetworkMode::Unrestricted,
+        );
+        let session = EntityId::new(&s.id).map_err(|e| e.to_string())?;
+        let decide = |action| {
+            let mut intent =
+                aidex_policy::Intent::new(action, session.clone(), "check a planning error")
+                    .with_workspace(handle.id().clone())
+                    .with_tool(tool.entity_id().clone());
+            intent.attributes.paths = vec![scope.clone()];
+            evaluate(&policies, &context, &intent)
+        };
+        let read = decide(aidex_policy::Action::FsRead);
+        let own = decide(action);
+        for decision in [&read, &own] {
+            if decision.verdict.is_deny() {
+                return Err(format!("policy denied: {}", decision.reason));
+            }
+        }
+        if read.verdict.requires_approval() || read.rate_limit.is_some() {
+            return Err(PROTECTED.into());
+        }
+        Ok(())
     }
     /// The context network-bearing plans are evaluated under: refused while
     /// the offline switch or an emergency stop is on, otherwise the drive's

@@ -24,12 +24,15 @@ impl NativeEngine {
         nonce(&self.nonce_key, &run.id)
     }
 
-    /// System and context messages followed by the run transcript.
+    /// System and context messages followed by the run transcript, with at
+    /// most `instruction_budget` bytes of project instruction files
+    /// ([`crate::context::instruction_budget`]).
     pub(crate) fn assemble(
         &self,
         s: &SessionDetail,
         run: &Run,
         offer: &Offer,
+        instruction_budget: usize,
     ) -> Result<Vec<ChatMessage>, String> {
         let nonce = self.run_nonce(run);
         let mode = s.configuration.mode;
@@ -61,7 +64,7 @@ impl NativeEngine {
         if !s.configuration.instructions.trim().is_empty() {
             messages.push(ChatMessage::system(s.configuration.instructions.clone()));
         }
-        let project = self.project_instructions(s, &nonce)?;
+        let project = self.project_instructions(s, &nonce, instruction_budget)?;
         let names = result_names(&run.transcript);
         let wraps_results = names
             .iter()

@@ -649,3 +649,44 @@ fn git_metadata_is_never_modified_and_aidex_writes_imply_policy_change() {
         .unwrap();
     assert_eq!(plan.facts().implied_actions, [Action::PolicyChange]);
 }
+
+#[test]
+fn a_path_scope_is_the_one_a_plan_of_the_path_reports() {
+    let fixture = Fixture::new();
+    fixture.write("notes.txt", "x");
+    fixture.write(".env", "TOKEN=x");
+    fixture.write("dir/inner.txt", "x");
+    // An existing file, a credential-bearing one, and a file being created.
+    for (path, tool, input) in [
+        ("notes.txt", "fs.read", json!({"path": "notes.txt"})),
+        (".env", "fs.read", json!({"path": ".env"})),
+        (
+            "new.txt",
+            "fs.write",
+            json!({"path": "new.txt", "content": "x"}),
+        ),
+    ] {
+        let (_, plan) = fixture.plan(tool, input).unwrap();
+        let planned = plan.facts().intent_attributes().paths.remove(0);
+        assert_eq!(
+            aidex_tools::path_scope(&fixture.root, path).unwrap(),
+            planned,
+            "{path}"
+        );
+    }
+    let env = aidex_tools::path_scope(&fixture.root, ".env").unwrap();
+    assert_eq!(env.class, aidex_policy::PathClass::Sensitive);
+    // The root, as a listing names it.
+    let (_, plan) = fixture.plan("fs.list", json!({})).unwrap();
+    let root = plan.facts().intent_attributes().paths.remove(0);
+    for raw in ["", "."] {
+        assert_eq!(aidex_tools::path_scope(&fixture.root, raw).unwrap(), root);
+    }
+    // Malformed paths and paths outside the workspace have no scope.
+    for raw in ["../outside.txt", "/etc/passwd", "a/../../b"] {
+        assert!(
+            aidex_tools::path_scope(&fixture.root, raw).is_err(),
+            "{raw}"
+        );
+    }
+}

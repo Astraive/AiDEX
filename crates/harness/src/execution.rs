@@ -24,6 +24,18 @@ pub(crate) struct ApprovalRequest {
 
 impl NativeEngine {
     pub(crate) fn append_result(&self, id: &str, call: &str, result: String) -> Result<(), String> {
+        self.append_output(id, call, result, None)
+    }
+    /// [`append_result`](Self::append_result) of a result stored as its model
+    /// view, with the complete output it was made from (`full`), which goes
+    /// to the run's [`Run::tool_outputs`].
+    fn append_output(
+        &self,
+        id: &str,
+        call: &str,
+        result: String,
+        full: Option<String>,
+    ) -> Result<(), String> {
         let run = self.store.run(id)?;
         self.store.update(&run.session_id, |s| {
             let r = s
@@ -33,6 +45,12 @@ impl NativeEngine {
                 .ok_or("run not found")?;
             if r.status == RunStatus::Cancelled {
                 return Err("run cancelled".into());
+            }
+            if let Some(output) = full {
+                r.tool_outputs.push(ToolOutputRecord {
+                    call_id: call.into(),
+                    output,
+                });
             }
             let message = ChatMessage::tool_result(call, result);
             r.transcript.push(message.clone());
@@ -247,13 +265,22 @@ impl NativeEngine {
         cancel: &CancelToken,
         tool_cancel: &aidex_tools::CancelToken,
     ) -> Result<(), String> {
-        self.transition(id, RunStatus::Running, None)?;
+        // A run cancelled, interrupted, or failed before this thread got to
+        // it (a launch that raced a cancel) is left as it is.
+        if self.transition(id, RunStatus::Running, None)?.status != RunStatus::Running {
+            return Ok(());
+        }
         loop {
             if cancel.is_cancelled() {
                 self.transition(id, RunStatus::Cancelled, None)?;
                 return Ok(());
             }
             let run = self.store.run(id)?;
+            // Stopped since the last step without this thread's token (a
+            // settle that could not reach it): nothing more runs.
+            if run.status != RunStatus::Running {
+                return Ok(());
+            }
             let s = self.store.get(&run.session_id)?;
             if run.steps >= s.configuration.max_steps {
                 return Err("native run step budget exhausted".into());
@@ -279,7 +306,12 @@ impl NativeEngine {
             let native_tools = primary.1.capabilities.tool_calls == ToolCallSupport::Native;
             let offer = self.offer(&s, &run, native_tools, tool_cancel);
             self.remember_offer(id, &offer);
-            let messages = self.assemble(&s, &run, &offer)?;
+            let messages = self.assemble(
+                &s,
+                &run,
+                &offer,
+                crate::context::instruction_budget(&primary.1),
+            )?;
             let start = messages.len().saturating_sub(run.transcript.len());
             let attachments = self.turn_attachments(&s, &run)?;
             let mut request = ChatRequest::new(
@@ -419,13 +451,15 @@ impl NativeEngine {
             s.checkpoints.extend(checkpoints);
             Ok(())
         })?;
-        // The whole output (content, applied diff, changed paths, warnings)
-        // stays in encrypted history; requests carry it with diff statistics
-        // in place of the applied diff (`crate::tool_view`).
-        self.append_result(
-            id,
-            &call.id,
-            serde_json::to_string(&output).map_err(|e| e.to_string())?,
-        )
+        // History holds the output as a model reads it, with diff statistics
+        // in place of an applied diff (`crate::tool_view`): any daemon may
+        // send stored results to a model as they are, an older one too. The
+        // complete output (the applied diff with the file's earlier lines)
+        // stays with the run, in encrypted history, for clients.
+        let full = serde_json::to_string(&output).map_err(|e| e.to_string())?;
+        match crate::tool_view::model_tool_result(&full) {
+            Some(view) => self.append_output(id, &call.id, view, Some(full)),
+            None => self.append_result(id, &call.id, full),
+        }
     }
 }

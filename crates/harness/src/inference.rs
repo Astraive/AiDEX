@@ -425,6 +425,19 @@ impl NativeEngine {
                 );
                 let mut fallback_request = request.clone();
                 fallback_request.model = target_fallback.model_id;
+                // A fallback whose exact context window is smaller gets the
+                // project instructions cut to its own budget.
+                let budget = crate::context::instruction_budget(&fallback_model);
+                if budget < crate::context::instruction_budget(&model) {
+                    let s = self.store.get(&run.session_id)?;
+                    self.refit_project_instructions(
+                        &mut fallback_request,
+                        &s,
+                        &turn.nonce,
+                        turn.start,
+                        budget,
+                    )?;
+                }
                 // A fallback without native tool calling answers without tools
                 // (Agent mode already refused such a fallback above).
                 if fallback_model.capabilities.tool_calls != ToolCallSupport::Native {
