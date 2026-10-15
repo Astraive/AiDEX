@@ -1,13 +1,14 @@
 //! What a model reads of a tool result.
 //!
-//! Encrypted history keeps the complete `ToolOutput` (`summary`, `content`,
-//! `diff`, `changes`, `warnings`), and the desktop shows it from there. A
-//! model request carries the same envelope with the applied diff reduced to
+//! A model reads a workspace tool's `ToolOutput` envelope (`summary`,
+//! `content`, `diff`, `changes`, `warnings`) with the applied diff reduced to
 //! its statistics (`diff_stats`: each file's path, kind, added and removed
 //! lines, and whether it is binary): the unified text of a write, patch, or
 //! delete shows the file's earlier lines, which a policy denying `fs.read`
 //! keeps from the model, and it would grow every later request. The change
-//! itself is in the call's arguments and the tool's `content`.
+//! itself is in the call's arguments and the tool's `content`. History stores
+//! this view as the tool result, and the complete output stays with the run
+//! (`Run::tool_outputs`).
 //!
 //! Every tool result gets this view, whatever call it answers, before it is
 //! wrapped as untrusted data or flattened: a result is never trusted to be

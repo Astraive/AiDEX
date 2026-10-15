@@ -285,7 +285,9 @@ answer from the status the CLI last confirmed for the runtime's profile (kept
 in memory by `methods/runtime.rs` from account status, health, import, logout
 and connected logins, dropped by `runtime.remove`, never credential text; health
 reports it in its documented codes), and import, login start, and logout are
-refused with `offline_refused`.
+refused with `offline_refused`, as is `run.resume` of an interrupted or waiting
+run of a runtime conversation (before the engine makes it `pending`; the harness
+would return it to `interrupted` once its runtime refused the launch).
 The configuration is sealed with a vault
 key, so the native engine only learns the configured runtimes through
 `sync_runtimes`, which loads the enabled executors when the vault is unlocked (a

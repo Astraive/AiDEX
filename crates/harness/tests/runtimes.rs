@@ -336,7 +336,7 @@ fn native_tool_diffs_in_the_transcript_reach_a_runtime_as_statistics() {
     let view: Value = serde_json::from_str(&result.content).unwrap();
     assert_eq!(view["diff_stats"]["files"][0]["deletions"], 1);
     assert_eq!(view["content"]["path"], "notes.txt");
-    // History keeps the applied diff.
+    // History is not rewritten: a result stored whole (before the model view) stays as stored.
     assert!(
         e.store().get(&s).unwrap().messages[2]
             .content
