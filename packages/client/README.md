@@ -8,7 +8,7 @@ Typed TypeScript access to AiDEX Core for the Tauri apps: wrappers for the deskt
 | --- | --- |
 | `@aidex/client/bridge` | `isTauri()`, `command(name, args)` (rejects with `AidexError`; outside Tauri with kind `bridge_unavailable`), `listenTo(event, handler)` |
 | `@aidex/client/errors` | `AidexError { code, kind, rpcCode?, data? }`, `toAidexError`, `ErrorKind` constants, `BridgeErrorPayload`, `ServiceErrorCode` |
-| `@aidex/client/desktop` | `aidexStatus`, `driveStatus`, `sandboxCapabilities`, `startDaemon`, `stopDaemon`, `selectDrive(path)` |
+| `@aidex/client/desktop` | `aidexStatus`, `driveStatus`, `sandboxCapabilities`, `startDaemon`, `stopDaemon`, `selectDrive(path)`, `callUpdate(method, params)` (`rpc_call_long`: `update.check`, `update.apply`, or `update.rollback` on a connection of its own that waits up to 30 minutes) |
 | `@aidex/client/installer` | `listDrives`, `inspectDrive(root)`, `initDrive(root)` |
 | `@aidex/client/host` | `hostProfile()` (both apps) |
 | `@aidex/client/rpc` | `call(method, params)` typed by `RpcMethods`, `callUntyped`, `subscribe(method, params, { onData, onEnd })` |

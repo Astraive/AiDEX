@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { Dialog, KeyValueList, Notice, SectionHeader, SettingRow } from "@aidex/ui/components";
 import { RefreshIcon, ShieldCheckIcon } from "@aidex/ui/icons";
 import { Button, Card, Stack, StatusIndicator, Switch, Text, TextField } from "@aidex/ui/primitives";
+import { callUpdate } from "@aidex/client/desktop";
 import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
 import type {
@@ -16,7 +17,7 @@ import { useAidexStatus } from "../../hooks/useAidexStatus";
 import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 import { CoreStatusNotice } from "../system/CoreStatusNotice";
-import { callUpdate, mayStillRun } from "./updateCalls";
+import { mayStillRun } from "./updateCalls";
 import {
   absoluteUpdateSource,
   applySelectionReason,

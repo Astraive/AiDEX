@@ -23,4 +23,4 @@
 2. Add the adapter here, its name to `COMMANDS`, to `tauri::generate_handler!` in `../app.rs`, to the `AppManifest` list in `../../build.rs`, and `allow-<name-with-dashes>` to `../../capabilities/default.json` (a unit test checks all four agree).
 3. Add a typed wrapper in `packages/client/src/desktop.ts` and the DTO mirror in `packages/client/src/dto/`.
 
-Daemon methods do not need a command: call them with `rpc_call` (`call()` / `useRpc()` on the TypeScript side). The update operations that can run for minutes go through `rpc_call_long` (`callUpdate()` in `apps/desktop/src/features/settings/updateCalls.ts`).
+Daemon methods do not need a command: call them with `rpc_call` (`call()` / `useRpc()` on the TypeScript side). The update operations that can run for minutes go through `rpc_call_long` (`callUpdate()` in `packages/client/src/desktop.ts`).
