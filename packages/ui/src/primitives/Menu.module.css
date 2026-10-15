@@ -1,0 +1,157 @@
+/*
+ * While open, the list is modal: Base UI covers the page with a transparent backdrop (marked
+ * `data-base-ui-inert`) so a press outside only closes it. Lift it to the popup's layer, or anything
+ * with its own z-index (a docked composer, the sidebar) would still take the press.
+ */
+.portal > [data-base-ui-inert] {
+  z-index: var(--aidex-z-popover);
+}
+
+.positioner {
+  z-index: var(--aidex-z-popover);
+  outline: none;
+}
+
+.popup {
+  display: flex;
+  flex-direction: column;
+  min-width: min(var(--aidex-popover-min-width), calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: var(--available-height);
+  padding: var(--aidex-space-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--aidex-color-border-strong);
+  border-radius: var(--aidex-radius-lg);
+  background: var(--aidex-color-surface-raised);
+  box-shadow: var(--aidex-popup-shadow);
+  color: var(--aidex-color-text);
+  outline: none;
+  transform-origin: var(--transform-origin);
+  transition:
+    opacity 150ms var(--aidex-ease),
+    transform 150ms var(--aidex-ease);
+}
+
+.popup[data-starting-style],
+.popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.98);
+}
+
+.popup[data-instant] {
+  transition: none;
+}
+
+/* Only the highlighted item is lit (pointer or keyboard), never a separate hover and focus pair. */
+.item {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-height: var(--aidex-row-sm);
+  padding: var(--aidex-space-1) var(--aidex-space-2);
+  border-radius: var(--aidex-radius-sm);
+  color: var(--aidex-color-text);
+  font-size: var(--aidex-text-sm);
+  line-height: var(--aidex-leading-sm);
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+}
+
+.item[data-highlighted],
+.subTrigger[data-popup-open] {
+  background: var(--aidex-color-surface-hover);
+}
+
+.item[data-disabled] {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+.danger {
+  color: var(--aidex-color-danger);
+}
+
+.icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  color: var(--aidex-color-text-muted);
+}
+
+.danger .icon {
+  color: currentColor;
+}
+
+.icon svg,
+.indicator svg,
+.chevron {
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
+}
+
+.label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Checkbox and radio items keep a fixed column for the check mark, chosen or not. */
+.choice {
+  padding-inline-end: var(--aidex-space-4);
+}
+
+.indicator {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: var(--aidex-icon-md);
+  color: var(--aidex-color-accent);
+}
+
+.indicator[data-unchecked] {
+  visibility: hidden;
+}
+
+.chevron {
+  flex: none;
+  margin-inline-end: calc(-1 * var(--aidex-space-0-5));
+  color: var(--aidex-color-text-muted);
+}
+
+.groupLabel {
+  padding: var(--aidex-space-1-5) var(--aidex-space-2);
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  font-weight: 600;
+  line-height: var(--aidex-leading-xs);
+}
+
+.separator {
+  flex: none;
+  height: 1px;
+  margin: var(--aidex-space-1) var(--aidex-space-2);
+  border: 0;
+  background: var(--aidex-color-border-subtle);
+}
+
+.shortcut {
+  flex: none;
+  margin-inline-start: auto;
+  padding-inline-start: var(--aidex-space-3);
+  min-height: 0;
+  background: transparent;
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .popup {
+    transition: none;
+  }
+}

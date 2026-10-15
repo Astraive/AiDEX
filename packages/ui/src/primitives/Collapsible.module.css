@@ -1,0 +1,25 @@
+.trigger {
+  cursor: pointer;
+}
+
+.panel {
+  overflow: hidden;
+}
+
+/* Base UI measures the open height into --collapsible-panel-height; the panel travels to and from 0. */
+.animated {
+  height: var(--collapsible-panel-height);
+  transition: height 200ms var(--aidex-ease);
+}
+
+.animated[data-starting-style],
+.animated[data-ending-style] {
+  height: 0;
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .animated {
+    transition: none;
+  }
+}

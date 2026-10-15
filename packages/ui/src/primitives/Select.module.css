@@ -3,68 +3,215 @@
   width: auto;
 }
 
-.control {
-  position: relative;
+.trigger {
   display: flex;
   align-items: center;
-}
-
-.select {
+  gap: var(--aidex-control-gap);
   width: 100%;
-  appearance: none;
+  min-width: 0;
+  margin: 0;
   border: 1px solid transparent;
   background: transparent;
   color: var(--aidex-color-text);
-  font-size: var(--aidex-text-md);
+  text-align: start;
   cursor: pointer;
   transition:
     border-color var(--aidex-duration-fast) var(--aidex-ease),
-    background-color var(--aidex-duration-fast) var(--aidex-ease);
+    background-color var(--aidex-duration-fast) var(--aidex-ease),
+    color var(--aidex-duration-fast) var(--aidex-ease);
 }
 
-/* Dark option lists on platforms that honor it. */
-.select option {
-  background: var(--aidex-color-surface-raised);
-  color: var(--aidex-color-text);
+.trigger[data-disabled] {
+  cursor: not-allowed;
+  opacity: 0.64;
 }
 
-.field .select {
-  min-height: 44px;
-  padding: 0 var(--aidex-space-10) 0 var(--aidex-space-4);
+.field {
+  min-height: var(--aidex-control-md);
+  padding: 0 var(--aidex-control-pad-x);
   border-color: var(--aidex-color-border);
   border-radius: var(--aidex-radius-md);
   background: var(--aidex-color-surface-raised);
+  font-size: var(--aidex-text-sm);
+  line-height: var(--aidex-leading-sm);
 }
 
-.field .select:hover {
+.field:hover:not([data-disabled]),
+.field[data-popup-open] {
   border-color: var(--aidex-color-border-strong);
 }
 
-.ghost .select {
-  width: auto;
-  min-height: 34px;
-  padding: 0 var(--aidex-space-8) 0 var(--aidex-space-2);
-  border-radius: var(--aidex-radius-sm);
-  color: var(--aidex-color-text-secondary);
-  font-size: 13px;
+.field[aria-invalid="true"] {
+  border-color: var(--aidex-color-danger);
 }
 
-.ghost .select:hover {
+.ghost {
+  width: auto;
+  min-height: var(--aidex-control-sm);
+  padding: 0 var(--aidex-space-2);
+  border-radius: var(--aidex-radius-sm);
+  color: var(--aidex-color-text-secondary);
+  font-size: var(--aidex-text-label);
+  line-height: var(--aidex-leading-sm);
+}
+
+.ghost:hover:not([data-disabled]),
+.ghost[data-popup-open] {
   background: var(--aidex-color-surface-hover);
   color: var(--aidex-color-text);
 }
 
-.chevron {
-  position: absolute;
-  right: var(--aidex-space-3);
-  width: 16px;
-  height: 16px;
-  color: var(--aidex-color-text-muted);
-  pointer-events: none;
+.value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.ghost .chevron {
-  right: var(--aidex-space-2);
-  width: 14px;
-  height: 14px;
+.icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  color: var(--aidex-color-text-muted);
+}
+
+.icon svg {
+  width: var(--aidex-icon-xs);
+  height: var(--aidex-icon-xs);
+}
+
+/*
+ * While open, the list is modal: Base UI covers the page with a transparent backdrop (marked
+ * `data-base-ui-inert`) so a press outside only closes it. Lift it to the popup's layer, or anything
+ * with its own z-index (a docked composer, the sidebar) would still take the press.
+ */
+.portal > [data-base-ui-inert] {
+  z-index: var(--aidex-z-popover);
+}
+
+.positioner {
+  z-index: var(--aidex-z-popover);
+  outline: none;
+}
+
+/* The list lines the chosen option up with the trigger; it is never narrower than the trigger. */
+.popup {
+  position: relative;
+  min-width: var(--anchor-width);
+  max-width: calc(100vw - 32px);
+  border: 1px solid var(--aidex-color-border-strong);
+  border-radius: var(--aidex-radius-lg);
+  background: var(--aidex-color-surface-raised);
+  box-shadow: var(--aidex-popup-shadow);
+  color: var(--aidex-color-text);
+  outline: none;
+  transform-origin: var(--transform-origin);
+  transition:
+    opacity 150ms var(--aidex-ease),
+    transform 150ms var(--aidex-ease);
+}
+
+.popup[data-starting-style],
+.popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.98);
+}
+
+/* Lined up with the trigger, the list appears in place, so only the fade runs. */
+.popup[data-side="none"][data-starting-style],
+.popup[data-side="none"][data-ending-style] {
+  transform: none;
+}
+
+.list {
+  max-height: min(var(--available-height), 320px);
+  padding: var(--aidex-space-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: var(--aidex-space-6);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-height: var(--aidex-row-sm);
+  padding: var(--aidex-space-1) var(--aidex-space-2);
+  border-radius: var(--aidex-radius-sm);
+  font-size: var(--aidex-text-sm);
+  line-height: var(--aidex-leading-sm);
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+}
+
+/* Only the highlighted option is lit, whether the pointer or the keyboard moved it. */
+.item[data-highlighted] {
+  background: var(--aidex-color-surface-hover);
+}
+
+.item[data-disabled] {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+.indicator {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: var(--aidex-icon-md);
+  color: var(--aidex-color-accent);
+}
+
+.indicator svg {
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
+}
+
+.indicator:not([data-selected]) {
+  visibility: hidden;
+}
+
+.itemText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scrollArrow {
+  position: absolute;
+  left: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: var(--aidex-control-xs);
+  background: var(--aidex-color-surface-raised);
+  color: var(--aidex-color-text-muted);
+  cursor: default;
+}
+
+.scrollArrow svg {
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
+}
+
+.scrollUp {
+  top: 0;
+  border-radius: var(--aidex-radius-lg) var(--aidex-radius-lg) 0 0;
+}
+
+.scrollDown {
+  bottom: 0;
+  border-radius: 0 0 var(--aidex-radius-lg) var(--aidex-radius-lg);
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .popup {
+    transition: none;
+  }
 }
