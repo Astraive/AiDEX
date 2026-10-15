@@ -1,11 +1,15 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArtifactCard, Dialog, EmptyState, Notice } from "@aidex/ui/components";
 import { ArrowLeftIcon, DownloadIcon, LayersIcon } from "@aidex/ui/icons";
 import { Button, Stack, Text } from "@aidex/ui/primitives";
+import { ErrorKind } from "@aidex/client/errors";
 import type { ArtifactMeta } from "@aidex/client/dto/artifacts";
+import { usePoll } from "../../../hooks/usePoll";
 import { useRpc } from "../../../hooks/useRpc";
+import { useVaultLocks } from "../../../hooks/useVaultLocks";
 import type { ArtifactRef } from "../transcript/TranscriptContext";
 import { ArtifactViewer } from "./ArtifactViewer";
+import { LOCKED_RETRY_MS } from "./artifactPreview";
 
 const PAGE_SIZE = 25;
 const planStatusLabels: Record<string, string> = { superseded: "Superseded", completed: "Completed" };
@@ -20,7 +24,11 @@ type Props = {
   onDownload: (id: string) => void;
 };
 
-/** The conversation's artifacts (newest first) with a viewer; opened from the header or a card. */
+/**
+ * The conversation's artifacts (newest first) with a viewer; opened from the header or a card. The
+ * artifact's name is decrypted too: from the render that sees a vault lock (`useVaultLocks`) until
+ * the viewer reads the artifact again, the title does not show it.
+ */
 export function ArtifactsDialog({ open, sessionId, artifact, onClose, onOpenLink, onDownload }: Props) {
   // An artifact picked from the list; `artifact` (from a card) shows its viewer directly.
   const [picked, setPicked] = useState<ArtifactRef | null>(null);
@@ -32,12 +40,19 @@ export function ArtifactsDialog({ open, sessionId, artifact, onClose, onOpenLink
     : picked
       ? { ref: picked, fromList: true }
       : null;
+  // What the viewer last reported, and the lock count it saw: a later lock hides the name at once.
+  const locks = useVaultLocks();
+  const locksRef = useRef(locks);
+  locksRef.current = locks;
+  const [lockedOut, setLockedOut] = useState({ locked: false, locks });
+  const reportLocked = useCallback((locked: boolean) => setLockedOut({ locked, locks: locksRef.current }), []);
+  const nameHidden = lockedOut.locked || lockedOut.locks !== locks;
 
   return (
     <Dialog
       open={open}
       size="xl"
-      title={viewing ? viewing.ref.name : "Artifacts"}
+      title={viewing && !nameHidden ? viewing.ref.name : "Artifacts"}
       description={viewing ? undefined : "Files, plans, and saved web pages from this conversation."}
       onClose={onClose}
     >
@@ -56,6 +71,7 @@ export function ArtifactsDialog({ open, sessionId, artifact, onClose, onOpenLink
             meta={viewing.ref.meta}
             onOpenLink={onOpenLink}
             onDownload={onDownload}
+            onLockedChange={reportLocked}
           />
         </Stack>
       ) : open ? (
@@ -80,6 +96,9 @@ function ArtifactList({
 }) {
   const [offset, setOffset] = useState(0);
   const list = useRpc("artifact.list", { session_id: sessionId, offset, limit: PAGE_SIZE });
+  // Refused as locked (the list already dropped what it read): read again, so it comes back once the
+  // vault is unlocked while the dialog stays open.
+  usePoll(list.refetch, LOCKED_RETRY_MS, { enabled: list.error?.kind === ErrorKind.vaultLocked });
   const artifacts = list.data?.artifacts ?? [];
   if (list.error) return <Notice tone="danger">{list.error.message}</Notice>;
   if (list.loading && !list.data) return <Text tone="muted">Loading artifacts…</Text>;
