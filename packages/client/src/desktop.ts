@@ -33,3 +33,8 @@ export function stopDaemon(): Promise<AidexStatus> {
 export function selectDrive(path: string): Promise<AidexStatus> {
   return command<AidexStatus>("select_drive", { path });
 }
+
+/** `set_ui_scale`: zoom the whole window to `percent` (75-125). Nothing is saved on the host. */
+export function setUiScale(percent: number): Promise<void> {
+  return command<void>("set_ui_scale", { percent });
+}

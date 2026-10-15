@@ -12,6 +12,7 @@ fn main() {
         "rpc_subscribe",
         "rpc_unsubscribe",
         "select_drive",
+        "set_ui_scale",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run the Tauri build script");

@@ -15,6 +15,7 @@
     "allow-rpc-call",
     "allow-rpc-subscribe",
     "allow-rpc-unsubscribe",
-    "allow-select-drive"
+    "allow-select-drive",
+    "allow-set-ui-scale"
   ]
 }

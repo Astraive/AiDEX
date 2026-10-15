@@ -1,8 +1,9 @@
 //! `#[tauri::command]` adapters. Each one hands its work to a blocking worker (daemon
 //! IPC, PowerShell queries, and process launches block) and returns `BridgeError` on
-//! failure. Behaviour lives in `bridge`, `lifecycle`, and `reports`.
+//! failure. Behaviour lives in `bridge`, `lifecycle`, `reports`, and `ui_scale`.
 
 pub mod reports;
+pub mod ui_scale;
 
 use crate::{
     bridge::{
@@ -18,7 +19,7 @@ use aidex_sandbox::BackendCapabilities;
 use reports::{AidexStatus, DriveReport};
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, Webview};
 
 /// Every command; tests check `build.rs`, `app.rs`, and the capability file against it.
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub const COMMANDS: &[&str] = &[
     "rpc_subscribe",
     "rpc_unsubscribe",
     "select_drive",
+    "set_ui_scale",
 ];
 
 type Shared<'a> = State<'a, Arc<AppState>>;
@@ -158,6 +160,16 @@ pub async fn select_drive(state: Shared<'_>, path: String) -> Result<AidexStatus
         Ok(reports::aidex_status(&state))
     })
     .await
+}
+
+/// Zoom the calling window's webview to the Appearance interface scale, in
+/// percent (75-125). Nothing is saved on the host.
+#[tauri::command]
+pub async fn set_ui_scale(webview: Webview, percent: u16) -> Result<(), BridgeError> {
+    let factor = ui_scale::zoom_factor(percent)?;
+    webview
+        .set_zoom(factor)
+        .map_err(|error| BridgeError::internal(format!("cannot set the interface scale: {error}")))
 }
 
 /// Forwards subscription workers' notifications to the webview.

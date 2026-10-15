@@ -163,3 +163,55 @@ fn model_preferences_are_a_separate_record_with_partial_updates() {
         Err(aidex_preferences::PreferencesError::Vault(_))
     ));
 }
+
+#[test]
+fn appearance_is_a_separate_record_with_partial_updates() {
+    use aidex_preferences::{
+        Appearance, AppearancePatch, AppearanceService, ChatWidth, MessageSpacing, UiDensity,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let vault = unlocked_vault(dir.path());
+    let prefs = PreferencesService::new(vault.clone());
+    let appearance = AppearanceService::new(vault.clone());
+    assert_eq!(appearance.get(&prefs).unwrap(), Appearance::default());
+
+    let patch = |value| serde_json::from_value::<AppearancePatch>(value).unwrap();
+    let saved = appearance
+        .set(
+            patch(json!({"chat_width":"wide","chat_font_size":16,"sidebar_width":320})),
+            &prefs,
+        )
+        .unwrap();
+    assert_eq!(saved.chat_width, ChatWidth::Wide);
+    assert_eq!(saved.chat_font_size, 16);
+    assert_eq!(saved.sidebar_width, Some(320));
+    let saved = appearance
+        .set(
+            patch(json!({"message_spacing":"relaxed","sidebar_width":null})),
+            &prefs,
+        )
+        .unwrap();
+    assert_eq!(saved.chat_width, ChatWidth::Wide);
+    assert_eq!(saved.message_spacing, MessageSpacing::Relaxed);
+    assert_eq!(saved.sidebar_width, None);
+
+    // Density follows settings.set, which every version can write.
+    prefs.update(json!({"density":"compact"})).unwrap();
+    assert_eq!(appearance.get(&prefs).unwrap().density, UiDensity::Compact);
+
+    // The record survives a relock with fresh services.
+    let password = SecretString::new("correct test passphrase".into());
+    vault.lock();
+    assert!(appearance.get(&prefs).is_err());
+    vault.unlock(&password).unwrap();
+    let reopened = AppearanceService::new(vault.clone())
+        .get(&PreferencesService::new(vault))
+        .unwrap();
+    assert_eq!(
+        reopened,
+        Appearance {
+            density: UiDensity::Compact,
+            ..saved
+        }
+    );
+}

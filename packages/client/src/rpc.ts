@@ -105,6 +105,7 @@ import type {
 } from "./dto/attachments";
 import type { ExecutionStatus } from "./dto/execution";
 import type { AppPreferences, ModelPreferences } from "./dto/preferences";
+import type { Appearance, AppearancePatch } from "./dto/preferences";
 import type {
   InferenceCatalog,
   InferenceOptions,
@@ -167,6 +168,8 @@ export type RpcMethods = {
     params: { patch: Partial<AppPreferences> };
     result: AppPreferences;
   };
+  "appearance.get": { params: undefined; result: Appearance };
+  "appearance.set": { params: AppearancePatch; result: Appearance };
   "workspace.add": {
     params: { path: string; name?: string };
     result: Workspace;

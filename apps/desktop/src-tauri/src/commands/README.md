@@ -13,8 +13,9 @@
 | `rpc_subscribe` | `method`, `params?` | `{ subscription, initial }`; notifications arrive as `aidex://notification` `{ subscription, method, data }`, and a daemon-side end as `aidex://subscription-ended` `{ subscription, reason, error? }` |
 | `rpc_unsubscribe` | `subscription` | whether it was live |
 | `select_drive` | `path` | `AidexStatus` with the chosen drive (memory only) |
+| `set_ui_scale` | `percent` (75-125) | nothing; zooms the calling webview (`Webview::set_zoom(percent / 100)`). Out of range is `invalid_params`. The scale is saved in the vault by `appearance.set`, never on the host |
 
-`reports.rs` builds the status shapes without Tauri types and is unit-tested; the TypeScript mirrors are in `packages/client/src/dto/`.
+`reports.rs` builds the status shapes without Tauri types and `ui_scale.rs` checks the zoom range; both are unit-tested; the TypeScript mirrors are in `packages/client/src/dto/`.
 
 ## Adding a command
 

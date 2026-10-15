@@ -13,6 +13,8 @@ serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# Injected vault write failures (a partial density write stays consistent).
+aidex-vault = { path = "../vault", features = ["test-hooks"] }
 
 [lints]
 workspace = true

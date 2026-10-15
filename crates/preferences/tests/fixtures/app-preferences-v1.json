@@ -1,0 +1,20 @@
+{
+  "accent": "#abcdef",
+  "theme": "light",
+  "density": "compact",
+  "reduce_motion": true,
+  "keyboard_hints": false,
+  "model_id": "openai/gpt-5",
+  "workspace_id": "ws_fixture",
+  "permission_mode": "auto_accept_edits",
+  "instructions": "Fixture instructions only",
+  "fallback_model": "openai/gpt-5-mini",
+  "max_steps": 32,
+  "max_tokens": 8192,
+  "shortcuts": {
+    "new_session": "Mod+n",
+    "providers": "Mod+Shift+p",
+    "search": "Mod+f",
+    "toggle_sidebar": "Mod+b"
+  }
+}
