@@ -36,9 +36,9 @@
   align-items: center;
   gap: var(--aidex-space-3);
   min-width: 0;
-  min-height: 56px;
+  min-height: var(--aidex-row-lg);
   margin: 0;
-  padding: var(--aidex-space-2) var(--aidex-space-3);
+  padding: var(--aidex-space-1-5) var(--aidex-space-3);
   border: 0;
   background: transparent;
   text-align: left;
@@ -54,8 +54,8 @@
   display: inline-grid;
   flex: none;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: var(--aidex-control-md);
+  height: var(--aidex-control-md);
   border: 1px solid var(--aidex-color-border-subtle);
   border-radius: var(--aidex-radius-sm);
   background: var(--aidex-color-surface-strong);
@@ -66,7 +66,7 @@
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--aidex-space-0-5);
   min-width: 0;
 }
 
@@ -97,7 +97,7 @@
   overflow: hidden;
   color: var(--aidex-color-text-muted);
   font-family: var(--aidex-font-mono);
-  font-size: 11px;
+  font-size: var(--aidex-text-2xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

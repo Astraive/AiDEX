@@ -1,23 +1,36 @@
 .group {
+  --segmented-height: var(--aidex-control-md);
   user-select: none;
   display: inline-flex;
-  gap: var(--aidex-space-1);
-  padding: var(--aidex-space-1);
+  gap: var(--aidex-space-0-5);
+  max-width: 100%;
+  /* Options sit 2px inside the outer edge: the 1px border plus 1px of padding. */
+  padding: calc(var(--aidex-space-0-5) - 1px);
   border: 1px solid var(--aidex-color-border);
   border-radius: var(--aidex-radius-full);
   background: var(--aidex-color-surface-raised);
 }
 
+.sm {
+  --segmented-height: var(--aidex-control-sm);
+}
+
+/* Options share any extra width when a layout stretches the group (e.g. a stacked settings row). */
 .option {
-  min-width: 148px;
-  min-height: 44px;
-  padding: 0 var(--aidex-space-6);
+  flex: 1 1 auto;
+  min-width: 0;
+  height: calc(var(--segmented-height) - 2 * var(--aidex-space-0-5));
+  padding: 0 var(--aidex-control-pad-x);
+  overflow: hidden;
   border: 1px solid transparent;
   border-radius: var(--aidex-radius-full);
   background: transparent;
   color: var(--aidex-color-text-secondary);
-  font-size: var(--aidex-text-lg);
+  font-size: var(--aidex-text-sm);
   font-weight: 400;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
   transition:
     background-color var(--aidex-duration-base) var(--aidex-ease),
@@ -25,7 +38,7 @@
     color var(--aidex-duration-base) var(--aidex-ease);
 }
 
-.option:hover:not(.checked) {
+.option:hover:not(.checked):not(:disabled) {
   color: var(--aidex-color-text);
 }
 
@@ -36,8 +49,14 @@
 }
 
 .sm .option {
-  min-width: 0;
-  min-height: 30px;
-  padding: 0 var(--aidex-space-4);
-  font-size: 13px;
+  padding: 0 var(--aidex-control-pad-x-sm);
+  font-size: var(--aidex-text-xs);
+}
+
+.disabled {
+  opacity: 0.5;
+}
+
+.option:disabled {
+  cursor: not-allowed;
 }

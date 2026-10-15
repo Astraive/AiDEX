@@ -3,15 +3,16 @@
   align-items: flex-start;
   gap: var(--aidex-space-3);
   color: var(--aidex-color-text-secondary);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
   line-height: 1.6;
 }
 
+/* Centred on the first line (1.6em tall). */
 .icon {
   flex: none;
-  width: 18px;
-  height: 18px;
-  margin-top: 1px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
+  margin-top: calc((1.6em - var(--aidex-icon-md)) / 2);
 }
 
 .body {
@@ -39,7 +40,7 @@
 }
 
 .banner {
-  padding: var(--aidex-space-3) var(--aidex-space-4);
+  padding: var(--aidex-space-3) var(--aidex-space-3-5);
   border: 1px solid var(--aidex-color-border);
   border-radius: var(--aidex-radius-md);
   background: var(--aidex-color-surface-raised);

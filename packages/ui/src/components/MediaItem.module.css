@@ -1,7 +1,7 @@
 .item {
   display: flex;
   align-items: center;
-  gap: var(--aidex-space-5);
+  gap: var(--aidex-space-4);
   min-width: 0;
 }
 
@@ -39,7 +39,7 @@
 }
 
 .lg .description {
-  font-size: 17px;
+  font-size: var(--aidex-text-md);
 }
 
 .trailing {

@@ -1,7 +1,10 @@
 .field {
+  --field-height: var(--aidex-control-md);
   display: flex;
   align-items: center;
   width: 100%;
+  min-height: var(--field-height);
+  border-radius: var(--aidex-radius-md);
   border: 1px solid var(--aidex-color-border);
   background: var(--aidex-color-surface-raised);
   transition:
@@ -28,22 +31,12 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--aidex-color-danger) 40%, transparent);
 }
 
-.rounded {
-  min-height: 52px;
-  border-radius: var(--aidex-radius-lg);
-}
-
-.md {
-  min-height: 44px;
-  border-radius: var(--aidex-radius-md);
-}
-
-.md .input {
-  height: 40px;
+/* Heights include the 1px border; the input fills the rest. The pill shape keeps the same heights. */
+.lg {
+  --field-height: var(--aidex-control-lg);
 }
 
 .pill {
-  min-height: 50px;
   border-radius: var(--aidex-radius-full);
 }
 
@@ -51,15 +44,15 @@
   display: flex;
   flex: 1;
   align-items: center;
-  gap: var(--aidex-space-3);
+  gap: var(--aidex-control-gap);
   min-width: 0;
-  min-height: inherit;
-  padding-left: var(--aidex-space-4);
+  min-height: calc(var(--field-height) - 2px);
+  padding-left: var(--aidex-control-pad-x);
   cursor: text;
 }
 
 .pill .control {
-  padding-left: var(--aidex-space-5);
+  padding-left: calc(var(--aidex-control-pad-x) + var(--aidex-space-0-5));
 }
 
 .icon {
@@ -69,15 +62,15 @@
 }
 
 .icon svg {
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .input {
   flex: 1;
   min-width: 0;
-  height: 48px;
-  padding: 0 var(--aidex-space-4) 0 0;
+  height: calc(var(--field-height) - 2px);
+  padding: 0 var(--aidex-control-pad-x) 0 0;
   border: 0;
   outline: none;
   background: transparent;
@@ -99,8 +92,9 @@
   display: none;
 }
 
+/* Sized for an IconButton sm, which fits inside the md height. */
 .trailing {
   display: inline-flex;
   flex: none;
-  padding-right: var(--aidex-space-1);
+  padding-right: var(--aidex-space-0-5);
 }

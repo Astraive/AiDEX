@@ -1,4 +1,6 @@
+/* Positioned, so a visually hidden legend stays inside the group's scroll container. */
 .group {
+  position: relative;
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -17,7 +19,7 @@
 .row {
   display: flex;
   align-items: center;
-  gap: var(--aidex-space-4);
+  gap: var(--aidex-space-3);
   border-bottom: 1px solid var(--aidex-color-border-subtle);
 }
 
@@ -29,13 +31,13 @@
 .checkbox {
   flex: 1;
   min-width: 0;
-  padding: var(--aidex-space-4) var(--aidex-space-1);
+  padding: var(--aidex-space-3) var(--aidex-space-1);
 }
 
 .meta {
   flex: none;
   padding-right: var(--aidex-space-1);
   color: var(--aidex-color-text-muted);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
   white-space: nowrap;
 }

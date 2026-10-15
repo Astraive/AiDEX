@@ -12,19 +12,19 @@
 }
 
 .sm {
-  width: 32px;
-  height: 32px;
-  font-size: var(--aidex-text-sm);
+  width: var(--aidex-control-xs);
+  height: var(--aidex-control-xs);
+  font-size: var(--aidex-text-2xs);
 }
 
 .md {
-  width: 40px;
-  height: 40px;
-  font-size: var(--aidex-text-lg);
+  width: var(--aidex-control-md);
+  height: var(--aidex-control-md);
+  font-size: var(--aidex-text-label);
 }
 
 .lg {
-  width: 48px;
-  height: 48px;
-  font-size: var(--aidex-text-xl);
+  width: var(--aidex-control-xl);
+  height: var(--aidex-control-xl);
+  font-size: var(--aidex-text-lg);
 }

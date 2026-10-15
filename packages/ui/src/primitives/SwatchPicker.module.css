@@ -1,4 +1,6 @@
+/* Positioned, so the visually hidden legend stays inside the picker's scroll container. */
 .picker {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -12,8 +14,9 @@
   position: relative;
   display: inline-grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  /* A 20px chip, a 2px gap and a 2px ring on each side: 28px at every density. */
+  width: calc(var(--aidex-icon-xl) + 2 * var(--aidex-space-1));
+  height: calc(var(--aidex-icon-xl) + 2 * var(--aidex-space-1));
   border: 2px solid transparent;
   border-radius: var(--aidex-radius-full);
   cursor: pointer;
@@ -45,20 +48,20 @@
 .chip {
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: var(--aidex-icon-xl);
+  height: var(--aidex-icon-xl);
   border-radius: var(--aidex-radius-full);
 }
 
 .check {
-  width: 14px;
-  height: 14px;
+  width: var(--aidex-icon-xs);
+  height: var(--aidex-icon-xs);
   color: var(--aidex-color-on-accent);
 }
 
 .color {
-  width: 26px;
-  height: 26px;
+  width: var(--aidex-icon-xl);
+  height: var(--aidex-icon-xl);
   padding: 0;
   border: 0;
   border-radius: var(--aidex-radius-full);

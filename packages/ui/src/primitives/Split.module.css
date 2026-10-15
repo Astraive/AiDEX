@@ -6,7 +6,7 @@
 
 .split {
   display: grid;
-  gap: var(--aidex-space-10);
+  gap: var(--aidex-space-6);
 }
 
 .equal {
@@ -22,7 +22,7 @@
 }
 
 .divided > :nth-child(2) {
-  padding-left: var(--aidex-space-10);
+  padding-left: var(--aidex-space-5);
   border-left: 1px solid var(--aidex-color-border-subtle);
 }
 
@@ -31,13 +31,13 @@
 }
 
 .divided > :first-child {
-  padding-right: var(--aidex-space-10);
+  padding-right: var(--aidex-space-5);
 }
 
 @container (max-width: 760px) {
   .split {
     grid-template-columns: minmax(0, 1fr);
-    gap: var(--aidex-space-8);
+    gap: var(--aidex-space-6);
   }
 
   .divided > :first-child {
@@ -45,7 +45,7 @@
   }
 
   .divided > :nth-child(2) {
-    padding-top: var(--aidex-space-8);
+    padding-top: var(--aidex-space-5);
     padding-left: 0;
     border-top: 1px solid var(--aidex-color-border-subtle);
     border-left: 0;

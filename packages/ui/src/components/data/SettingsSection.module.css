@@ -3,7 +3,7 @@
   flex-direction: column;
   gap: var(--aidex-space-3);
   min-width: 0;
-  padding: var(--aidex-space-4) var(--aidex-space-5);
+  padding: var(--aidex-space-3) var(--aidex-space-4);
   border: 1px solid var(--aidex-color-border-subtle);
   border-radius: var(--aidex-radius-lg);
   background: var(--aidex-color-surface);
@@ -22,7 +22,7 @@
   display: flex;
   flex: 1 1 auto;
   align-items: center;
-  gap: var(--aidex-space-3);
+  gap: var(--aidex-space-2);
   min-width: 0;
 }
 
@@ -33,17 +33,17 @@
 }
 
 .icon svg {
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .title {
   margin: 0;
   min-width: 0;
   color: var(--aidex-color-text);
-  font-size: var(--aidex-text-md);
+  font-size: var(--aidex-text-sm);
   font-weight: 600;
-  line-height: 1.35;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
@@ -57,7 +57,7 @@
 .description {
   margin-top: calc(var(--aidex-space-1) * -1);
   color: var(--aidex-color-text-muted);
-  font-size: var(--aidex-text-sm);
+  font-size: var(--aidex-text-label);
   line-height: 1.5;
 }
 

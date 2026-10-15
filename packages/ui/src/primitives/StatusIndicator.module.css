@@ -1,8 +1,14 @@
+/*
+ * Long labels wrap between words instead of pushing their row wider than its container. The dot
+ * sits on the first line's baseline, so it stays beside the first line when the label wraps.
+ */
 .status {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--aidex-space-2);
+  min-width: 0;
   color: var(--aidex-color-text-secondary);
-  font-size: var(--aidex-text-md);
-  white-space: nowrap;
+  font-size: var(--aidex-text-label);
+  white-space: normal;
+  overflow-wrap: break-word;
 }

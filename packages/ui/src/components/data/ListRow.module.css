@@ -22,10 +22,10 @@
   display: flex;
   flex: 1;
   align-items: center;
-  gap: var(--aidex-space-4);
+  gap: var(--aidex-space-3);
   min-width: 0;
-  min-height: 64px;
-  padding: var(--aidex-space-2);
+  min-height: var(--aidex-row-lg);
+  padding: var(--aidex-space-1-5) var(--aidex-space-2);
 }
 
 .action {
@@ -36,8 +36,9 @@
   cursor: pointer;
 }
 
-/* Keep the focus ring inside the row so neighbouring rows do not cover it. */
-.action:focus-visible {
+/* Keep focus rings inside the row so neighbouring rows do not cover them. */
+.action:focus-visible,
+.trailing :focus-visible {
   outline-offset: -2px;
 }
 

@@ -1,11 +1,21 @@
 .button {
+  --button-height: var(--aidex-control-md);
+  --button-padding: var(--aidex-control-pad-x);
+  --button-gap: var(--aidex-control-gap);
+  --button-icon: var(--aidex-icon-md);
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: var(--aidex-space-3);
+  gap: var(--button-gap);
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--button-height);
+  padding: 0 var(--button-padding);
   border: 1px solid transparent;
+  border-radius: var(--aidex-radius-md);
   background: transparent;
   color: var(--aidex-color-text);
+  font-size: var(--aidex-text-sm);
   font-weight: 400;
   line-height: 1.2;
   white-space: nowrap;
@@ -16,34 +26,41 @@
     border-color var(--aidex-duration-fast) var(--aidex-ease);
 }
 
+/* Touch screens get a hit area of at least 44px around small buttons. */
+@media (pointer: coarse) {
+  .button::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--aidex-touch-target));
+    height: max(100%, var(--aidex-touch-target));
+    transform: translate(-50%, -50%);
+  }
+}
+
 .button:disabled,
 .button[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.5;
 }
 
-.md {
-  --button-padding: var(--aidex-space-4);
-  min-height: 40px;
-  padding: 0 var(--button-padding);
-  border-radius: var(--aidex-radius-md);
-  font-size: var(--aidex-text-sm);
+.sm {
+  --button-height: var(--aidex-control-sm);
+  --button-padding: var(--aidex-control-pad-x-sm);
+  --button-gap: var(--aidex-control-gap-sm);
 }
 
 .lg {
-  --button-padding: var(--aidex-space-5);
-  min-height: 50px;
-  padding: 0 var(--button-padding);
-  border-radius: var(--aidex-radius-lg);
-  font-size: var(--aidex-text-lg);
+  --button-height: var(--aidex-control-lg);
+  --button-padding: calc(var(--aidex-control-pad-x) + var(--aidex-space-0-5));
 }
 
 .xl {
-  --button-padding: var(--aidex-space-8);
-  min-height: 58px;
-  padding: 0 var(--button-padding);
-  border-radius: var(--aidex-radius-lg);
-  font-size: 17px;
+  --button-height: var(--aidex-control-xl);
+  --button-padding: calc(var(--aidex-control-pad-x) + var(--aidex-space-1));
+  --button-icon: var(--aidex-icon-lg);
+  font-size: var(--aidex-text-lg);
 }
 
 .pill {
@@ -103,16 +120,8 @@
 
 .icon svg,
 .trailing svg {
-  width: 20px;
-  height: 20px;
-}
-
-.lg .icon svg,
-.lg .trailing svg,
-.xl .icon svg,
-.xl .trailing svg {
-  width: 22px;
-  height: 22px;
+  width: var(--button-icon);
+  height: var(--button-icon);
 }
 
 .label {
@@ -143,7 +152,7 @@
 
 /* Pin trailing content to the end and reserve matching space on both sides so the label stays centered. */
 .pinnedTrailing {
-  padding-inline: calc(var(--button-padding) + 22px + var(--aidex-space-3));
+  padding-inline: calc(var(--button-padding) + var(--button-icon) + var(--button-gap));
 }
 
 .pinnedTrailing .trailing {

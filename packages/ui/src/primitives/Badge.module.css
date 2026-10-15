@@ -1,12 +1,12 @@
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: var(--aidex-space-2);
-  min-height: 32px;
-  padding: 0 var(--aidex-space-3);
+  gap: var(--aidex-space-1);
+  min-height: var(--aidex-badge-height);
+  padding: 0 var(--aidex-space-1-5);
   border: 1px solid transparent;
   border-radius: var(--aidex-radius-full);
-  font-size: var(--aidex-text-sm);
+  font-size: var(--aidex-text-xs);
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -14,10 +14,9 @@
 }
 
 .sm {
-  gap: var(--aidex-space-1);
-  min-height: 20px;
-  padding: 0 var(--aidex-space-2);
-  font-size: var(--aidex-text-xs);
+  min-height: var(--aidex-badge-height-sm);
+  padding: 0 var(--aidex-space-1);
+  font-size: var(--aidex-text-2xs);
 }
 
 .icon {
@@ -25,13 +24,8 @@
 }
 
 .icon svg {
-  width: 18px;
-  height: 18px;
-}
-
-.sm .icon svg {
-  width: 12px;
-  height: 12px;
+  width: var(--aidex-icon-xs);
+  height: var(--aidex-icon-xs);
 }
 
 .accent {

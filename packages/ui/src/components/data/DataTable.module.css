@@ -1,7 +1,17 @@
+/*
+ * The wrapper scrolls a table that is wider than its container, so the page never scrolls sideways.
+ * It is positioned, so the visually hidden caption anchors inside it rather than to a distant ancestor.
+ */
+.wrapper {
+  position: relative;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: var(--aidex-text-sm);
+  font-size: var(--aidex-text-label);
   line-height: 1.45;
 }
 
@@ -46,18 +56,24 @@
 }
 
 .cell {
-  height: 56px;
+  height: var(--aidex-control-xl);
   padding: var(--aidex-space-2) var(--aidex-space-3);
   border-bottom: 1px solid var(--aidex-color-border);
   color: var(--aidex-color-text-secondary);
   text-align: left;
   vertical-align: middle;
-  overflow-wrap: anywhere;
+  /* Columns keep whole-word widths; a table that cannot fit scrolls inside the wrapper instead. */
+  overflow-wrap: break-word;
 }
 
 .rowHeader {
   color: var(--aidex-color-text);
   font-weight: 500;
+}
+
+/* Rows are ruled edge to edge, so focus rings stay inside the cell. */
+.cell :focus-visible {
+  outline-offset: -2px;
 }
 
 .end {

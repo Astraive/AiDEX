@@ -1,4 +1,5 @@
 .button {
+  position: relative;
   user-select: none;
   display: inline-grid;
   place-items: center;
@@ -11,6 +12,19 @@
   transition:
     background-color var(--aidex-duration-fast) var(--aidex-ease),
     color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+/* Touch screens get a hit area of at least 44px around small buttons. */
+@media (pointer: coarse) {
+  .button::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--aidex-touch-target));
+    height: max(100%, var(--aidex-touch-target));
+    transform: translate(-50%, -50%);
+  }
 }
 
 .button:disabled,
@@ -26,47 +40,43 @@
 }
 
 .sm {
-  width: 32px;
-  height: 32px;
+  width: var(--aidex-control-sm);
+  height: var(--aidex-control-sm);
   border-radius: var(--aidex-radius-sm);
 }
 
 .md {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: var(--aidex-control-md);
+  height: var(--aidex-control-md);
+  border-radius: var(--aidex-radius-md);
 }
 
 .lg {
-  width: 48px;
-  height: 48px;
+  width: var(--aidex-control-lg);
+  height: var(--aidex-control-lg);
   border-radius: var(--aidex-radius-md);
 }
 
 .xl {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
+  width: var(--aidex-control-xl);
+  height: var(--aidex-control-xl);
+  border-radius: var(--aidex-radius-md);
 }
 
-.sm svg {
-  width: 18px;
-  height: 18px;
-}
-
+.sm svg,
 .md svg {
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .lg svg {
-  width: 22px;
-  height: 22px;
+  width: var(--aidex-icon-lg);
+  height: var(--aidex-icon-lg);
 }
 
 .xl svg {
-  width: 24px;
-  height: 24px;
+  width: var(--aidex-icon-xl);
+  height: var(--aidex-icon-xl);
 }
 
 .circle {

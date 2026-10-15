@@ -13,7 +13,7 @@ export type TextFieldProps = Omit<ComponentPropsWithRef<"input">, "size"> & {
   /** Trailing control such as an `IconButton`; kept outside the label so it stays independently clickable. */
   trailing?: ReactNode;
   shape?: "rounded" | "pill";
-  /** `md` is the compact height for dense forms; `lg` suits standalone fields. */
+  /** `md` (default, 32px at the comfortable density) suits forms; `lg` (36px) suits standalone fields. */
   size?: "md" | "lg";
   /** Validation message shown under the field, announced when it appears and linked to the input. */
   error?: string;
@@ -28,7 +28,7 @@ export function TextField({
   leadingIcon,
   trailing,
   shape = "rounded",
-  size = "lg",
+  size = "md",
   error,
   className,
   id,
@@ -50,7 +50,7 @@ export function TextField({
           {label}
         </label>
       ) : null}
-      <div className={cx(styles.field, styles[shape], size === "md" && styles.md, error && styles.invalid)}>
+      <div className={cx(styles.field, styles[shape], styles[size], error && styles.invalid)}>
         {/* Wrapping label: clicking the icon or padding focuses the input. */}
         <label className={styles.control} htmlFor={inputId}>
           {leadingIcon ? <span className={styles.icon}>{leadingIcon}</span> : null}
