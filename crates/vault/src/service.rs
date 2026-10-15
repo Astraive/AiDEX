@@ -29,6 +29,11 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_TICK: Duration = Duration::from_secs(1);
 const MIN_TICK: Duration = Duration::from_millis(10);
 
+thread_local! {
+    /// How many [`VaultService::passively`] scopes this thread is inside.
+    static PASSIVE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Daemon-side vault configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaultServiceConfig {
@@ -238,6 +243,32 @@ impl VaultService {
                 ..base
             },
         }
+    }
+
+    /// Run `read` without counting the vault operations it makes on this thread
+    /// as use of the unlocked session: inside it, secret, handle and backup
+    /// operations of every `VaultService` leave the idle period running, as if
+    /// they had not happened. For background reads nobody asked for just now (the
+    /// daemon's status and list polls); a person's action and executing work
+    /// count as before. It fails closed as usual: a session already past its idle
+    /// period ends, and the operations then fail `Locked`. Scopes nest; other
+    /// threads are not affected, and [`VaultService::keep_alive`] and unlocking
+    /// always count.
+    pub fn passively<T>(read: impl FnOnce() -> T) -> T {
+        struct Leave;
+        impl Drop for Leave {
+            fn drop(&mut self) {
+                PASSIVE.with(|depth| depth.set(depth.get().saturating_sub(1)));
+            }
+        }
+        PASSIVE.with(|depth| depth.set(depth.get() + 1));
+        let _leave = Leave;
+        read()
+    }
+
+    /// Whether this thread is inside [`VaultService::passively`].
+    pub fn is_passive() -> bool {
+        PASSIVE.with(|depth| depth.get() > 0)
     }
 
     /// Count now as use of the unlocked session, as a secret operation does: the
@@ -451,7 +482,9 @@ impl VaultService {
         }
     }
 
-    /// Run `operation` on the unlocked vault, failing closed when it is not unlocked.
+    /// Run `operation` on the unlocked vault, failing closed when it is not
+    /// unlocked. It counts as use of the session (the idle period starts again)
+    /// unless this thread is inside [`VaultService::passively`].
     fn with_vault<T>(
         &self,
         operation: impl FnOnce(&mut UnlockedVault) -> Result<T, VaultError>,
@@ -466,7 +499,9 @@ impl VaultService {
                 Err(error) => error,
             });
         };
-        current.last_used = now;
+        if !Self::is_passive() {
+            current.last_used = now;
+        }
         let result = operation(&mut current.vault);
         if let Some(reason) = result
             .as_ref()

@@ -56,9 +56,13 @@ let locked = vault.lock();                                   // keys zeroized, h
 `put_secret`, `list_secrets`, `secret_meta`, `secret_version`, `delete_secret`,
 `change_passphrase(old: Option<_>, new)`, `issue_handle`, `resolve`,
 `resolve_versioned`, `revoke_handle`, `revoke_all_handles`, `backup_to`,
-`set_kdf_params`, `set_idle_timeout`, `add_lock_observer`, `ends_session`, `keep_alive`.
+`set_kdf_params`, `set_idle_timeout`, `add_lock_observer`, `ends_session`, `keep_alive`,
+`passively`.
 It locks itself after 30 minutes without secret operations (configurable; `keep_alive`
-counts as one for work that will need the vault later, and never unlocks), re-reads the
+counts as one for work that will need the vault later, and never unlocks; operations a
+thread makes inside `VaultService::passively(|| ...)` do not count, for background
+reads such as a client's status and list polls, and still fail closed once the idle
+period has passed), re-reads the
 disk while locked (so damage or an external restore is reported), and drops its session
 on a `Conflict` or an ambiguous post-rename commit to its own header (`ends_session`
 tells which errors did). Every end of an unlocked session (lock, idle auto-lock,

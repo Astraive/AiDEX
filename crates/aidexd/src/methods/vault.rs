@@ -251,7 +251,7 @@ fn secret_params<T: DeserializeOwned>(
 
 pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<(), RouterError> {
     let shared = Arc::clone(services);
-    router.register(STATUS, move |_context, params| {
+    router.register_passive(STATUS, move |_context, params| {
         expect_no_params(&params)?;
         to_result(&shared.vault().status())
     })?;
@@ -358,7 +358,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     })?;
 
     let shared = Arc::clone(services);
-    router.register(SECRET_LIST, move |_context, params| {
+    router.register_passive(SECRET_LIST, move |_context, params| {
         expect_no_params(&params)?;
         let secrets = shared
             .vault()

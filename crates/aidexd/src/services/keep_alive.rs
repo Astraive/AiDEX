@@ -6,10 +6,15 @@
 //! external runs: one whose thread works on it (an external run's thread drives
 //! its vendor process). Work that waits for a person does not: a run waiting
 //! for an approval (a native one, or an external one paused with its vendor
-//! process) and a pending official login. So when the user walks away, the
-//! idle auto-lock happens as usual, and its cleanup (`vault_lock`) stops that
-//! work: the waiting run is interrupted once the vault is unlocked again and
-//! can be resumed as before, and the login is cancelled.
+//! process) and a pending official login. Nor do the reads clients poll in the
+//! background (status, list and view methods registered with
+//! `Router::register_passive`, which run inside `VaultService::passively`):
+//! an open conversation or Security page does not hold the vault open. So
+//! when the user walks away, the idle auto-lock happens as usual, and its
+//! cleanup (`vault_lock`) stops that work: the waiting run is interrupted once
+//! the vault is unlocked again and can be resumed as before, a vendor process
+//! paused at its approval is ended and its temporary home removed, and the
+//! login is cancelled.
 //!
 //! A native parent that finished its turn and waits for its active children
 //! keeps executing while it waits, so a child waiting for an approval holds

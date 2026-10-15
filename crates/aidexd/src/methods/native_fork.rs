@@ -52,7 +52,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
             RpcError::invalid_params(aidex_events::redact_text(&error).into_owned())
         })?;
         validate_workspace(&s, &configuration)?;
-        super::runtime::ensure_session_runtime(&s, &configuration);
+        let _ = super::runtime::ensure_session_runtime(&s, &configuration);
         let store = s.native().store();
         let detail = store
             .fork(

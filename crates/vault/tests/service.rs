@@ -150,6 +150,61 @@ fn idle_vaults_lock_themselves() {
 }
 
 #[test]
+fn passive_reads_do_not_hold_off_the_idle_lock_but_writes_still_do() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(vault_dir(root.path())).unwrap();
+    let service = service(root.path(), Some(Duration::from_millis(1_000)));
+    service.init(&passphrase(PASSPHRASE), false).unwrap();
+    let put = || {
+        service
+            .put_secret(
+                &name(NAME),
+                SecretKind::ApiKey,
+                SecretBytes::from(VALUE.to_owned()),
+                policy(&[openai()]),
+            )
+            .unwrap();
+    };
+    put();
+    // Operations inside a passive scope work as usual...
+    VaultService::passively(|| {
+        assert!(VaultService::is_passive());
+        VaultService::passively(|| service.list_secrets().unwrap());
+        // ...and a nested scope leaves the outer one passive.
+        assert!(VaultService::is_passive());
+    });
+    assert!(!VaultService::is_passive());
+
+    // Writes keep the vault unlocked past its idle period...
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(1_500) {
+        thread::sleep(Duration::from_millis(150));
+        put();
+    }
+    assert_eq!(service.status().state, VaultState::Unlocked);
+    // ...passive reads, as frequent, do not: the vault locks, and once it has
+    // they fail closed like any other operation.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while service.status().state == VaultState::Unlocked {
+        assert!(
+            Instant::now() < deadline,
+            "passive reads held the vault open"
+        );
+        thread::sleep(Duration::from_millis(150));
+        VaultService::passively(|| {
+            let _ = service.secret_meta(&name(NAME));
+            let _ = service.list_secrets();
+        });
+    }
+    let refused = VaultService::passively(|| service.list_secrets());
+    assert_eq!(refused.unwrap_err().kind(), VaultErrorKind::Locked);
+    // Another thread's reads are never passive because of this one's scope.
+    VaultService::passively(|| {
+        assert!(!thread::spawn(VaultService::is_passive).join().unwrap());
+    });
+}
+
+#[test]
 fn damaged_vaults_are_reported_not_hidden() {
     let root = tempfile::tempdir().unwrap();
     let (dir, vault, _) = create_with_secret(root.path());
