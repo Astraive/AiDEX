@@ -45,6 +45,11 @@ export type RuntimeDriverInfo = {
   auth_methods: string[];
 };
 
+/**
+ * `runtime.health` status codes. A managed Codex account's own status is reported in these codes too:
+ * one the official CLI confirmed is `installed_auth_unverified` (or `ready`) with `authenticated`, any
+ * other (`auth_required`, `auth_pending`, `signed_out`) is `auth_required`.
+ */
 export type RuntimeHealthStatus =
   | "ready"
   | "binary_missing"

@@ -177,6 +177,10 @@ export type SessionDetail = SessionConfig & {
   checkpoints: Checkpoint[];
   total_checkpoints: number;
   checkpoints_truncated: boolean;
+  /** The conversation saved an external runtime reference, which no view returns. */
+  runtime_ref_omitted: boolean;
+  /** Always `true`: command ids (`message.send` idempotency keys) are never returned. */
+  commands_omitted: boolean;
   /** Set on a conversation created by `conversation.fork`: its first `message_count` messages
    * are a copy of `session_id`'s history. */
   forked_from?: ForkOrigin;
