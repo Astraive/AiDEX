@@ -2416,3 +2416,23 @@ fn opening_the_manager_sweeps_homes_a_crashed_daemon_left() {
     assert_eq!(manager.temporary_homes(), 1);
     assert_eq!(manager.release_paused(), 1);
 }
+#[test]
+fn the_engine_releases_and_forgets_through_the_executor_contract() {
+    let (dir, manager, request) = setup(Driver::Acp, "approval");
+    let executor: Arc<dyn RuntimeExecutor> = manager.executors().unwrap().remove(0);
+    let (paused, _) = pause_for_approval(&executor, &request, &CancelToken::new());
+    assert_eq!(manager.parked_runs(), 1);
+    // What the harness calls when it abandons a paused run: idempotent.
+    executor.release(&request.run_id);
+    executor.release(&request.run_id);
+    assert_eq!(manager.parked_runs(), 0);
+    assert_eq!(manager.temporary_homes(), 0);
+    assert!(manager.process_registry().is_empty());
+    // What it calls once nothing names a thread any more.
+    let reference = paused.runtime_ref.unwrap();
+    let before = runtime_snapshots(dir.path()).len();
+    assert!(before > 0);
+    executor.forget(&reference);
+    executor.forget(&reference);
+    assert_eq!(runtime_snapshots(dir.path()).len(), before - 1);
+}

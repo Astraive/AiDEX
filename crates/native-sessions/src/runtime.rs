@@ -153,4 +153,18 @@ pub trait RuntimeExecutor: Send + Sync {
         on_event: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
         cancel: &CancelToken,
     ) -> Result<RuntimeResponse, RuntimeError>;
+    /// Release whatever a launch of `run_id` kept for an approval decision
+    /// (a paused process, its temporary home and credential): the harness
+    /// will not continue it, because the run was cancelled, failed,
+    /// interrupted, resumed, or its continuation ended. Called without any
+    /// engine lock, possibly more than once and for runs that kept nothing,
+    /// so it must be idempotent. A later `Resume` of the run launches anew.
+    /// The default keeps nothing to release.
+    fn release(&self, _run_id: &str) {}
+    /// Forget the native state a saved `runtime_ref` of this runtime names
+    /// (a snapshot of a refused, superseded or finished native thread): the
+    /// harness no longer holds any reference to it. Best effort and
+    /// idempotent; a reference that names nothing of this runtime's is
+    /// ignored. The default keeps nothing to forget.
+    fn forget(&self, _runtime_ref: &Value) {}
 }

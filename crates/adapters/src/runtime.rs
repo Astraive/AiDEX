@@ -1402,6 +1402,12 @@ impl RuntimeExecutor for ExternalRuntime {
         };
         self.drive(live, r, on_event, cancel)
     }
+    fn release(&self, run_id: &str) {
+        self.release_run(run_id);
+    }
+    fn forget(&self, runtime_ref: &Value) {
+        self.forget_snapshot(runtime_ref);
+    }
 }
 fn sanitize_json(v: Value) -> Value {
     match v {

@@ -40,6 +40,20 @@ fn fixture_with_events(
     Arc<NativeEngine>,
     String,
 ) {
+    let (drive, ws, engine, session, _) = fixture_with_vault(model, events);
+    (drive, ws, engine, session)
+}
+/// [`fixture_with_events`] with the vault the store seals with.
+fn fixture_with_vault(
+    model: &str,
+    events: Arc<dyn EventSink>,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Arc<NativeEngine>,
+    String,
+    Arc<VaultService>,
+) {
     let drive = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
     aidex_drive::init_with(
@@ -63,8 +77,9 @@ fn fixture_with_events(
     vault
         .init(&SecretString::from("fixture-passphrase".to_owned()), false)
         .unwrap();
-    let store =
-        Arc::new(SessionStore::open(paths.sessions().join("native.sqlite3"), vault).unwrap());
+    let store = Arc::new(
+        SessionStore::open(paths.sessions().join("native.sqlite3"), vault.clone()).unwrap(),
+    );
     let workspaces = Arc::new(aidex_workspace::WorkspaceRegistry::open(&paths).unwrap());
     let workspace = workspaces.add_host(ws.path(), None).unwrap();
     let registry = Arc::new(
@@ -83,7 +98,7 @@ fn fixture_with_events(
         events,
         drive.path().join("scratch"),
     );
-    (drive, ws, engine, session.id)
+    (drive, ws, engine, session.id, vault)
 }
 
 /// A reference bound to a native branch and snapshot, as adapters save it.
@@ -1191,4 +1206,811 @@ fn default_model_sentinel_lets_the_runtime_choose_its_own_model() {
         assert_eq!(wait(&e, &r.id).status, RunStatus::Completed);
         assert_eq!(*probe.models.lock().unwrap(), [expected]);
     }
+}
+
+type Execute = dyn Fn(
+        &RuntimeRequest,
+        &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+        &CancelToken,
+    ) -> Result<RuntimeResponse, RuntimeError>
+    + Send
+    + Sync;
+type Validate = dyn Fn(&RuntimeRequest) -> Result<(), RuntimeError> + Send + Sync;
+
+/// A runtime whose answers each test scripts. It records its requests and
+/// what the harness released ([`RuntimeExecutor::release`]) and forgot
+/// ([`RuntimeExecutor::forget`]), and keeps a launch that paused for an
+/// approval parked, as adapters keep its process, until it is continued or
+/// released.
+struct Scripted {
+    execute: Box<Execute>,
+    validate: Box<Validate>,
+    requests: Mutex<Vec<RuntimeRequest>>,
+    released: Mutex<Vec<String>>,
+    forgotten: Mutex<Vec<Value>>,
+    parked: Mutex<Vec<String>>,
+}
+impl Scripted {
+    fn new(
+        execute: impl Fn(
+            &RuntimeRequest,
+            &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+            &CancelToken,
+        ) -> Result<RuntimeResponse, RuntimeError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Arc<Self> {
+        Self::validating(|_| Ok(()), execute)
+    }
+    fn validating(
+        validate: impl Fn(&RuntimeRequest) -> Result<(), RuntimeError> + Send + Sync + 'static,
+        execute: impl Fn(
+            &RuntimeRequest,
+            &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+            &CancelToken,
+        ) -> Result<RuntimeResponse, RuntimeError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            execute: Box::new(execute),
+            validate: Box::new(validate),
+            requests: Mutex::new(Vec::new()),
+            released: Mutex::new(Vec::new()),
+            forgotten: Mutex::new(Vec::new()),
+            parked: Mutex::new(Vec::new()),
+        })
+    }
+    fn requests(&self) -> Vec<RuntimeRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+    fn operations(&self) -> Vec<RuntimeOperation> {
+        self.requests().iter().map(|r| r.operation).collect()
+    }
+    fn released(&self) -> Vec<String> {
+        self.released.lock().unwrap().clone()
+    }
+    fn forgotten(&self) -> Vec<Value> {
+        self.forgotten.lock().unwrap().clone()
+    }
+    fn parked(&self) -> Vec<String> {
+        self.parked.lock().unwrap().clone()
+    }
+}
+impl RuntimeExecutor for Scripted {
+    fn descriptor(&self) -> RuntimeDescriptor {
+        RuntimeDescriptor {
+            id: "fixture-runtime".into(),
+            name: "Scripted".into(),
+            modes: vec![Mode::Chat, Mode::Agent],
+            permission_modes: vec![PermissionMode::Supervised],
+            supports_resume: true,
+            supports_approvals: true,
+        }
+    }
+    fn validate(&self, r: &RuntimeRequest) -> Result<(), RuntimeError> {
+        (self.validate)(r)
+    }
+    fn execute(
+        &self,
+        r: &RuntimeRequest,
+        on: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+        cancel: &CancelToken,
+    ) -> Result<RuntimeResponse, RuntimeError> {
+        self.requests.lock().unwrap().push(r.clone());
+        let parked = self.parked.lock().unwrap().contains(&r.run_id);
+        if r.operation == RuntimeOperation::Approval {
+            if !parked {
+                return Err(refusal("approval_expired"));
+            }
+            self.parked.lock().unwrap().retain(|id| *id != r.run_id);
+        } else if parked {
+            // As adapters refused a launch while one of the run was parked.
+            return Err(refusal("runtime_busy"));
+        }
+        let response = (self.execute)(r, on, cancel);
+        if response
+            .as_ref()
+            .is_ok_and(|response| response.status == RuntimeStatus::WaitingApproval)
+        {
+            self.parked.lock().unwrap().push(r.run_id.clone());
+        }
+        response
+    }
+    fn release(&self, run_id: &str) {
+        self.released.lock().unwrap().push(run_id.into());
+        self.parked.lock().unwrap().retain(|id| id != run_id);
+    }
+    fn forget(&self, runtime_ref: &Value) {
+        self.forgotten.lock().unwrap().push(runtime_ref.clone());
+    }
+}
+
+fn refusal(code: &str) -> RuntimeError {
+    RuntimeError {
+        code: code.into(),
+        message: format!("fixture {code}"),
+    }
+}
+
+/// The reference an adapter reports when a launch opens its native session:
+/// a `Start` begins a branch named after its run, anything else continues
+/// the branch of the reference it was given. The branch's snapshot file is
+/// named after it.
+fn branch_reference(r: &RuntimeRequest) -> Value {
+    let branch = r
+        .runtime_ref
+        .as_ref()
+        .filter(|_| r.operation != RuntimeOperation::Start)
+        .and_then(|reference| reference["native_branch_id"].as_str())
+        .map_or_else(|| r.run_id.clone(), str::to_owned);
+    json!({
+        "runtime_id": "fixture-runtime",
+        "session_id": r.session_id,
+        "run_id": r.run_id,
+        "native_session_id": format!("thread-{branch}"),
+        "native_branch_id": branch,
+        "snapshot_digest": format!("digest-{}", r.run_id),
+        "snapshot_id": format!("runtime-fixture-{branch}.sealed"),
+    })
+}
+
+/// Report the launch's native identity.
+fn session_started(
+    r: &RuntimeRequest,
+    on: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+) -> Value {
+    let reference = branch_reference(r);
+    assert_eq!(
+        on(&RuntimeEvent::SessionStarted {
+            runtime_ref: reference.clone()
+        }),
+        RuntimeControl::Continue
+    );
+    reference
+}
+
+fn stream(on: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl, text: &str) {
+    assert_eq!(
+        on(&RuntimeEvent::TextDelta { text: text.into() }),
+        RuntimeControl::Continue
+    );
+}
+
+/// Ask approval `request_id` for `arguments`; the harness must pause.
+fn ask(
+    on: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+    request_id: &str,
+    arguments: Value,
+    reference: &Value,
+) -> Result<RuntimeResponse, RuntimeError> {
+    assert_eq!(
+        on(&RuntimeEvent::ApprovalRequest {
+            request_id: request_id.into(),
+            tool_name: "file_write".into(),
+            arguments,
+            summary: "write".into(),
+            runtime_ref: reference.clone(),
+        }),
+        RuntimeControl::Pause
+    );
+    Ok(RuntimeResponse {
+        status: RuntimeStatus::WaitingApproval,
+        runtime_ref: Some(reference.clone()),
+        message: None,
+    })
+}
+
+fn finish(reference: Value, text: &str) -> Result<RuntimeResponse, RuntimeError> {
+    Ok(RuntimeResponse {
+        status: RuntimeStatus::Completed,
+        runtime_ref: Some(reference),
+        message: Some(ChatMessage::assistant(text)),
+    })
+}
+
+/// A root run of `s` the store records as interrupted with a bound
+/// reference, as one cut by a restart.
+fn interrupted_run(e: &NativeEngine, s: &str, content: &str) -> (Run, Value) {
+    let run = e.store().begin(s, content, content, None).unwrap();
+    let reference = json!({"runtime_id":"fixture-runtime","session_id":s,"run_id":run.id,"native_session_id":"thread","native_branch_id":run.id,"snapshot_digest":"snapshot","snapshot_id":"runtime-fixture-interrupted.sealed"});
+    e.store()
+        .update(s, |session| {
+            let r = session.runs.iter_mut().find(|r| r.id == run.id).unwrap();
+            r.status = RunStatus::Interrupted;
+            r.runtime_ref = Some(reference.clone());
+            session.runtime_ref = Some(reference.clone());
+            Ok(())
+        })
+        .unwrap();
+    (run, reference)
+}
+
+/// Wait until `run` has `status`, failing if it settles otherwise.
+fn wait_for(e: &NativeEngine, run: &str, status: RunStatus) -> Run {
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let r = e.store().run(run).unwrap();
+        if r.status == status {
+            return r;
+        }
+        assert!(
+            Instant::now() < until && (r.status.active() || r.status == status),
+            "{:?}: {:?}",
+            r.status,
+            r.error
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn idle(e: &NativeEngine) {
+    let until = Instant::now() + Duration::from_secs(5);
+    while e.has_active() {
+        assert!(Instant::now() < until, "a run thread never stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_follow_up_after_an_incomplete_turn_replays_it() {
+    for ending in ["failed", "cancelled", "interrupted"] {
+        let (_d, _ws, e, s) = fixture();
+        let runtime = Scripted::new(move |r, on, cancel| {
+            let reference = session_started(r, on);
+            if r.messages.last().unwrap().content == "rename foo to bar everywhere" {
+                stream(on, "renamed half");
+                if ending == "cancelled" {
+                    while !cancel.is_stopped() {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    return Err(refusal("cancelled"));
+                }
+                return Err(refusal("injected_failure"));
+            }
+            finish(reference, "done")
+        });
+        e.register_runtime("fixture-runtime", runtime.clone())
+            .unwrap();
+        let first = e.start(&s, "hello", "first", None).unwrap();
+        wait_for(&e, &first.id, RunStatus::Completed);
+        let second = e
+            .start(&s, "rename foo to bar everywhere", "second", None)
+            .unwrap();
+        if ending == "cancelled" {
+            let until = Instant::now() + Duration::from_secs(5);
+            while e.store().get(&s).unwrap().messages.last().unwrap().content != "renamed half" {
+                assert!(Instant::now() < until);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            e.cancel(&second.id).unwrap();
+            wait_for(&e, &second.id, RunStatus::Cancelled);
+        } else {
+            wait_for(&e, &second.id, RunStatus::Failed);
+        }
+        idle(&e);
+        if ending == "interrupted" {
+            // As a lock and the unlock's reconciliation would leave it.
+            e.store()
+                .update(&s, |session| {
+                    let run = session.runs.iter_mut().find(|r| r.id == second.id).unwrap();
+                    run.status = RunStatus::Interrupted;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let third = e.start(&s, "continue", "third", None).unwrap();
+        wait_for(&e, &third.id, RunStatus::Completed);
+        let request = runtime.requests().pop().unwrap();
+        assert_eq!(request.operation, RuntimeOperation::Resume, "{ending}");
+        // The thread continues from the cut turn's checkpoint, and receives
+        // that turn's request and partial output before the new message.
+        assert_eq!(
+            request.runtime_ref.as_ref().unwrap()["run_id"],
+            json!(second.id)
+        );
+        let contents = request
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            ["rename foo to bar everywhere", "renamed half", "continue"],
+            "{ending}"
+        );
+    }
+}
+
+#[test]
+fn a_thread_the_runtime_cannot_reopen_is_not_followed_up_again() {
+    // A protocol failure reopening the thread drops it; a transient refusal
+    // keeps it.
+    for (code, dropped) in [("protocol_error", true), ("offline_refused", false)] {
+        let (_d, _ws, e, s) = fixture();
+        let runtime = Scripted::new(move |r, on, _| {
+            if r.operation == RuntimeOperation::Resume
+                && r.messages.last().unwrap().content == "second"
+            {
+                return Err(refusal(code));
+            }
+            let reference = session_started(r, on);
+            finish(reference, "answered")
+        });
+        e.register_runtime("fixture-runtime", runtime.clone())
+            .unwrap();
+        let first = e.start(&s, "first", "first", None).unwrap();
+        wait_for(&e, &first.id, RunStatus::Completed);
+        let saved = e.store().get(&s).unwrap().runtime_ref.unwrap();
+        let second = e.start(&s, "second", "second", None).unwrap();
+        let failed = wait_for(&e, &second.id, RunStatus::Failed);
+        assert!(
+            failed.error.as_deref().is_some_and(|e| e.contains(code)),
+            "{:?}",
+            failed.error
+        );
+        let session = e.store().get(&s).unwrap();
+        let third = e.start(&s, "third", "third", None).unwrap();
+        wait_for(&e, &third.id, RunStatus::Completed);
+        if dropped {
+            assert_eq!(session.runtime_ref, None);
+            assert_eq!(failed.runtime_ref, None);
+            assert_eq!(runtime.forgotten(), [saved]);
+            assert_eq!(
+                runtime.operations(),
+                [
+                    RuntimeOperation::Start,
+                    RuntimeOperation::Resume,
+                    RuntimeOperation::Start
+                ]
+            );
+        } else {
+            assert_eq!(session.runtime_ref, Some(saved));
+            assert!(runtime.forgotten().is_empty());
+            assert_eq!(
+                runtime.operations(),
+                [
+                    RuntimeOperation::Start,
+                    RuntimeOperation::Resume,
+                    RuntimeOperation::Resume
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn a_resume_refused_for_now_leaves_the_run_interrupted() {
+    // A pending official login (refused at validation) and a closed runtime
+    // gate (refused when launching).
+    for (code, at_validation) in [("auth_pending", true), ("offline_refused", false)] {
+        let (_d, _ws, e, s) = fixture();
+        let runtime = Scripted::validating(
+            move |r| {
+                if at_validation && r.operation == RuntimeOperation::Resume {
+                    Err(refusal(code))
+                } else {
+                    Ok(())
+                }
+            },
+            move |_, _, _| Err(refusal(code)),
+        );
+        e.register_runtime("fixture-runtime", runtime.clone())
+            .unwrap();
+        let (run, reference) = interrupted_run(&e, &s, "write the file");
+        e.resume(&run.id).unwrap();
+        let again = wait_for(&e, &run.id, RunStatus::Interrupted);
+        assert!(
+            again.error.as_deref().is_some_and(|e| e.starts_with(code)),
+            "{:?}",
+            again.error
+        );
+        assert_eq!(again.steps, 0);
+        let session = e.store().get(&s).unwrap();
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.runtime_ref, Some(reference));
+        idle(&e);
+        // It can be resumed again later.
+        e.resume(&run.id).unwrap();
+        wait_for(&e, &run.id, RunStatus::Interrupted);
+        idle(&e);
+    }
+}
+
+#[test]
+fn a_turn_the_closed_runtime_gate_ends_is_cancelled() {
+    let events = Arc::new(MemoryEventSink::new());
+    let (_d, _ws, e, s) = fixture_with_events("runtime-model", events.clone());
+    let runtime = Scripted::new(|r, on, _| {
+        session_started(r, on);
+        stream(on, "working");
+        Err(refusal("offline_refused"))
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let run = e.start(&s, "work", "gate", None).unwrap();
+    wait_for(&e, &run.id, RunStatus::Cancelled);
+    // Announced once the state is saved.
+    idle(&e);
+    let names = events.names();
+    assert!(names.contains(&"task.cancelled"), "{names:?}");
+    assert!(!names.contains(&"task.failed"));
+}
+
+#[test]
+fn a_paused_runtime_is_released_whenever_the_run_does_not_continue_it() {
+    let pausing = || {
+        Scripted::new(|r, on, _| {
+            if r.operation == RuntimeOperation::Approval {
+                return finish(r.runtime_ref.clone().unwrap(), "continued");
+            }
+            let reference = session_started(r, on);
+            ask(on, "0", json!({"path":"result.txt"}), &reference)
+        })
+    };
+    // Cancelled while it waits.
+    let (_d, _ws, e, s) = fixture();
+    let runtime = pausing();
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let run = e.start(&s, "write", "cancelled", None).unwrap();
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    assert_eq!(runtime.parked(), std::slice::from_ref(&run.id));
+    e.cancel(&run.id).unwrap();
+    assert!(runtime.released().contains(&run.id));
+    assert!(runtime.parked().is_empty());
+    assert!(!e.has_active());
+
+    // Stopped by a vault lock: released although the cancel cannot be saved,
+    // and resumable after the unlock's reconciliation.
+    let (_d, _ws, e, s, vault) =
+        fixture_with_vault("runtime-model", Arc::new(MemoryEventSink::new()));
+    let runtime = pausing();
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let run = e.start(&s, "write", "locked", None).unwrap();
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    assert!(vault.lock().was_unlocked);
+    e.cancel_all();
+    assert!(runtime.released().contains(&run.id));
+    assert!(runtime.parked().is_empty());
+    vault
+        .unlock(&SecretString::from("fixture-passphrase".to_owned()))
+        .unwrap();
+    e.reconcile_after_unlock().unwrap();
+    assert_eq!(
+        e.store().run(&run.id).unwrap().status,
+        RunStatus::Interrupted
+    );
+    assert!(!e.has_active());
+    e.resume(&run.id).unwrap();
+    // The resumed launch reaches the runtime and pauses again.
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    assert_eq!(runtime.operations().last(), Some(&RuntimeOperation::Resume));
+
+    // Resumed while it waits: the parked launch is released first.
+    let released = runtime.released().len();
+    e.resume(&run.id).unwrap();
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    assert!(runtime.released().len() > released);
+    assert_eq!(
+        runtime.operations()[runtime.operations().len() - 2..],
+        [RuntimeOperation::Resume, RuntimeOperation::Resume]
+    );
+    assert_eq!(runtime.parked(), std::slice::from_ref(&run.id));
+
+    // Answered, but its continuation fails before reaching the runtime (no
+    // step left): the runtime does not keep waiting for it.
+    let (_d, _ws, e, s) = fixture();
+    let runtime = pausing();
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    e.store()
+        .update(&s, |session| {
+            session.configuration.max_steps = 1;
+            Ok(())
+        })
+        .unwrap();
+    let run = e.start(&s, "write", "budget", None).unwrap();
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    let a = e.approvals(Some(&run.id)).unwrap().remove(0);
+    e.respond(&a.id, &a.fingerprint, true, "approve").unwrap();
+    let failed = wait_for(&e, &run.id, RunStatus::Failed);
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("step budget")),
+        "{:?}",
+        failed.error
+    );
+    idle(&e);
+    assert!(runtime.released().contains(&run.id));
+    assert!(runtime.parked().is_empty());
+    assert_eq!(runtime.operations(), [RuntimeOperation::Start]);
+}
+
+#[test]
+fn a_resumed_run_may_reuse_an_earlier_launch_request_id() {
+    let (_d, _ws, e, s) = fixture();
+    let resumed = Arc::new(AtomicUsize::new(0));
+    let launches = resumed.clone();
+    let runtime = Scripted::new(move |r, on, _| match r.operation {
+        RuntimeOperation::Approval => {
+            // Only the decision just made is passed on.
+            assert_eq!(r.approvals.len(), 1);
+            let reference = r.runtime_ref.clone().unwrap();
+            if launches.load(Ordering::SeqCst) == 0 && r.approvals[0].request_id == "0" {
+                return ask(on, "1", json!({"second": true}), &reference);
+            }
+            finish(reference, "continued")
+        }
+        _ => {
+            if r.operation == RuntimeOperation::Resume {
+                launches.fetch_add(1, Ordering::SeqCst);
+            }
+            // A new process numbers its requests from 0 again, for other
+            // arguments.
+            let reference = session_started(r, on);
+            ask(
+                on,
+                "0",
+                json!({"launch": launches.load(Ordering::SeqCst)}),
+                &reference,
+            )
+        }
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let run = e.start(&s, "write", "renumbered", None).unwrap();
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    let first = e.approvals(Some(&run.id)).unwrap().remove(0);
+    e.respond(&first.id, &first.fingerprint, true, "approve-0")
+        .unwrap();
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    // Resumed: the new launch asks "0" again, which is a new approval.
+    e.resume(&run.id).unwrap();
+    let waiting = wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    assert!(waiting.error.is_none(), "{:?}", waiting.error);
+    let approvals = e.approvals(Some(&run.id)).unwrap();
+    let statuses = approvals
+        .iter()
+        .map(|a| a.status.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, ["approved", "expired", "pending"]);
+    let again = approvals.last().unwrap().clone();
+    assert_eq!(again.runtime_request_id.as_deref(), Some("0"));
+    assert_ne!(again.fingerprint, first.fingerprint);
+    e.respond(&again.id, &again.fingerprint, true, "approve-again")
+        .unwrap();
+    wait_for(&e, &run.id, RunStatus::Completed);
+    let continuation = runtime.requests().pop().unwrap();
+    assert_eq!(continuation.approvals[0].fingerprint, again.fingerprint);
+}
+
+#[test]
+fn an_approval_continuation_keeps_its_turn_in_one_message() {
+    for with_message in [true, false] {
+        let (_d, _ws, e, s) = fixture();
+        let runtime = Scripted::new(move |r, on, _| {
+            if r.operation == RuntimeOperation::Approval {
+                stream(on, "after");
+                return Ok(RuntimeResponse {
+                    status: RuntimeStatus::Completed,
+                    runtime_ref: r.runtime_ref.clone(),
+                    // The adapter's message holds the whole turn.
+                    message: with_message.then(|| ChatMessage::assistant("before after")),
+                });
+            }
+            let reference = session_started(r, on);
+            stream(on, "before ");
+            ask(on, "0", json!({}), &reference)
+        });
+        e.register_runtime("fixture-runtime", runtime.clone())
+            .unwrap();
+        let run = e.start(&s, "prompt", "one-message", None).unwrap();
+        wait_for(&e, &run.id, RunStatus::WaitingApproval);
+        let a = e.approvals(Some(&run.id)).unwrap().remove(0);
+        e.respond(&a.id, &a.fingerprint, true, "approve").unwrap();
+        let done = wait_for(&e, &run.id, RunStatus::Completed);
+        let contents = e
+            .store()
+            .get(&s)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(contents, ["prompt", "before after"], "{with_message}");
+        assert_eq!(done.transcript.last().unwrap().content, "before after");
+    }
+}
+
+/// While armed, cancels the run `run` (as a concurrent cancel would) when
+/// its descriptor is read, which `resume` does before it makes the run
+/// pending.
+struct CancelsOnDescriptor {
+    store: Arc<SessionStore>,
+    session: String,
+    run: Mutex<Option<String>>,
+    executions: AtomicUsize,
+}
+impl RuntimeExecutor for CancelsOnDescriptor {
+    fn descriptor(&self) -> RuntimeDescriptor {
+        if let Some(run) = self.run.lock().unwrap().take() {
+            self.store
+                .update(&self.session, |s| {
+                    s.runs.iter_mut().find(|r| r.id == run).unwrap().status = RunStatus::Cancelled;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        RuntimeDescriptor {
+            id: "fixture-runtime".into(),
+            name: "cancels on descriptor".into(),
+            modes: vec![Mode::Agent],
+            permission_modes: vec![PermissionMode::Supervised],
+            supports_resume: true,
+            supports_approvals: false,
+        }
+    }
+    fn validate(&self, _: &RuntimeRequest) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+    fn execute(
+        &self,
+        r: &RuntimeRequest,
+        _: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+        _: &CancelToken,
+    ) -> Result<RuntimeResponse, RuntimeError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        finish(branch_reference(r), "relaunched")
+    }
+}
+
+#[test]
+fn a_run_cancelled_while_it_resumes_is_not_relaunched() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Arc::new(CancelsOnDescriptor {
+        store: e.store().clone(),
+        session: s.clone(),
+        run: Mutex::new(None),
+        executions: AtomicUsize::new(0),
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let (run, _) = interrupted_run(&e, &s, "write the file");
+    *runtime.run.lock().unwrap() = Some(run.id.clone());
+    let refused = e.resume(&run.id).unwrap_err();
+    assert!(refused.contains("only an interrupted run"), "{refused}");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(e.store().run(&run.id).unwrap().status, RunStatus::Cancelled);
+    assert_eq!(runtime.executions.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn only_the_latest_root_run_resumes_and_never_beside_another() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Scripted::new(|r, on, _| {
+        let reference = session_started(r, on);
+        ask(on, "0", json!({}), &reference)
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let (older, reference) = interrupted_run(&e, &s, "older");
+    let newer = e.start(&s, "newer", "newer", None).unwrap();
+    wait_for(&e, &newer.id, RunStatus::WaitingApproval);
+    // Not beside the active newer run on the same native thread...
+    let refused = e.resume(&older.id).unwrap_err();
+    assert!(refused.contains("active root run"), "{refused}");
+    assert_eq!(
+        e.store().run(&older.id).unwrap().status,
+        RunStatus::Interrupted
+    );
+    // ...nor once it stopped: the older thread misses the newer turn.
+    e.cancel(&newer.id).unwrap();
+    let refused = e.resume(&older.id).unwrap_err();
+    assert!(refused.contains("latest message"), "{refused}");
+    assert_eq!(
+        e.store().run(&older.id).unwrap().status,
+        RunStatus::Interrupted
+    );
+    assert_eq!(runtime.operations(), [RuntimeOperation::Resume]);
+    assert_ne!(e.store().get(&s).unwrap().runtime_ref, Some(reference));
+}
+
+#[test]
+fn native_state_nothing_continues_is_forgotten() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Scripted::new(|r, on, _| {
+        if r.operation == RuntimeOperation::Resume {
+            // The saved thread no longer matches (another account).
+            return Err(refusal("resume_unavailable"));
+        }
+        let reference = session_started(r, on);
+        finish(reference, "answered")
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let first = e.start(&s, "first", "first", None).unwrap();
+    wait_for(&e, &first.id, RunStatus::Completed);
+    let refused = e.store().get(&s).unwrap().runtime_ref.unwrap();
+    // A follow-up the runtime refuses starts a new thread; the refused one
+    // is forgotten, since only finished runs still name it.
+    let second = e.start(&s, "second", "second", None).unwrap();
+    wait_for(&e, &second.id, RunStatus::Completed);
+    assert_eq!(runtime.forgotten(), [refused]);
+    let kept = e.store().get(&s).unwrap().runtime_ref.unwrap();
+    // A finished child's thread is never continued.
+    let root = e.store().begin(&s, "root", "root", None).unwrap();
+    let child = e
+        .start(&s, "child", "child", Some(root.id.clone()))
+        .unwrap();
+    let child = wait_for(&e, &child.id, RunStatus::Completed);
+    assert_eq!(runtime.forgotten().len(), 2);
+    assert_eq!(runtime.forgotten()[1], child.runtime_ref.unwrap());
+    e.cancel(&root.id).unwrap();
+    // The conversation's own thread is kept.
+    assert!(!runtime.forgotten().contains(&kept));
+}
+
+#[test]
+fn one_runtime_is_replaced_while_another_runtimes_run_is_active() {
+    let (_d, _ws, e, s) = fixture();
+    let runtime = Scripted::new(|r, on, _| {
+        let reference = session_started(r, on);
+        ask(on, "0", json!({}), &reference)
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let run = e.start(&s, "write", "busy", None).unwrap();
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    /// Another runtime's descriptor.
+    struct Other;
+    impl RuntimeExecutor for Other {
+        fn descriptor(&self) -> RuntimeDescriptor {
+            RuntimeDescriptor {
+                id: "other-runtime".into(),
+                name: "Other".into(),
+                modes: vec![Mode::Agent],
+                permission_modes: vec![PermissionMode::Supervised],
+                supports_resume: false,
+                supports_approvals: false,
+            }
+        }
+        fn validate(&self, _: &RuntimeRequest) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn execute(
+            &self,
+            _: &RuntimeRequest,
+            _: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
+            _: &CancelToken,
+        ) -> Result<RuntimeResponse, RuntimeError> {
+            Err(refusal("unused"))
+        }
+    }
+    // The full swap waits for every external run; replacing another
+    // runtime's executor does not, but replacing the busy one's does.
+    assert!(e.synchronize_runtimes(vec![Arc::new(Other)]).is_err());
+    e.replace_runtime("other-runtime", Arc::new(Other)).unwrap();
+    assert!(
+        e.replace_runtime("fixture-runtime", runtime.clone())
+            .is_err()
+    );
+    assert!(
+        e.replace_runtime("fixture-runtime", Arc::new(Other))
+            .is_err()
+    );
+    let ids = e
+        .runtime_descriptors()
+        .into_iter()
+        .map(|d| d.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["fixture-runtime", "other-runtime"]);
+    e.cancel(&run.id).unwrap();
+    e.replace_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
 }

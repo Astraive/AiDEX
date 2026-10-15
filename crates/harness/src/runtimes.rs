@@ -14,34 +14,29 @@ use std::{
     time::{Duration, Instant},
 };
 impl NativeEngine {
-    pub fn ensure_runtime_idle(&self, id: &str) -> Result<(), String> {
+    /// Refuse while a run of the external runtime `id` (`None`: of any
+    /// external runtime) is active.
+    fn refuse_active_external(&self, id: Option<&str>) -> Result<(), String> {
         for run in self.store.run_summaries()? {
             if run.status.active() {
                 let config = self.store.get(&run.session_id)?.configuration;
-                if config.runtime_id.as_deref() == Some(id) {
+                let runtime = config.runtime_id.as_deref().filter(|id| *id != "native");
+                if runtime.is_some() && (id.is_none() || runtime == id) {
                     return Err("cancel active external runs and approvals before modifying runtime configuration".into());
                 }
             }
         }
         Ok(())
     }
+    pub fn ensure_runtime_idle(&self, id: &str) -> Result<(), String> {
+        self.refuse_active_external(Some(id))
+    }
     pub fn mutate_runtimes<T>(
         &self,
         mutation: impl FnOnce() -> Result<(T, Vec<Arc<dyn RuntimeExecutor>>), String>,
     ) -> Result<T, String> {
         let _guard = relock(&self.operations);
-        for run in self.store.run_summaries()? {
-            if run.status.active() {
-                let config = self.store.get(&run.session_id)?.configuration;
-                if config
-                    .runtime_id
-                    .as_deref()
-                    .is_some_and(|id| id != "native")
-                {
-                    return Err("cancel active external runs and approvals before modifying runtime configuration".into());
-                }
-            }
-        }
+        self.refuse_active_external(None)?;
         let (result, executors) = mutation()?;
         let mut replacement = std::collections::HashMap::new();
         for executor in executors {
@@ -65,20 +60,28 @@ impl NativeEngine {
     ) -> Result<(), String> {
         self.mutate_runtimes(|| Ok(((), executors)))
     }
+    /// Replace the executor of runtime `id` alone (or add it), once none of
+    /// that runtime's runs is active, while other runtimes' runs go on: for
+    /// an embedder whose full [`Self::synchronize_runtimes`] was refused
+    /// because another runtime is busy, and whose executor of `id` is stale
+    /// (its account or credential changed).
+    pub fn replace_runtime(
+        &self,
+        id: &str,
+        runtime: Arc<dyn RuntimeExecutor>,
+    ) -> Result<(), String> {
+        let _guard = relock(&self.operations);
+        check_descriptor(id, &runtime.descriptor())?;
+        self.refuse_active_external(Some(id))?;
+        relock(&self.runtimes).insert(id.into(), runtime);
+        Ok(())
+    }
     pub fn register_runtime(
         &self,
         id: &str,
         runtime: Arc<dyn RuntimeExecutor>,
     ) -> Result<(), String> {
-        EntityId::new(id).map_err(|e| e.to_string())?;
-        let descriptor = runtime.descriptor();
-        if id == "native"
-            || descriptor.id != id
-            || descriptor.modes.is_empty()
-            || descriptor.permission_modes.is_empty()
-        {
-            return Err("invalid external runtime descriptor".into());
-        }
+        check_descriptor(id, &runtime.descriptor())?;
         let mut registry = relock(&self.runtimes);
         if registry.contains_key(id) {
             return Err("runtime already registered".into());
@@ -150,26 +153,33 @@ impl NativeEngine {
         if let Some(reference) = &run.runtime_ref {
             safe_reference(reference)?;
         }
-        let mut approvals: Vec<RuntimeApprovalDecision> = s
-            .approvals
-            .iter()
-            .filter(|a| {
-                a.run_id == run.id
-                    && a.runtime_id == s.configuration.runtime_id
-                    && matches!(a.status.as_str(), "approved" | "denied")
-            })
-            .filter_map(|a| {
-                Some(RuntimeApprovalDecision {
-                    request_id: a.runtime_request_id.clone()?,
-                    approved: a.status == "approved",
-                    fingerprint: a.fingerprint.clone(),
-                    runtime_ref: a.runtime_ref.clone()?,
+        // An approval continuation carries the decision just made: the run's
+        // newest decided approval (one approval of a run is pending at a
+        // time). Earlier launches' decisions are left out, since a vendor
+        // numbers its requests per process and a resumed run's new process
+        // may reuse an earlier request's id.
+        let approvals: Vec<RuntimeApprovalDecision> = if operation == RuntimeOperation::Approval {
+            s.approvals
+                .iter()
+                .rev()
+                .filter(|a| {
+                    a.run_id == run.id
+                        && a.runtime_id == s.configuration.runtime_id
+                        && matches!(a.status.as_str(), "approved" | "denied")
                 })
-            })
-            .collect();
-        if operation != RuntimeOperation::Approval {
-            approvals.clear();
-        }
+                .take(1)
+                .filter_map(|a| {
+                    Some(RuntimeApprovalDecision {
+                        request_id: a.runtime_request_id.clone()?,
+                        approved: a.status == "approved",
+                        fingerprint: a.fingerprint.clone(),
+                        runtime_ref: a.runtime_ref.clone()?,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Runtimes cannot receive files: attachments of the conversation
         // reach them as placeholder lines.
         let mut messages = run.transcript.clone();
@@ -182,7 +192,10 @@ impl NativeEngine {
         // applied diffs, as for native models.
         crate::tool_view::tool_results_for_model(&mut messages);
         if operation == RuntimeOperation::Resume {
-            crate::engine::resume_messages(&mut messages);
+            // The thread's saved reference may predate turns that did not
+            // complete: their requests and partial output come too.
+            let unseen = crate::engine::first_unseen(&s, run.runtime_ref.as_ref(), Some(&run.id));
+            crate::engine::resume_messages(&mut messages, unseen);
         }
         Ok(RuntimeRequest {
             session_id: run.session_id.clone(),
@@ -276,7 +289,7 @@ impl NativeEngine {
         match runtime.validate(&request) {
             Ok(()) => Ok(launch),
             Err(error) if launch == RuntimeLaunch::FollowUp && error.code == RESUME_UNAVAILABLE => {
-                let request = self.restart_request(run, &request, &runtime.descriptor().name)?;
+                let request = self.restart_request(run, &request, runtime.as_ref())?;
                 runtime.validate(&request).map_err(|e| e.to_string())?;
                 Ok(RuntimeLaunch::Start)
             }
@@ -285,7 +298,11 @@ impl NativeEngine {
     }
     /// Run one launch of an external-runtime run. Returns whether the run is
     /// now waiting for an approval with its runtime paused, which the
-    /// launching thread must keep counted although it stops.
+    /// launching thread must keep counted although it stops. Otherwise
+    /// whatever the runtime kept for an approval of the run is released
+    /// ([`RuntimeExecutor::release`]): nothing continues it (a continuation
+    /// that failed before reaching the runtime, a cancel that the runtime
+    /// answered by pausing, a refused or failed launch).
     pub(crate) fn execute_runtime(
         &self,
         id: &str,
@@ -295,6 +312,21 @@ impl NativeEngine {
         let run = self.store.run(id)?;
         let s = self.store.get(&run.session_id)?;
         let runtime = self.runtime_for(&s.configuration)?;
+        let result = self.drive_runtime(&run, &runtime, launch, cancel);
+        if !matches!(result, Ok(true)) {
+            runtime.release(id);
+        }
+        result
+    }
+    /// [`execute_runtime`](Self::execute_runtime) with its runtime.
+    fn drive_runtime(
+        &self,
+        run: &Run,
+        runtime: &Arc<dyn RuntimeExecutor>,
+        launch: RuntimeLaunch,
+        cancel: &CancelToken,
+    ) -> Result<bool, String> {
+        let id = run.id.as_str();
         let descriptor = runtime.descriptor();
         let resumable = descriptor.supports_resume
             && run.runtime_ref.as_ref().is_some_and(is_resumable_reference);
@@ -319,7 +351,7 @@ impl NativeEngine {
             )?;
             return Ok(false);
         }
-        let mut request = self.runtime_request(&run, launch.operation())?;
+        let mut request = self.runtime_request(run, launch.operation())?;
         if replayed {
             check_runtime_bounds(&descriptor.name, &request.instructions, &request.messages)?;
         }
@@ -328,15 +360,16 @@ impl NativeEngine {
         }
         // A refused reference, as below when the runtime starts: a follow-up
         // starts over once with the transcript, and a resumed run is never
-        // replayed.
+        // replayed. A resumed run the runtime refuses only for now (offline,
+        // a pending official login) also stays interrupted.
         if let Err(error) = runtime.validate(&request) {
             match launch {
                 RuntimeLaunch::FollowUp if error.code == RESUME_UNAVAILABLE => {
-                    request = self.restart_request(&run, &request, &descriptor.name)?;
+                    request = self.restart_request(run, &request, runtime.as_ref())?;
                     runtime.validate(&request).map_err(|e| e.to_string())?;
                     launch = RuntimeLaunch::Start;
                 }
-                RuntimeLaunch::Resume if error.code == RESUME_UNAVAILABLE => {
+                RuntimeLaunch::Resume if resume_refusal(&error.code) => {
                     self.transition(
                         id,
                         RunStatus::Interrupted,
@@ -355,64 +388,105 @@ impl NativeEngine {
             // Cancelled or interrupted meanwhile.
             return Ok(false);
         }
-        let index = self.store.update(&run.session_id, |s| {
+        let (index, partial) = self.store.update(&run.session_id, |s| {
+            let message_index = s
+                .runs
+                .iter()
+                .find(|r| r.id == id)
+                .ok_or("run not found")?
+                .message_index;
+            let last = s.messages.len().checked_sub(1);
             let r = s
                 .runs
                 .iter_mut()
                 .find(|r| r.id == id)
                 .ok_or("run not found")?;
             r.steps += 1;
-            if r.parent_run_id.is_none() {
-                let index = s.messages.len();
-                s.messages.push(ChatMessage::assistant(""));
-                Ok(Some(index))
-            } else {
-                Ok(None)
+            if r.parent_run_id.is_some() {
+                return Ok((None, String::new()));
             }
+            // An approval continuation goes on with the turn its paused launch
+            // streamed into its own placeholder (the last message: a root run
+            // is alone in its conversation while it is active), so the turn
+            // stays one message.
+            if launch == RuntimeLaunch::Approval
+                && let Some(last) = last.filter(|last| message_index.is_some_and(|m| *last > m))
+                && s.messages[last].role == aidex_providers::Role::Assistant
+                && s.messages[last].tool_calls.is_empty()
+            {
+                return Ok((Some(last), s.messages[last].content.clone()));
+            }
+            let index = s.messages.len();
+            s.messages.push(ChatMessage::assistant(""));
+            Ok((Some(index), String::new()))
         })?;
-        let mut attempt =
-            self.attempt_runtime(runtime.as_ref(), &descriptor, &run, &request, index, cancel);
-        if attempt.refused_before_start() && !cancel.is_stopped() {
-            match launch {
-                RuntimeLaunch::FollowUp => {
-                    // The saved native thread cannot be continued (another
-                    // account or credential, a changed or missing snapshot)
-                    // and nothing ran: start over with the transcript, once.
-                    request = self.restart_request(&run, &request, &descriptor.name)?;
-                    runtime.validate(&request).map_err(|e| e.to_string())?;
-                    attempt = self.attempt_runtime(
-                        runtime.as_ref(),
-                        &descriptor,
-                        &run,
-                        &request,
-                        index,
-                        cancel,
-                    );
-                }
-                RuntimeLaunch::Resume => {
-                    // Replaying could repeat this run's effects: it returns to
-                    // interrupted, and a new message continues instead.
-                    let error = attempt
-                        .result
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .unwrap_or_default();
-                    self.withdraw_turn(&run, index)?;
-                    self.transition(
-                        id,
-                        RunStatus::Interrupted,
-                        Some(aidex_events::redact_text(&error).into_owned()),
-                    )?;
-                    return Ok(false);
-                }
-                RuntimeLaunch::Start | RuntimeLaunch::Approval => {}
+        let mut attempt = self.attempt_runtime(
+            runtime.as_ref(),
+            &descriptor,
+            run,
+            &request,
+            (index, &partial),
+            cancel,
+        );
+        match (launch, attempt.unstarted()) {
+            (RuntimeLaunch::FollowUp, Some(RESUME_UNAVAILABLE)) if !cancel.is_stopped() => {
+                // The saved native thread cannot be continued (another
+                // account or credential, a changed or missing snapshot) and
+                // nothing ran: start over with the transcript, once.
+                request = self.restart_request(run, &request, runtime.as_ref())?;
+                runtime.validate(&request).map_err(|e| e.to_string())?;
+                attempt = self.attempt_runtime(
+                    runtime.as_ref(),
+                    &descriptor,
+                    run,
+                    &request,
+                    (index, &partial),
+                    cancel,
+                );
             }
+            (RuntimeLaunch::FollowUp, Some(PROTOCOL_ERROR | PROTOCOL_PARAMETERS)) => {
+                // The runtime could not even reopen the saved native thread:
+                // this run fails, and the next message starts a new thread
+                // with the transcript instead of failing the same way.
+                self.drop_reference(run, runtime.as_ref())?;
+            }
+            (RuntimeLaunch::Resume, Some(code)) if resume_refusal(code) && !cancel.is_stopped() => {
+                // Replaying could repeat this run's effects: it returns to
+                // interrupted (nothing ran), and an explicit resume or a new
+                // message continues instead.
+                let error = attempt
+                    .result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                self.withdraw_turn(run, index)?;
+                self.transition(
+                    id,
+                    RunStatus::Interrupted,
+                    Some(aidex_events::redact_text(&error).into_owned()),
+                )?;
+                return Ok(false);
+            }
+            _ => {}
         }
         if let Some(problem) = attempt.problem {
             return Err(problem);
         }
-        let response = attempt.result.map_err(|e| e.to_string())?;
+        let response = match attempt.result {
+            Ok(response) => response,
+            // The runtime gate closed while the turn ran (going offline, a
+            // vault lock, an emergency stop): those cancel external runs.
+            Err(error) if error.code == OFFLINE_REFUSED && attempt.reported => {
+                self.transition(
+                    id,
+                    RunStatus::Cancelled,
+                    Some(aidex_events::redact_text(&error.to_string()).into_owned()),
+                )?;
+                return Ok(false);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         if cancel.is_stopped() {
             self.transition(id, RunStatus::Cancelled, None)?;
             return Ok(false);
@@ -453,10 +527,14 @@ impl NativeEngine {
             }
             Ok(())
         })?;
+        // The paused runtime is kept with the run's registry entry, so a
+        // cancel, an interruption, or a lock releases it even with no thread
+        // and no readable store.
         if response.status == RuntimeStatus::WaitingApproval
             && let Some(live) = relock(&self.live).get_mut(id)
         {
             live.executing = false;
+            live.runtime = Some(runtime.clone());
         }
         let settled = self.transition(
             id,
@@ -476,16 +554,19 @@ impl NativeEngine {
         Ok(paused)
     }
     /// One call of [`RuntimeExecutor::execute`] for `request`, handling the
-    /// events it reports.
+    /// events it reports. Its text goes to the root run's placeholder
+    /// `slot.0`, after the text `slot.1` it already holds (an approval
+    /// continuation's paused turn).
     fn attempt_runtime(
         &self,
         runtime: &dyn RuntimeExecutor,
         descriptor: &RuntimeDescriptor,
         run: &Run,
         request: &RuntimeRequest,
-        index: Option<usize>,
+        slot: (Option<usize>, &str),
         cancel: &CancelToken,
     ) -> Attempt {
+        let (index, partial) = slot;
         let mut turn = Turn {
             run,
             request,
@@ -493,9 +574,9 @@ impl NativeEngine {
             index,
             scope: self.event_scope(&run.session_id),
             agent_id: EntityId::new(&run.id).ok(),
-            partial: String::new(),
+            partial: partial.to_owned(),
             last: Instant::now() - Duration::from_secs(1),
-            saved: 0,
+            saved: partial.len(),
             paused: false,
             tools: HashSet::new(),
             started: None,
@@ -708,6 +789,14 @@ impl NativeEngine {
                     .to_string()
                     .as_bytes(),
                 );
+                // A request id is matched only among the approvals this launch
+                // of the runtime asked for (its approval continuations
+                // included): a vendor numbers requests per process, so a
+                // resumed run's new process reuses an earlier one's ids.
+                let launched = relock(&self.live)
+                    .get(id)
+                    .map(|live| live.approvals.clone())
+                    .unwrap_or_default();
                 let existing = self
                     .store
                     .get(session)?
@@ -716,6 +805,7 @@ impl NativeEngine {
                     .rev()
                     .find(|a| {
                         a.run_id == id
+                            && launched.contains(&a.id)
                             && a.runtime_request_id.as_deref() == Some(request_id)
                             && a.runtime_id.as_deref() == Some(&turn.descriptor.id)
                     });
@@ -769,6 +859,9 @@ impl NativeEngine {
                     s.approvals.push(approval.clone());
                     Ok(())
                 })?;
+                if let Some(live) = relock(&self.live).get_mut(id) {
+                    live.approvals.push(approval.id.clone());
+                }
                 turn.approval = Some(EventKind::ApprovalCreated {
                     approval_id: EntityId::new(&approval.id).map_err(|e| e.to_string())?,
                     intent_id: event_id("intent", request_id)?,
@@ -782,32 +875,50 @@ impl NativeEngine {
         }
     }
     /// Forget the run's and the conversation's saved reference, which the
-    /// runtime refused, and turn `refused` into a `Start` request with the
-    /// whole transcript, bounded as a new start.
+    /// runtime refused ([`Self::drop_reference`]), and turn `refused` into a
+    /// `Start` request with the whole transcript, bounded as a new start.
     fn restart_request(
         &self,
         run: &Run,
         refused: &RuntimeRequest,
-        runtime: &str,
+        runtime: &dyn RuntimeExecutor,
     ) -> Result<RuntimeRequest, String> {
-        let run = self.store.update(&run.session_id, |s| {
+        let run = self.drop_reference(run, runtime)?;
+        let mut request = self.runtime_request(&run, RuntimeOperation::Start)?;
+        // The refused attempt's step is this one's: the budget is unchanged.
+        request.max_steps = refused.max_steps;
+        check_runtime_bounds(
+            &runtime.descriptor().name,
+            &request.instructions,
+            &request.messages,
+        )?;
+        Ok(request)
+    }
+    /// Clear the run's saved reference, and the conversation's for a root
+    /// run, so nothing continues that native thread; the runtime then
+    /// forgets the state the run's reference names
+    /// ([`RuntimeExecutor::forget`]) unless something of the conversation
+    /// that may still continue a thread names it ([`still_named`]). Returns
+    /// the run as saved.
+    fn drop_reference(&self, run: &Run, runtime: &dyn RuntimeExecutor) -> Result<Run, String> {
+        let (run, unnamed) = self.store.update(&run.session_id, |s| {
             let r = s
                 .runs
                 .iter_mut()
                 .find(|r| r.id == run.id)
                 .ok_or("run not found")?;
-            r.runtime_ref = None;
+            let dropped = r.runtime_ref.take();
             let r = r.clone();
             if r.parent_run_id.is_none() {
                 s.runtime_ref = None;
             }
-            Ok(r)
+            let unnamed = dropped.filter(|reference| !still_named(s, &r.id, reference));
+            Ok((r, unnamed))
         })?;
-        let mut request = self.runtime_request(&run, RuntimeOperation::Start)?;
-        // The refused attempt's step is this one's: the budget is unchanged.
-        request.max_steps = refused.max_steps;
-        check_runtime_bounds(runtime, &request.instructions, &request.messages)?;
-        Ok(request)
+        if let Some(reference) = unnamed {
+            runtime.forget(&reference);
+        }
+        Ok(run)
     }
     /// Undo a turn the runtime refused before starting: give back its step
     /// and drop its still-empty assistant placeholder.
@@ -831,9 +942,63 @@ impl NativeEngine {
     }
 }
 
+/// Refuse a runtime that cannot be registered as `id`: not an entity id,
+/// `native`, or a descriptor with another id or without modes.
+fn check_descriptor(id: &str, descriptor: &RuntimeDescriptor) -> Result<(), String> {
+    EntityId::new(id).map_err(|e| e.to_string())?;
+    if id == "native"
+        || descriptor.id != id
+        || descriptor.modes.is_empty()
+        || descriptor.permission_modes.is_empty()
+    {
+        return Err("invalid external runtime descriptor".into());
+    }
+    Ok(())
+}
+
 /// `RuntimeError.code` of a runtime that refused a saved reference before it
 /// started anything: adapters return it before spawning a process.
 pub(crate) const RESUME_UNAVAILABLE: &str = "resume_unavailable";
+/// `RuntimeError.code` of a runtime the runtime gate keeps from running
+/// (offline, a locked vault, an emergency stop).
+const OFFLINE_REFUSED: &str = "offline_refused";
+/// `RuntimeError.code`s of a native protocol request the runtime rejected.
+const PROTOCOL_ERROR: &str = "protocol_error";
+const PROTOCOL_PARAMETERS: &str = "protocol_parameters";
+
+/// Whether a `Resume` the runtime refused with `code` before it started
+/// anything leaves the run `interrupted` rather than `failed`: the saved
+/// reference cannot be continued ([`RESUME_UNAVAILABLE`]), or the runtime is
+/// unavailable only for now (the runtime gate is closed, an official login is
+/// pending), so an explicit resume can try again later.
+fn resume_refusal(code: &str) -> bool {
+    matches!(code, RESUME_UNAVAILABLE | OFFLINE_REFUSED | "auth_pending")
+}
+
+/// Whether something of conversation `s` that may still continue a native
+/// thread names the snapshot `reference` names (`snapshot_id`): the
+/// conversation's reference, a run other than `except` that is active or
+/// interrupted, or a pending approval. Finished runs' references are history
+/// that nothing resumes. A reference that names no snapshot counts as named:
+/// there is nothing to forget.
+pub(crate) fn still_named(s: &SessionDetail, except: &str, reference: &Value) -> bool {
+    fn snapshot(reference: &Value) -> Option<&str> {
+        reference.get("snapshot_id")?.as_str()
+    }
+    let Some(name) = snapshot(reference) else {
+        return true;
+    };
+    let names = |other: &Option<Value>| other.as_ref().and_then(snapshot) == Some(name);
+    names(&s.runtime_ref)
+        || s.runs.iter().any(|r| {
+            r.id != except
+                && (r.status.active() || r.status == RunStatus::Interrupted)
+                && names(&r.runtime_ref)
+        })
+        || s.approvals
+            .iter()
+            .any(|a| a.status == "pending" && names(&a.runtime_ref))
+}
 /// Most text one external turn may stream (1 MiB).
 const RUNTIME_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -879,11 +1044,13 @@ struct Attempt {
     approval: Option<EventKind>,
 }
 impl Attempt {
-    /// The runtime refused the saved reference before reporting anything.
-    fn refused_before_start(&self) -> bool {
-        !self.reported
-            && self.problem.is_none()
-            && matches!(&self.result, Err(error) if error.code == RESUME_UNAVAILABLE)
+    /// The code of the runtime's error when it failed before reporting
+    /// anything (a refusal before it started, such as [`RESUME_UNAVAILABLE`]).
+    fn unstarted(&self) -> Option<&str> {
+        match &self.result {
+            Err(error) if !self.reported && self.problem.is_none() => Some(error.code.as_str()),
+            _ => None,
+        }
     }
 }
 

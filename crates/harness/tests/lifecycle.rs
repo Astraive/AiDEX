@@ -906,3 +906,104 @@ fn resuming_a_waiting_run_drops_the_plan_of_its_expired_approval() {
     assert!(refused.contains("resume"), "{refused}");
     assert!(!f.ws.path().join("file.txt").exists());
 }
+
+#[test]
+fn a_child_started_while_its_parent_is_cancelled_never_runs() {
+    let f = fixture(
+        vec![write_call(), write_call(), FakeTurn::text("late child")],
+        false,
+    );
+    let (root, _) = f.paused("root", None);
+    let (child, _) = f.paused("child", Some(&root.id));
+    // The parent's thread spawns a child after its cancel cancelled the
+    // existing children, before its own cancellation is saved.
+    let engine = f.engine.clone();
+    let session = f.session.clone();
+    let parent = root.id.clone();
+    let late = Arc::new(Mutex::new(None));
+    let started = late.clone();
+    f.events.on_cancelled(&child.id, move || {
+        *started.lock().unwrap() =
+            Some(engine.start(&session, "late child", "late-child", Some(parent)));
+    });
+    assert_eq!(
+        f.engine.cancel(&root.id).unwrap().status,
+        RunStatus::Cancelled
+    );
+    let late = late.lock().unwrap().take().expect("the hook ran");
+    assert!(late.is_err(), "{late:?}");
+    f.idle();
+    let session = f.engine.store().get(&f.session).unwrap();
+    assert_eq!(session.runs.len(), 2);
+    assert!(session.runs.iter().all(|run| !run.status.active()));
+    assert_eq!(f.provider.requests().len(), 2);
+}
+
+#[test]
+fn an_approval_answered_while_its_run_is_cancelled_runs_nothing() {
+    for approved in [false, true] {
+        let f = fixture(
+            vec![
+                write_call(),
+                write_call(),
+                FakeTurn::text("stray reply after cancel"),
+            ],
+            false,
+        );
+        let (root, approval) = f.paused("root", None);
+        let (child, _) = f.paused("child", Some(&root.id));
+        // Answered after the root's cancel looked at the registry, before
+        // its cancellation is saved: the relaunch starts stopped.
+        let engine = f.engine.clone();
+        let answered = Arc::new(AtomicBool::new(false));
+        let ok = answered.clone();
+        f.events.on_cancelled(&child.id, move || {
+            let result = engine.respond(&approval.id, &approval.fingerprint, approved, "answer");
+            ok.store(result.is_ok(), Ordering::SeqCst);
+        });
+        assert_eq!(
+            f.engine.cancel(&root.id).unwrap().status,
+            RunStatus::Cancelled
+        );
+        assert!(answered.load(Ordering::SeqCst));
+        f.idle();
+        assert_eq!(
+            f.engine.store().run(&root.id).unwrap().status,
+            RunStatus::Cancelled
+        );
+        // No further model request, no reply, and no approved effect.
+        assert_eq!(f.provider.requests().len(), 2, "approved: {approved}");
+        let session = f.engine.store().get(&f.session).unwrap();
+        assert!(
+            !session
+                .messages
+                .iter()
+                .any(|m| m.content == "stray reply after cancel")
+        );
+        assert!(!f.ws.path().join("file.txt").exists());
+        assert_eq!(f.cancellations(&root.id), 1);
+    }
+}
+
+#[test]
+fn an_interrupted_root_run_never_resumes_beside_another() {
+    let f = fixture(vec![write_call(), FakeTurn::text("resumed")], false);
+    let store = f.engine.store().clone();
+    let older = store.begin(&f.session, "older", "older", None).unwrap();
+    store
+        .update(&f.session, |s| {
+            s.runs[0].status = RunStatus::Interrupted;
+            Ok(())
+        })
+        .unwrap();
+    let (newer, _) = f.paused("newer", None);
+    let refused = f.engine.resume(&older.id).unwrap_err();
+    assert!(refused.contains("active root run"), "{refused}");
+    assert_eq!(store.run(&older.id).unwrap().status, RunStatus::Interrupted);
+    assert_eq!(f.provider.requests().len(), 1);
+    // Once the other run stopped, a native run may continue: it replays its
+    // own transcript.
+    f.engine.cancel(&newer.id).unwrap();
+    f.engine.resume(&older.id).unwrap();
+    assert_eq!(f.settled(&older.id).status, RunStatus::Completed);
+}

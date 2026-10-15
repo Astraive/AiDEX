@@ -56,6 +56,14 @@ pub(crate) struct LiveRun {
     pub tool: aidex_tools::CancelToken,
     pub generation: String,
     pub executing: bool,
+    /// The executor of an external run paused for approval, which keeps its
+    /// process for the decision until the run continues or is released
+    /// ([`RuntimeExecutor::release`]); `None` for anything else.
+    pub runtime: Option<Arc<dyn RuntimeExecutor>>,
+    /// The approvals (ids) the run's current launch of an external runtime
+    /// asked for, kept through its approval continuations, which go on with
+    /// the same process: a request id is matched only among these.
+    pub approvals: Vec<String>,
 }
 pub struct NativeEngine {
     pub(crate) store: Arc<SessionStore>,
@@ -66,6 +74,9 @@ pub struct NativeEngine {
     pub(crate) pending: Mutex<HashMap<String, PendingPlan>>,
     pub(crate) runtimes: Mutex<HashMap<String, Arc<dyn RuntimeExecutor>>>,
     pub(crate) operations: Mutex<()>,
+    /// Runs a [`NativeEngine::cancel`] is working on, with how many cancels
+    /// of each are under way: a launch meanwhile gets stopped tokens.
+    pub(crate) cancelling: Mutex<HashMap<String, usize>>,
     pub(crate) extensions: Arc<dyn Extensions>,
     /// Random per-engine key for untrusted-data delimiter nonces.
     pub(crate) nonce_key: String,
@@ -121,6 +132,7 @@ impl NativeEngine {
             pending: Mutex::new(HashMap::new()),
             runtimes: Mutex::new(HashMap::new()),
             operations: Mutex::new(()),
+            cancelling: Mutex::new(HashMap::new()),
             extensions,
             nonce_key,
             offered_mcp: Mutex::new(HashMap::new()),
@@ -278,7 +290,9 @@ impl NativeEngine {
             if r.session_id != session {
                 return Err("child must share its parent's session and workspace".into());
             }
-            if !r.status.active() {
+            // A parent being cancelled is no longer active either; the store
+            // checks again where it records the child.
+            if !r.status.active() || relock(&self.cancelling).contains_key(parent) {
                 return Err("child requires an active parent".into());
             }
             if s.runs
@@ -323,7 +337,7 @@ impl NativeEngine {
             }
         }
         if r.status == RunStatus::Pending
-            && let Err(error) = self.launch_operation(&r, runtime_launch)
+            && let Err(error) = self.launch_with(&r, None, runtime_launch, true)
         {
             self.forget_attachments(&r.id);
             return Err(error);
@@ -332,9 +346,10 @@ impl NativeEngine {
     }
     /// Refuse an external-runtime run before anything is stored when what it
     /// would send exceeds the runtime's bounds ([`check_runtime_bounds`]): the
-    /// whole conversation for `Start`, and for `Resume` only the new message,
-    /// which is all a resumed native thread receives
-    /// ([`resume_messages`]).
+    /// whole conversation for `Start`, and for `Resume` only what the resumed
+    /// native thread has not seen ([`resume_messages`]): the new message, and
+    /// before it any turn that did not complete since the thread's saved
+    /// reference.
     fn check_runtime_context(
         &self,
         s: &SessionDetail,
@@ -364,7 +379,7 @@ impl NativeEngine {
         }
         crate::tool_view::tool_results_for_model(&mut messages);
         if operation == RuntimeOperation::Resume {
-            resume_messages(&mut messages);
+            resume_messages(&mut messages, first_unseen(s, s.runtime_ref.as_ref(), None));
         }
         check_runtime_bounds(&runtime.name, &s.configuration.instructions, &messages)
     }
@@ -411,8 +426,10 @@ impl NativeEngine {
             attachments: options.attachments,
         })
     }
+    /// Launch a run again (a native run after an approval decision or a
+    /// resume).
     pub(crate) fn launch(self: &Arc<Self>, run: &Run) -> Result<(), String> {
-        self.launch_with(run, None, RuntimeLaunch::Start)
+        self.launch_with(run, None, RuntimeLaunch::Start, false)
     }
     /// [`launch`](Self::launch) telling an external runtime what to do.
     pub(crate) fn launch_operation(
@@ -420,8 +437,12 @@ impl NativeEngine {
         run: &Run,
         launch: RuntimeLaunch,
     ) -> Result<(), String> {
-        self.launch_with(run, None, launch)
+        self.launch_with(run, None, launch, false)
     }
+    /// Start a thread working on `run`. `fresh` for a run just stored by
+    /// [`start_with`](Self::start_with): when no thread can be started, it
+    /// fails, while a relaunched run (an approval decision, a resume)
+    /// returns to `interrupted`, so an explicit resume can try again.
     fn launch_with(
         self: &Arc<Self>,
         run: &Run,
@@ -431,6 +452,7 @@ impl NativeEngine {
             aidex_tools::PermitIssuer,
         )>,
         launch: RuntimeLaunch,
+        fresh: bool,
     ) -> Result<(), String> {
         // A finished, cancelled, or interrupted run continues only through an
         // explicit `resume`, which makes it pending first. (A run that cannot
@@ -450,92 +472,169 @@ impl NativeEngine {
             .get(&run.id)
             .map(|r| r.provider.clone())
             .unwrap_or_default();
+        // An approval continuation goes on with the paused launch's process.
+        let approvals = match launch {
+            RuntimeLaunch::Approval => live
+                .get(&run.id)
+                .map(|r| r.approvals.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let tool = match &prelude {
             Some((PendingPlan::Tool(prepared), _, _)) => prepared.context.cancel.clone(),
             _ => Default::default(),
         };
+        // A cancel of this run, or of its parent (which cancels it next),
+        // under way may already have looked at the registry: the new thread
+        // starts stopped, so it settles the run without running anything.
+        let cancelling = relock(&self.cancelling);
+        if cancelling.contains_key(&run.id)
+            || run
+                .parent_run_id
+                .as_ref()
+                .is_some_and(|parent| cancelling.contains_key(parent))
+        {
+            token.cancel();
+            tool.cancel();
+        }
+        drop(cancelling);
         let generation = aidex_native_sessions::id("worker")?;
-        live.insert(
+        let mut displaced = live.insert(
             run.id.clone(),
             LiveRun {
                 provider: token.clone(),
                 tool: tool.clone(),
                 generation: generation.clone(),
                 executing: true,
+                runtime: None,
+                approvals,
             },
         );
         drop(live);
+        // The runtime paused for the approval this launch continues: released
+        // when the launch ends any other way than paused again, also when it
+        // fails before its runtime is known (a locked store).
+        let paused_runtime = displaced.as_mut().and_then(|entry| entry.runtime.take());
+        let thread_paused_runtime = paused_runtime.clone();
         let engine = self.clone();
-        let run = run.clone();
-        std::thread::Builder::new()
-            .name("aidex-native-run".into())
-            .spawn(move || {
-                // Last resort: a panic anywhere in the run (a provider, an
-                // extension, a runtime) fails the run instead of unwinding
-                // past the bookkeeping below and leaving it running forever.
-                // `Ok(true)`: an external runtime paused for approval.
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    match prelude {
-                        Some((PendingPlan::Tool(prepared), call, issuer)) => {
-                            engine.execute(&run.id, &call, &prepared, issuer)?;
-                        }
-                        Some((PendingPlan::Extension(plan), call, _)) => {
-                            engine.execute_extension(&run.id, &call, &plan, &tool)?;
-                        }
-                        None => {}
+        let thread_run = run.clone();
+        let thread_generation = generation.clone();
+        let spawned = spawn_run_thread(move || {
+            let run = thread_run;
+            let generation = thread_generation;
+            let paused_runtime = thread_paused_runtime;
+            // Last resort: a panic anywhere in the run (a provider, an
+            // extension, a runtime) fails the run instead of unwinding
+            // past the bookkeeping below and leaving it running forever.
+            // `Ok(true)`: an external runtime paused for approval.
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                match prelude {
+                    // Stopped before the thread began (a cancel under way):
+                    // the approved effect never runs, and the turn below
+                    // settles the run.
+                    Some(_) if token.is_cancelled() || tool.is_cancelled() => {}
+                    Some((PendingPlan::Tool(prepared), call, issuer)) => {
+                        engine.execute(&run.id, &call, &prepared, issuer)?;
                     }
-                    let session = engine.store.get(&run.session_id)?;
-                    if session
-                        .configuration
-                        .runtime_id
-                        .as_deref()
-                        .is_some_and(|id| id != "native")
-                    {
-                        engine.execute_runtime(&run.id, launch, &token)
-                    } else {
-                        engine.pump(&run.id, &token, &tool).map(|()| false)
+                    Some((PendingPlan::Extension(plan), call, _)) => {
+                        engine.execute_extension(&run.id, &call, &plan, &tool)?;
                     }
-                }))
-                .unwrap_or_else(|_| Err(RUN_CRASHED.into()));
-                // Attachment bytes live only while a thread works on the run.
-                engine.forget_attachments(&run.id);
-                let paused = matches!(result, Ok(true));
-                if let Err(error) = result {
-                    let status = if token.is_cancelled() {
-                        RunStatus::Cancelled
-                    } else {
-                        RunStatus::Failed
-                    };
-                    // Settling (the store, the event sink) must not skip the
-                    // registry cleanup either.
-                    let _ = catch_unwind(AssertUnwindSafe(|| {
-                        engine.transition(
-                            &run.id,
-                            status,
-                            Some(aidex_events::redact_text(&error).into_owned()),
-                        )
-                    }));
+                    None => {}
                 }
-                // A paused runtime keeps its entry (`execute_runtime` marked
-                // it no longer executing before the pause was saved), without
-                // reading the store again: a vault locked meanwhile must not
-                // drop a process that may still hold credentials. A cancel
-                // that wins the race removes it once the run is cancelled. A
-                // native run that paused for approval (marked the same way
-                // before its pause was saved) has no process left, so its
-                // entry goes now, unless an approval already relaunched the
-                // run under a new generation.
-                let mut live = relock(&engine.live);
-                if !paused
-                    && live
-                        .get(&run.id)
-                        .is_some_and(|r| r.generation == generation)
+                let session = engine.store.get(&run.session_id)?;
+                if session
+                    .configuration
+                    .runtime_id
+                    .as_deref()
+                    .is_some_and(|id| id != "native")
                 {
-                    live.remove(&run.id);
+                    engine.execute_runtime(&run.id, launch, &token)
+                } else {
+                    engine.pump(&run.id, &token, &tool).map(|()| false)
                 }
-            })
-            .map_err(|e| e.to_string())?;
+            }))
+            .unwrap_or_else(|_| Err(RUN_CRASHED.into()));
+            // Attachment bytes live only while a thread works on the run.
+            engine.forget_attachments(&run.id);
+            let paused = matches!(result, Ok(true));
+            if let Err(error) = result {
+                let status = if token.is_cancelled() {
+                    RunStatus::Cancelled
+                } else {
+                    RunStatus::Failed
+                };
+                // Settling (the store, the event sink) must not skip the
+                // registry cleanup either.
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    engine.transition(
+                        &run.id,
+                        status,
+                        Some(aidex_events::redact_text(&error).into_owned()),
+                    )
+                }));
+            }
+            // Released while this thread still counts as executing, so no
+            // resume launches the run anew meanwhile.
+            if !paused && let Some(runtime) = paused_runtime {
+                runtime.release(&run.id);
+            }
+            // A paused runtime keeps its entry (`execute_runtime` marked
+            // it no longer executing before the pause was saved), without
+            // reading the store again: a vault locked meanwhile must not
+            // drop a process that may still hold credentials. A cancel
+            // that wins the race removes it once the run is cancelled. A
+            // native run that paused for approval (marked the same way
+            // before its pause was saved) has no process left, so its
+            // entry goes now, unless an approval already relaunched the
+            // run under a new generation.
+            let mut live = relock(&engine.live);
+            if !paused
+                && live
+                    .get(&run.id)
+                    .is_some_and(|r| r.generation == generation)
+            {
+                live.remove(&run.id);
+            }
+        });
+        if let Err(error) = spawned {
+            self.abandon_launch(run, &generation, paused_runtime, fresh);
+            return Err(error);
+        }
         Ok(())
+    }
+    /// Undo a launch whose thread could not be started: drop its registry
+    /// entry, so nothing counts it as executing, settle the run (a new run
+    /// fails, and a relaunched one returns to `interrupted`, so an explicit
+    /// resume can try again), and release the paused runtime it was to
+    /// continue.
+    fn abandon_launch(
+        &self,
+        run: &Run,
+        generation: &str,
+        paused_runtime: Option<Arc<dyn RuntimeExecutor>>,
+        fresh: bool,
+    ) {
+        let mut live = relock(&self.live);
+        if live
+            .get(&run.id)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            live.remove(&run.id);
+        }
+        drop(live);
+        self.forget_attachments(&run.id);
+        let _ = self.transition(
+            &run.id,
+            if fresh {
+                RunStatus::Failed
+            } else {
+                RunStatus::Interrupted
+            },
+            Some("the run's worker thread could not be started".into()),
+        );
+        if let Some(runtime) = paused_runtime {
+            runtime.release(&run.id);
+        }
     }
     pub(crate) fn emit(&self, session: &str, event: EventKind) {
         if let Some(scope) = self.event_scope(session) {
@@ -560,7 +659,12 @@ impl NativeEngine {
     /// interrupted run on. Failing, cancelling, or interrupting a run expires
     /// its pending approvals (dropping their held plans) and answers its
     /// pending tool calls, and a failing parent cancels its active children
-    /// first.
+    /// (before and again after its own state is saved, so a child begun
+    /// meanwhile is cancelled too). A run that stops being active releases
+    /// the runtime it kept paused for an approval, and a child of an external
+    /// runtime that completes, fails, or is cancelled has its native state
+    /// forgotten ([`RuntimeExecutor::forget`]) unless something of the
+    /// conversation still names it.
     pub(crate) fn transition(
         &self,
         id: &str,
@@ -582,15 +686,16 @@ impl NativeEngine {
         if status == RunStatus::Failed && r.status.active() {
             self.cancel_children(&r.session_id, id)?;
         }
-        let (result, changed, expired) = self.store.update(&r.session_id, |s| {
+        let (result, changed, expired, finished) = self.store.update(&r.session_id, |s| {
             let mut expired = Vec::new();
+            let runtime_id = s.configuration.runtime_id.clone();
             let r = s
                 .runs
                 .iter_mut()
                 .find(|r| r.id == id)
                 .ok_or("run not found")?;
             if !r.status.active() {
-                return Ok((r.clone(), false, expired));
+                return Ok((r.clone(), false, expired, None));
             }
             r.status = status;
             r.error = error;
@@ -617,7 +722,22 @@ impl NativeEngine {
                     }
                 }
             }
-            Ok((r.clone(), true, expired))
+            let result = r.clone();
+            // A finished child's native thread is never continued.
+            let finished = match (&result.runtime_ref, runtime_id) {
+                (Some(reference), Some(runtime))
+                    if result.parent_run_id.is_some()
+                        && matches!(
+                            status,
+                            RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+                        )
+                        && !crate::runtimes::still_named(s, id, reference) =>
+                {
+                    Some((runtime, reference.clone()))
+                }
+                _ => None,
+            };
+            Ok((result, true, expired, finished))
         })?;
         if !changed {
             return Ok((result, false));
@@ -628,6 +748,17 @@ impl NativeEngine {
         }
         if !result.status.active() {
             self.forget_offer(id);
+            if status == RunStatus::Failed {
+                // A child begun while the parent was failing; an error here
+                // leaves it to reconciliation.
+                let _ = self.cancel_children(&r.session_id, id);
+            }
+            self.drop_paused(id);
+            if let Some((runtime, reference)) = finished
+                && let Some(runtime) = relock(&self.runtimes).get(&runtime).cloned()
+            {
+                runtime.forget(&reference);
+            }
         }
         let task_id = EntityId::new(id).map_err(|e| e.to_string())?;
         let event = match result.status {
@@ -759,6 +890,7 @@ impl NativeEngine {
                     aidex_tools::PermitIssuer::Approval { approval_id },
                 )),
                 RuntimeLaunch::Approval,
+                false,
             )?;
             return Ok(current);
         } else {
@@ -784,33 +916,34 @@ impl NativeEngine {
         self.launch(&r)?;
         Ok(r)
     }
+    /// Cancel `id` and its active children. While the cancel works on the
+    /// run, a launch of it (an approval decision, a resume) starts with
+    /// stopped tokens and settles it without running anything; after the
+    /// cancellation is saved, children begun meanwhile are cancelled too and
+    /// any thread still working on the run is stopped. A run already
+    /// finished only has such a thread stopped.
     pub fn cancel(&self, id: &str) -> Result<Run, String> {
+        let _cancelling = Cancelling::new(&self.cancelling, id);
         let r = self.store.run(id)?;
         if !r.status.active() {
+            self.stop_tokens(id);
+            self.drop_paused(id);
             return Ok(r);
         }
         // A runtime paused for approval has no thread left to drop its entry,
-        // so it is dropped here once the run is cancelled, also when it
-        // paused while this cancel ran. Until then it keeps the cancelled
-        // tokens: an approval or resume launched meanwhile reuses them (or is
-        // refused once the run is cancelled), and a cancel that cannot be
-        // saved leaves the entry to `reconcile_after_unlock`.
-        let generation = relock(&self.live).get(id).map(|entry| {
-            entry.provider.cancel();
-            entry.tool.cancel();
-            entry.generation.clone()
-        });
+        // so it is dropped (and its runtime released) once the run is
+        // cancelled, also when it paused while this cancel ran. Until then it
+        // keeps the cancelled tokens: an approval or resume launched meanwhile
+        // reuses them (or is refused once the run is cancelled), and a cancel
+        // that cannot be saved leaves the entry to `reconcile_after_unlock`.
+        self.stop_tokens(id);
         self.cancel_children(&r.session_id, id)?;
         let cancelled = self.transition(id, RunStatus::Cancelled, None)?;
-        if let Some(generation) = generation {
-            let mut live = relock(&self.live);
-            if live
-                .get(id)
-                .is_some_and(|entry| !entry.executing && entry.generation == generation)
-            {
-                live.remove(id);
-            }
-        }
+        // The cancellation is saved; what follows is best effort (a vault
+        // that locked meanwhile leaves the rest to reconciliation).
+        let _ = self.cancel_children(&r.session_id, id);
+        self.stop_tokens(id);
+        self.drop_paused(id);
         Ok(cancelled)
     }
     /// Cancel every child of `parent` that is still active.
@@ -827,6 +960,46 @@ impl NativeEngine {
         }
         Ok(())
     }
+    /// Cancel the tokens of whatever thread works on `id`.
+    fn stop_tokens(&self, id: &str) {
+        if let Some(entry) = relock(&self.live).get(id) {
+            entry.provider.cancel();
+            entry.tool.cancel();
+        }
+    }
+    /// Drop the registry entry of `id` when no thread works on it (a runtime
+    /// paused for approval), releasing the paused runtime.
+    pub(crate) fn drop_paused(&self, id: &str) {
+        let mut live = relock(&self.live);
+        let entry = if live.get(id).is_some_and(|entry| !entry.executing) {
+            live.remove(id)
+        } else {
+            None
+        };
+        drop(live);
+        if let Some(runtime) = entry.and_then(|entry| entry.runtime) {
+            runtime.release(id);
+        }
+    }
+    /// Release the runtime `id` keeps paused for an approval, keeping its
+    /// registry entry (and tokens) for whatever relaunches or settles it.
+    fn release_paused(&self, id: &str) {
+        let runtime = relock(&self.live)
+            .get_mut(id)
+            .filter(|entry| !entry.executing)
+            .and_then(|entry| entry.runtime.take());
+        if let Some(runtime) = runtime {
+            runtime.release(id);
+        }
+    }
+    /// Continue an interrupted run, or replan a run waiting for an approval
+    /// (whose approval expires). Checked where the run is made pending: it
+    /// must still be interrupted or waiting, and a root run cannot resume
+    /// while another root run of the conversation is active, nor, for an
+    /// external runtime, once a newer message started a later root run
+    /// (that would continue a native thread missing the later turns). An
+    /// external run resumes its own saved native thread (`Resume`, never a
+    /// replay), after whatever its runtime kept paused is released.
     pub fn resume(self: &Arc<Self>, id: &str) -> Result<Run, String> {
         let _guard = relock(&self.operations);
         let r = self.store.run(id)?;
@@ -835,7 +1008,7 @@ impl NativeEngine {
             .runtime_id
             .as_deref()
             .is_some_and(|id| id != "native");
-        if external {
+        let runtime = if external {
             // Resuming continues this run's own native thread; replaying its
             // conversation instead could repeat effects.
             let runtime = self.runtime_for(&configuration)?;
@@ -847,17 +1020,45 @@ impl NativeEngine {
                         .into(),
                 );
             }
-        }
-        if !matches!(
-            r.status,
-            RunStatus::Interrupted | RunStatus::WaitingApproval
-        ) {
+            Some(runtime)
+        } else {
+            None
+        };
+        if !resumable_status(r.status) {
             return Err("only an interrupted run can resume".into());
         }
         if relock(&self.live).get(id).is_some_and(|r| r.executing) {
             return Err("run is still executing".into());
         }
         let expired = self.store.update(&r.session_id, |s| {
+            let position = s
+                .runs
+                .iter()
+                .position(|run| run.id == id)
+                .ok_or("run not found")?;
+            let run = &s.runs[position];
+            if !resumable_status(run.status) {
+                return Err("only an interrupted run can resume".into());
+            }
+            if run.parent_run_id.is_none() {
+                if s.runs
+                    .iter()
+                    .any(|other| other.id != id && other.parent_run_id.is_none() && other.status.active())
+                {
+                    return Err("session already has an active root run".into());
+                }
+                if external
+                    && s.runs[position + 1..]
+                        .iter()
+                        .any(|later| later.parent_run_id.is_none())
+                {
+                    return Err(
+                        "only the conversation's latest message can resume; send a new message \
+                         to continue"
+                            .into(),
+                    );
+                }
+            }
             let mut expired = Vec::new();
             for approval in &mut s.approvals {
                 if approval.run_id == id && approval.status == "pending" {
@@ -865,7 +1066,7 @@ impl NativeEngine {
                     expired.push(approval.id.clone());
                 }
             }
-            let run = s.runs.iter_mut().find(|run| run.id == id).ok_or("run not found")?;
+            let run = &mut s.runs[position];
             for call in run.pending_calls.drain(..) {
                 let message = aidex_providers::ChatMessage::tool_result(
                     &call.id,
@@ -885,7 +1086,11 @@ impl NativeEngine {
         // The lock is held through the launch, so no reconciliation sees the
         // pending run without its thread.
         let r = self.store.run(id)?;
-        if external {
+        if let Some(runtime) = runtime {
+            // What the runtime kept paused for the expired approval is not
+            // continued: the resume launches from the saved reference.
+            self.release_paused(id);
+            runtime.release(id);
             self.launch_operation(&r, RuntimeLaunch::Resume)?;
         } else {
             self.launch(&r)?;
@@ -1001,15 +1206,38 @@ impl NativeEngine {
     }
     pub fn shutdown(&self) {
         self.forget_all_attachments();
-        for r in relock(&self.live).values() {
-            r.provider.cancel();
-            r.tool.cancel();
-        }
+        self.signal_cancel_all();
+        self.release_all_paused();
         let _ = self
             .broker
             .sandbox
             .registry()
             .shutdown(aidex_sandbox::StopReason::DaemonShutdown);
+    }
+    /// Cancel the tokens of every run with a thread or a paused runtime,
+    /// saving nothing and taking no engine-wide lock: the cheap first step of
+    /// an emergency stop or of going offline, taken before the runtime gate
+    /// closes, so a run whose vendor process the closing gate then kills
+    /// settles as `cancelled` rather than `failed`. [`Self::cancel_all`]
+    /// records the cancellations afterwards.
+    pub fn signal_cancel_all(&self) {
+        for r in relock(&self.live).values() {
+            r.provider.cancel();
+            r.tool.cancel();
+        }
+    }
+    /// Release every runtime paused for an approval, keeping the registry
+    /// entries of their runs for whatever settles them (the paused runs stay
+    /// counted by [`Self::has_active`] until then).
+    fn release_all_paused(&self) {
+        let paused = relock(&self.live)
+            .iter_mut()
+            .filter(|(_, entry)| !entry.executing)
+            .filter_map(|(id, entry)| Some((id.clone(), entry.runtime.take()?)))
+            .collect::<Vec<_>>();
+        for (id, runtime) in paused {
+            runtime.release(&id);
+        }
     }
     pub fn cancel_all(&self) {
         self.forget_all_attachments();
@@ -1024,10 +1252,11 @@ impl NativeEngine {
                 }
             }
         }
-        for r in relock(&self.live).values() {
-            r.provider.cancel();
-            r.tool.cancel();
-        }
+        self.signal_cancel_all();
+        // A runtime paused for approval whose run could not be cancelled (a
+        // locked vault) gives up its process and restored home now; its run
+        // is interrupted by `reconcile_after_unlock`.
+        self.release_all_paused();
         let _ = self
             .broker
             .sandbox
@@ -1107,12 +1336,60 @@ impl NativeEngine {
             ),
         )?;
         relock(&self.pending).retain(|approval, _| approvals.iter().all(|a| a.id != *approval));
-        let mut live = relock(&self.live);
-        if live.get(id).is_some_and(|entry| !entry.executing) {
-            live.remove(id);
-        }
+        self.drop_paused(id);
         Ok(())
     }
+}
+
+/// Counts a [`NativeEngine::cancel`] of one run under way
+/// ([`NativeEngine::cancelling`]) while it lives.
+struct Cancelling<'a> {
+    runs: &'a Mutex<HashMap<String, usize>>,
+    id: String,
+}
+impl<'a> Cancelling<'a> {
+    fn new(runs: &'a Mutex<HashMap<String, usize>>, id: &str) -> Self {
+        *relock(runs).entry(id.to_owned()).or_default() += 1;
+        Self {
+            runs,
+            id: id.to_owned(),
+        }
+    }
+}
+impl Drop for Cancelling<'_> {
+    fn drop(&mut self) {
+        let mut runs = relock(self.runs);
+        if let Some(count) = runs.get_mut(&self.id) {
+            *count -= 1;
+            if *count == 0 {
+                runs.remove(&self.id);
+            }
+        }
+    }
+}
+
+/// Whether a run in `status` may [`resume`](NativeEngine::resume).
+fn resumable_status(status: RunStatus) -> bool {
+    matches!(status, RunStatus::Interrupted | RunStatus::WaitingApproval)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Make the next run thread this test thread starts fail to spawn.
+    static FAIL_NEXT_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Start a run's worker thread.
+fn spawn_run_thread(work: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    #[cfg(test)]
+    if FAIL_NEXT_SPAWN.with(|fail| fail.replace(false)) {
+        return Err("injected worker thread spawn failure".into());
+    }
+    std::thread::Builder::new()
+        .name("aidex-native-run".into())
+        .spawn(work)
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 
 /// The creation time an approval id (`approval_<ULID>`) encodes: the ten
@@ -1233,16 +1510,60 @@ pub(crate) fn check_runtime_bounds(
     Ok(())
 }
 
-/// Keep only what a `Resume` request carries: the messages from the newest
-/// user message on. A resumed native thread already holds the rest, and the
-/// runtime receives just that message (or, resuming the same interrupted run,
-/// only uses it as evidence of the request).
-pub(crate) fn resume_messages(messages: &mut Vec<aidex_providers::ChatMessage>) {
+/// Keep only what a `Resume` request carries: the messages the resumed
+/// native thread has not seen, from `unseen` ([`first_unseen`]) when that is
+/// an earlier user message, otherwise from the newest user message on. A
+/// runtime renders more than one message as a handoff of the turns its
+/// thread missed (a turn that failed, was cancelled, or was interrupted after
+/// the thread's saved checkpoint), so the vendor never loses a request the
+/// conversation shows; resuming the same interrupted run, it only uses the
+/// newest user message as evidence of the request.
+pub(crate) fn resume_messages(
+    messages: &mut Vec<aidex_providers::ChatMessage>,
+    unseen: Option<usize>,
+) {
     let newest = messages
         .iter()
         .rposition(|m| m.role == aidex_providers::Role::User)
         .unwrap_or(0);
-    messages.drain(..newest);
+    let from = unseen
+        .filter(|&index| index < newest && messages[index].role == aidex_providers::Role::User)
+        .unwrap_or(newest);
+    messages.drain(..from);
+}
+
+/// Where the conversation messages a native thread has not seen begin, for
+/// a `Resume` continuing `reference` (saved by the root run its `run_id`
+/// names): the user message of that run when it did not complete (its
+/// checkpoint was taken before its turn was sent), otherwise of the first
+/// root run after it, or, when there is none yet, the end of the
+/// conversation (where a new message goes). `None` when `run` itself saved
+/// `reference` (a recovery resume of that run), or when it names no known
+/// root run with a message index: only the newest user message is sent.
+pub(crate) fn first_unseen(
+    s: &SessionDetail,
+    reference: Option<&serde_json::Value>,
+    run: Option<&str>,
+) -> Option<usize> {
+    let saved_by = reference?.get("run_id")?.as_str()?;
+    if run == Some(saved_by) {
+        return None;
+    }
+    let position = s
+        .runs
+        .iter()
+        .position(|r| r.id == saved_by && r.parent_run_id.is_none())?;
+    let saver = &s.runs[position];
+    if saver.status != RunStatus::Completed {
+        return saver.message_index;
+    }
+    match s.runs[position + 1..]
+        .iter()
+        .find(|r| r.parent_run_id.is_none())
+    {
+        Some(next) => next.message_index,
+        None => Some(s.messages.len()),
+    }
 }
 
 /// The one-argument limit `prompt` exceeds on `platform`, as the refusal
@@ -1298,6 +1619,165 @@ pub(crate) fn windows_argument_units(argument: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aidex_providers::{
+        FakeProvider, FakeScript, FakeTurn, Locality, ModelDescriptor, ModelId, ModelRef, NoVault,
+        OfflineMode, ProviderId,
+    };
+    use aidex_vault::{KdfParams, SecretString, VaultService, VaultServiceConfig};
+
+    /// An engine with a native agent session on a fake provider answering
+    /// `turns`.
+    fn engine_fixture(
+        turns: Vec<FakeTurn>,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Arc<NativeEngine>,
+        String,
+    ) {
+        let drive = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        aidex_drive::init_with(
+            drive.path(),
+            aidex_drive::InitOptions {
+                require_removable: false,
+            },
+        )
+        .unwrap();
+        let paths = aidex_drive::DrivePaths::open(drive.path()).unwrap();
+        let vault = Arc::new(
+            VaultService::open(
+                paths.ensure_dir(&paths.vault()).unwrap(),
+                VaultServiceConfig {
+                    kdf: KdfParams::new(8, 1, 1).unwrap(),
+                    idle_timeout: None,
+                },
+            )
+            .unwrap(),
+        );
+        vault
+            .init(&SecretString::from("fixture-passphrase".to_owned()), false)
+            .unwrap();
+        let store = Arc::new(
+            SessionStore::open(
+                paths
+                    .ensure_dir(&paths.sessions())
+                    .unwrap()
+                    .join("native.sqlite3"),
+                vault,
+            )
+            .unwrap(),
+        );
+        let workspaces = Arc::new(WorkspaceRegistry::open(&paths).unwrap());
+        let workspace = workspaces.add_host(ws.path(), Some("fixture")).unwrap();
+        let registry = Arc::new(
+            ProviderRegistry::load(
+                &paths,
+                Arc::new(NoVault::default()),
+                Arc::new(OfflineMode::new(false)),
+            )
+            .unwrap(),
+        );
+        let model = ModelDescriptor::new(
+            ModelRef::new(
+                ProviderId::new("fixture").unwrap(),
+                ModelId::new("small").unwrap(),
+            ),
+            Locality::Local,
+            65536,
+        )
+        .with_tool_calls(aidex_providers::ToolCallSupport::Native);
+        registry
+            .register_shared(Arc::new(
+                FakeProvider::new(ProviderId::new("fixture").unwrap(), Locality::Local)
+                    .with_model(model)
+                    .with_script(turns.into_iter().collect::<FakeScript>()),
+            ))
+            .unwrap();
+        let engine = NativeEngine::new(
+            store.clone(),
+            registry,
+            workspaces,
+            Arc::new(aidex_events::MemoryEventSink::new()),
+            drive.path().join("scratch"),
+        );
+        let session = store
+            .create(
+                serde_json::from_value(serde_json::json!({"title":"fixture","workspace_id":workspace.id,"mode":"agent","provider_id":"fixture","model_id":"small","permission_mode":"supervised"}))
+                    .unwrap(),
+            )
+            .unwrap();
+        (drive, ws, engine, session.id)
+    }
+
+    fn settled(engine: &NativeEngine, id: &str) -> Run {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let run = engine.store().run(id).unwrap();
+            if !matches!(run.status, RunStatus::Pending | RunStatus::Running) {
+                return run;
+            }
+            assert!(std::time::Instant::now() < until, "run {id} never settled");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_worker_thread_that_cannot_start_leaves_nothing_executing() {
+        let (_drive, _ws, engine, session) =
+            engine_fixture(vec![FakeTurn::text("first"), FakeTurn::text("resumed")]);
+        // A new message: its run fails.
+        FAIL_NEXT_SPAWN.with(|fail| fail.set(true));
+        let error = engine
+            .start(&session, "hello", "spawn-fails", None)
+            .unwrap_err();
+        assert!(error.contains("injected"), "{error}");
+        assert!(!engine.has_executing());
+        assert!(!engine.has_active());
+        let failed = engine.store().get(&session).unwrap().runs.remove(0);
+        assert_eq!(failed.status, RunStatus::Failed);
+        // Nothing holds the conversation: the next message runs.
+        let next = engine
+            .start(&session, "hello again", "spawn-works", None)
+            .unwrap();
+        assert_eq!(settled(&engine, &next.id).status, RunStatus::Completed);
+        // A relaunch (a resume) returns to interrupted and can try again.
+        let interrupted = engine
+            .store()
+            .begin(&session, "go on", "interrupted", None)
+            .unwrap();
+        engine
+            .store()
+            .update(&session, |s| {
+                s.runs
+                    .iter_mut()
+                    .find(|r| r.id == interrupted.id)
+                    .unwrap()
+                    .status = RunStatus::Interrupted;
+                Ok(())
+            })
+            .unwrap();
+        FAIL_NEXT_SPAWN.with(|fail| fail.set(true));
+        assert!(engine.resume(&interrupted.id).is_err());
+        assert!(!engine.has_executing());
+        assert_eq!(
+            engine.store().run(&interrupted.id).unwrap().status,
+            RunStatus::Interrupted
+        );
+        engine.resume(&interrupted.id).unwrap();
+        assert_eq!(
+            settled(&engine, &interrupted.id).status,
+            RunStatus::Completed
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while engine.has_active() {
+            assert!(
+                std::time::Instant::now() < until,
+                "a run thread never stopped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn windows_quoting_counts_escapes_and_utf16_units() {

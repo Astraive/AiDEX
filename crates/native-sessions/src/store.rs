@@ -274,7 +274,10 @@ impl SessionStore {
     /// tools, attachments). Options are part of the command fingerprint.
     ///
     /// A repeated command id with the same arguments returns the original run
-    /// before anything else is checked. For a new command, attachment ids must
+    /// before anything else is checked. A new root run is refused while
+    /// another root run of the session is active, and a new child unless its
+    /// parent is an active run of the session (both checked in the
+    /// transaction that records the run). For a new command, attachment ids must
     /// be distinct staged attachments of the session (`attachment_unavailable`
     /// otherwise; also for a child run); in the same transaction as the new
     /// message they become `sent` with the run, command and message index.
@@ -341,6 +344,13 @@ impl SessionStore {
                 return Err(AttachmentReason::AttachmentUnavailable
                     .error("attachments can only be sent with a conversation message"));
             }
+            // Checked where the child is recorded: a parent cancelled or
+            // settled since its caller looked never gains a child.
+            if let Some(parent) = &parent
+                && !s.runs.iter().any(|r| r.id == *parent && r.status.active())
+            {
+                return Err("child requires an active parent".into());
+            }
             let content = if content.trim().is_empty() {
                 ATTACHMENT_ONLY_CONTENT
             } else {
@@ -381,6 +391,7 @@ impl SessionStore {
                 workspace_id: s.configuration.workspace_id.clone(),
                 inference_retries: 0,
                 context_trimmed_messages: 0,
+                tool_outputs: Vec::new(),
             };
             if !run.attachments.is_empty() {
                 self.link_attachments(db, s, &run.attachments, command, &run.id, s.messages.len())?;

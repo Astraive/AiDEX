@@ -139,9 +139,22 @@ pub struct Run {
     /// view to fit the model's context window. History itself is unchanged.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub context_trimmed_messages: u32,
+    /// The complete output of each workspace tool call of this run whose
+    /// stored result is a model view (an applied diff reduced to its
+    /// statistics), in the order they ran. History messages hold only the
+    /// view, which any daemon may send to a model as it is; an older daemon
+    /// ignores this field and drops it when it saves the session again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_outputs: Vec<ToolOutputRecord>,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
+}
+/// The complete serialized output of one tool call ([`Run::tool_outputs`]).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolOutputRecord {
+    pub call_id: String,
+    pub output: String,
 }
 /// Per-request options of a new run. Nothing here is persisted in the
 /// session configuration.
