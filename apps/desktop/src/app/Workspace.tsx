@@ -5,6 +5,7 @@ import { useKeyChord } from "../hooks/useKeyChord";
 import { MainLayout } from "../layouts/MainLayout";
 import { screenKeyOf } from "../lib/routes";
 import { DEFAULT_NEW_SESSION_SHORTCUT, DEFAULT_PROVIDERS_SHORTCUT } from "../lib/shortcuts";
+import { AppearanceProvider } from "./providers/appearance";
 import { NavigationProvider, useNavigation } from "./providers/navigation";
 import { PreferencesProvider, usePreferences } from "./providers/preferences";
 import { ToastProvider } from "./providers/toast";
@@ -15,11 +16,13 @@ export function Workspace() {
   return (
     <NavigationProvider initialRoute={{ page: "chat" }}>
       <PreferencesProvider>
-        <ToastProvider>
-          <ProviderCatalogProvider>
-            <WorkspaceScreens />
-          </ProviderCatalogProvider>
-        </ToastProvider>
+        <AppearanceProvider>
+          <ToastProvider>
+            <ProviderCatalogProvider>
+              <WorkspaceScreens />
+            </ProviderCatalogProvider>
+          </ToastProvider>
+        </AppearanceProvider>
       </PreferencesProvider>
     </NavigationProvider>
   );
