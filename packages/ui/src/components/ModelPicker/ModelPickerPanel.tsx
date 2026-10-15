@@ -86,6 +86,8 @@ export function ModelPickerPanel({
   );
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
+  // The input that last moved the highlight: the active option shows a ring only after keyboard use.
+  const [modality, setModality] = useState<"keyboard" | "pointer">("pointer");
   const [expandedLegacy, setExpandedLegacy] = useState<ReadonlySet<string>>(() =>
     initialExpandedLegacy(models, favorites, value),
   );
@@ -196,6 +198,7 @@ export function ModelPickerPanel({
 
   const moveActive = (step: number) => {
     touchView();
+    setModality("keyboard");
     if (enabledIds.length === 0) return;
     const index = effectiveActiveId ? enabledIds.indexOf(effectiveActiveId) : -1;
     const next = index === -1 ? (step > 0 ? 0 : enabledIds.length - 1) : (index + step + enabledIds.length) % enabledIds.length;
@@ -251,6 +254,8 @@ export function ModelPickerPanel({
     if (!nextSearching) setFrozenHeight(null);
     setQuery(next);
     setActiveId(null);
+    // Enter now picks the first result, so it is marked as the keyboard target.
+    setModality("keyboard");
     scrollPendingRef.current = true;
     if (listRef.current) listRef.current.scrollTop = 0;
   };
@@ -348,6 +353,7 @@ export function ModelPickerPanel({
             listRef={listRef}
             rows={rows}
             activeId={effectiveActiveId}
+            modality={modality}
             optionId={optionId}
             value={value}
             jumpKeys={jumpKeys}
@@ -356,6 +362,7 @@ export function ModelPickerPanel({
             favoritesView={!searching && rail === null}
             onActivate={(rowId) => {
               touchView();
+              setModality("pointer");
               setActiveId(rowId);
             }}
             onSelectModel={selectModel}

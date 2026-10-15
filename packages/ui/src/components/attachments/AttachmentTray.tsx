@@ -5,6 +5,7 @@ import { FileCodeIcon, FileIcon } from "../../icons/development";
 import { AlertTriangleIcon, ImageIcon, RefreshIcon, XIcon } from "../../icons/interface";
 import { FileTextIcon } from "../../icons/objects";
 import { IconButton } from "../../primitives/IconButton";
+import { Tooltip } from "../../primitives/Tooltip";
 import { cx } from "../../utils/cx";
 import { formatAttachmentSize } from "../../utils/format";
 import a11y from "../content/a11y.module.css";
@@ -120,20 +121,23 @@ export function AttachmentTray({
             return (
               <li key={item.id} className={cx(styles.tile, isFailed && styles.tileFailed)}>
                 {src ? (
-                  <button
-                    type="button"
-                    className={styles.preview}
-                    aria-label={`Preview ${item.name}`}
-                    title={item.name}
-                    onClick={() => openPreview(item.id)}
-                  >
-                    <img className={styles.thumb} src={src} alt="" draggable={false} />
-                  </button>
+                  <Tooltip content={item.name} describe={false}>
+                    <button
+                      type="button"
+                      className={styles.preview}
+                      aria-label={`Preview ${item.name}`}
+                      onClick={() => openPreview(item.id)}
+                    >
+                      <img className={styles.thumb} src={src} alt="" draggable={false} />
+                    </button>
+                  </Tooltip>
                 ) : (
-                  <span className={styles.placeholder} title={item.name}>
-                    <ImageIcon size={16} />
-                    <span className={styles.placeholderName}>{item.name}</span>
-                  </span>
+                  <Tooltip content={item.name} describe={false}>
+                    <span className={styles.placeholder}>
+                      <ImageIcon size={16} />
+                      <span className={styles.placeholderName}>{item.name}</span>
+                    </span>
+                  </Tooltip>
                 )}
                 {item.status === "uploading" ? (
                   <span
@@ -154,35 +158,39 @@ export function AttachmentTray({
                       {failureText(item)}
                     </span>
                     {onRetry ? (
-                      <button
-                        type="button"
-                        className={cx(styles.tileButton, styles.retry)}
-                        aria-label={`Retry upload for ${item.name}`}
-                        aria-describedby={errorId}
-                        title={failureText(item)}
-                        disabled={disabled}
-                        onClick={() => onRetry(item.id)}
-                      >
-                        <RefreshIcon size={12} strokeWidth={2.25} />
-                      </button>
+                      <Tooltip content={failureText(item)} describe={false} disabled={disabled}>
+                        <button
+                          type="button"
+                          className={cx(styles.tileButton, styles.retry)}
+                          aria-label={`Retry upload for ${item.name}`}
+                          aria-describedby={errorId}
+                          disabled={disabled}
+                          onClick={() => onRetry(item.id)}
+                        >
+                          <RefreshIcon size={12} strokeWidth={2.25} />
+                        </button>
+                      </Tooltip>
                     ) : (
-                      <span className={cx(styles.tileButton, styles.retry, styles.alert)} title={failureText(item)}>
-                        <AlertTriangleIcon size={12} strokeWidth={2.25} />
-                      </span>
+                      <Tooltip content={failureText(item)} describe={false}>
+                        <span className={cx(styles.tileButton, styles.retry, styles.alert)}>
+                          <AlertTriangleIcon size={12} strokeWidth={2.25} />
+                        </span>
+                      </Tooltip>
                     )}
                   </>
                 ) : null}
                 {onRemove ? (
-                  <button
-                    type="button"
-                    className={cx(styles.tileButton, styles.remove)}
-                    aria-label={`Remove ${item.name}`}
-                    title={`Remove ${item.name}`}
-                    disabled={disabled}
-                    onClick={() => onRemove(item.id)}
-                  >
-                    <XIcon size={12} strokeWidth={2.25} />
-                  </button>
+                  <Tooltip content={`Remove ${item.name}`} disabled={disabled}>
+                    <button
+                      type="button"
+                      className={cx(styles.tileButton, styles.remove)}
+                      aria-label={`Remove ${item.name}`}
+                      disabled={disabled}
+                      onClick={() => onRemove(item.id)}
+                    >
+                      <XIcon size={12} strokeWidth={2.25} />
+                    </button>
+                  </Tooltip>
                 ) : null}
               </li>
             );
@@ -206,13 +214,15 @@ export function AttachmentTray({
                   {ROW_ICON[kind]}
                 </span>
                 {onOpen ? (
-                  <button type="button" className={styles.rowName} title={item.name} onClick={() => onOpen(item.id)}>
-                    {item.name}
-                  </button>
+                  <Tooltip content={item.name} describe={false}>
+                    <button type="button" className={styles.rowName} onClick={() => onOpen(item.id)}>
+                      {item.name}
+                    </button>
+                  </Tooltip>
                 ) : (
-                  <span className={styles.rowName} title={item.name}>
-                    {item.name}
-                  </span>
+                  <Tooltip content={item.name} describe={false}>
+                    <span className={styles.rowName}>{item.name}</span>
+                  </Tooltip>
                 )}
                 {uploading ? (
                   <span

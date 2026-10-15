@@ -9,16 +9,16 @@
 .step {
   display: flex;
   align-items: flex-start;
-  gap: var(--aidex-space-4);
-  padding: var(--aidex-space-3) 0;
+  gap: var(--aidex-space-3);
+  padding: var(--aidex-space-2) 0;
 }
 
 .marker {
   display: grid;
   place-items: center;
   flex: none;
-  width: 24px;
-  height: 24px;
+  width: var(--aidex-control-xs);
+  height: var(--aidex-control-xs);
   border: 1px solid var(--aidex-color-border-strong);
   border-radius: var(--aidex-radius-full);
   color: var(--aidex-color-text-muted);
@@ -29,8 +29,8 @@
 }
 
 .marker svg {
-  width: 14px;
-  height: 14px;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
 }
 
 .done .marker {
@@ -58,13 +58,13 @@
   min-width: 0;
 }
 
-/* 1.6 x 15px matches the 24px marker, so single-line titles sit centered beside it. */
+/* One title line is as tall as the marker, so single-line titles sit centered beside it. */
 .title {
   margin: 0;
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-md);
   font-weight: 500;
-  line-height: 1.6;
+  line-height: var(--aidex-control-xs);
 }
 
 .pending .title {
@@ -75,5 +75,5 @@
   margin: 0;
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-sm);
-  line-height: 1.5;
+  line-height: var(--aidex-leading-sm);
 }

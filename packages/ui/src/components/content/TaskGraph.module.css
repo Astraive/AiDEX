@@ -22,14 +22,14 @@
   align-items: center;
   gap: var(--aidex-space-2);
   max-width: 100%;
-  min-height: 44px;
+  min-height: var(--aidex-row-lg);
   padding: var(--aidex-space-2) var(--aidex-space-3);
   border: 1px solid var(--aidex-color-border-strong);
   border-radius: var(--aidex-radius-md);
   background: var(--aidex-color-surface-raised);
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-sm);
-  line-height: 1.4;
+  line-height: var(--aidex-leading-sm);
 }
 
 .rootNode {
@@ -47,7 +47,7 @@
 .icon { color: var(--aidex-color-text-secondary); }
 .rootNode .icon { color: var(--aidex-color-accent); }
 .icon svg,
-.status svg { width: 16px; height: 16px; }
+.status svg { width: var(--aidex-icon-md); height: var(--aidex-icon-md); }
 
 .text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .label,
@@ -96,14 +96,14 @@
   position: absolute;
   top: calc(-1 * var(--aidex-space-2));
   right: calc(-1 * var(--aidex-space-2));
-  padding: 3px;
+  padding: var(--aidex-space-0-5);
   border: 1px solid;
   border-color: inherit;
   border-radius: var(--aidex-radius-full);
   background: var(--aidex-color-surface-raised);
 }
 
-.worker .status svg { width: 12px; height: 12px; }
+.worker .status svg { width: var(--aidex-icon-xs); height: var(--aidex-icon-xs); }
 
 .children::before,
 .worker::before,
@@ -129,7 +129,7 @@
   .worker > .node { justify-content: flex-start; padding-inline: var(--aidex-space-3); }
   .worker .text { flex: 1; }
   .worker .status { position: static; padding: 0; border: 0; background: none; }
-  .worker .status svg { width: 16px; height: 16px; }
+  .worker .status svg { width: var(--aidex-icon-md); height: var(--aidex-icon-md); }
 
   .worker > .node::before,
   .worker > .node::after {

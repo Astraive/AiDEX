@@ -27,7 +27,7 @@
   height: 64px;
   overflow: hidden;
   border: 1px solid var(--aidex-color-border);
-  border-radius: var(--aidex-radius-sm);
+  border-radius: var(--aidex-radius-md);
   background: var(--aidex-color-surface-strong);
 }
 
@@ -62,7 +62,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
+  gap: var(--aidex-space-0-5);
   width: 100%;
   height: 100%;
   padding: var(--aidex-space-1);
@@ -74,20 +74,21 @@
   display: -webkit-box;
   max-width: 100%;
   overflow: hidden;
-  font-size: var(--aidex-text-xs);
-  line-height: 1.2;
+  font-size: var(--aidex-text-2xs);
+  line-height: var(--aidex-leading-xs);
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
 }
 
+/* 20px to look at; the ::after hit area makes it 24px (WCAG 2.5.8), 44px on touch screens. */
 .tileButton {
   position: absolute;
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-xl);
+  height: var(--aidex-icon-xl);
   padding: 0;
   border: 0;
   border-radius: var(--aidex-radius-full);
@@ -95,6 +96,29 @@
   color: var(--aidex-color-text);
   cursor: pointer;
   transition: background-color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.tileButton::after {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--aidex-space-0-5));
+  border-radius: inherit;
+}
+
+@media (pointer: coarse) {
+  .tileButton::after {
+    inset: auto;
+    top: 50%;
+    left: 50%;
+    width: var(--aidex-touch-target);
+    height: var(--aidex-touch-target);
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* The tile clips its content, so the ring is drawn inside the button. */
+.tileButton:focus-visible {
+  outline-offset: -2px;
 }
 
 .tileButton:hover:not(:disabled) {
@@ -107,13 +131,13 @@
 }
 
 .remove {
-  top: 4px;
-  right: 4px;
+  top: var(--aidex-space-1);
+  right: var(--aidex-space-1);
 }
 
 .retry {
-  bottom: 4px;
-  left: 4px;
+  bottom: var(--aidex-space-1);
+  left: var(--aidex-space-1);
   color: var(--aidex-color-danger);
 }
 
@@ -126,7 +150,7 @@
   right: 0;
   bottom: 0;
   left: 0;
-  height: 16px;
+  height: var(--aidex-badge-height-sm);
   overflow: hidden;
   background: color-mix(in srgb, var(--aidex-color-bg) 85%, transparent);
   color: var(--aidex-color-text);
@@ -145,16 +169,16 @@
 .progressText {
   position: relative;
   display: block;
-  font-size: var(--aidex-text-xs);
+  font-size: var(--aidex-text-2xs);
   font-variant-numeric: tabular-nums;
-  line-height: 16px;
+  line-height: var(--aidex-badge-height-sm);
   text-align: center;
 }
 
 .rows {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--aidex-space-0-5);
 }
 
 .row {
@@ -162,7 +186,7 @@
   align-items: center;
   gap: var(--aidex-space-2);
   min-width: 0;
-  min-height: 36px;
+  min-height: var(--aidex-row-md);
   padding-left: var(--aidex-space-2);
   border: 1px solid var(--aidex-color-border-subtle);
   border-radius: var(--aidex-radius-sm);
@@ -181,8 +205,8 @@
 }
 
 .rowIcon svg {
-  width: 18px;
-  height: 18px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .rowName {

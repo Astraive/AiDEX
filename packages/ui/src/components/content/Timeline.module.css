@@ -15,8 +15,8 @@
   justify-content: center;
   gap: var(--aidex-space-1);
   width: 100%;
-  min-height: 68px;
-  padding: var(--aidex-space-3) var(--aidex-space-4);
+  min-height: var(--aidex-space-12);
+  padding: var(--aidex-space-2) var(--aidex-space-3);
   border: 0;
   border-left: 2px solid transparent;
   background: transparent;
@@ -43,7 +43,7 @@
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-sm);
   font-weight: 500;
-  line-height: 1.4;
+  line-height: var(--aidex-leading-sm);
 }
 
 .time {
@@ -54,5 +54,5 @@
 .description {
   color: var(--aidex-color-text-secondary);
   font-size: var(--aidex-text-sm);
-  line-height: 1.5;
+  line-height: var(--aidex-leading-sm);
 }

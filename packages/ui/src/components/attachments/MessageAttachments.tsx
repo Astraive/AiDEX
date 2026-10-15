@@ -5,6 +5,7 @@ import { FileCodeIcon, FileIcon } from "../../icons/development";
 import { DownloadIcon, ImageIcon, LoaderIcon } from "../../icons/interface";
 import { FileTextIcon } from "../../icons/objects";
 import { IconButton } from "../../primitives/IconButton";
+import { Tooltip } from "../../primitives/Tooltip";
 import { cx } from "../../utils/cx";
 import { formatAttachmentSize } from "../../utils/format";
 import { ImageLightbox } from "./ImageLightbox";
@@ -216,26 +217,30 @@ export function MessageAttachments({
                   else tileRefs.current.delete(item.id);
                 }}
               >
-                <button
-                  type="button"
-                  className={styles.tileButton}
-                  aria-label={`Preview ${item.name}`}
-                  title={item.status === "error" ? `${item.name}: image unavailable` : item.name}
-                  onClick={() => setViewerIndex(index)}
+                <Tooltip
+                  content={item.status === "error" ? `${item.name}: image unavailable` : item.name}
+                  describe={item.status === "error"}
                 >
-                  {src ? (
-                    <img className={styles.image} src={src} alt="" draggable={false} />
-                  ) : (
-                    <span className={styles.placeholder}>
-                      {item.status === "loading" ? (
-                        <LoaderIcon size={16} className={styles.spinner} />
-                      ) : (
-                        <ImageIcon size={16} />
-                      )}
-                      <span className={styles.placeholderName}>{item.name}</span>
-                    </span>
-                  )}
-                </button>
+                  <button
+                    type="button"
+                    className={styles.tileButton}
+                    aria-label={`Preview ${item.name}`}
+                    onClick={() => setViewerIndex(index)}
+                  >
+                    {src ? (
+                      <img className={styles.image} src={src} alt="" draggable={false} />
+                    ) : (
+                      <span className={styles.placeholder}>
+                        {item.status === "loading" ? (
+                          <LoaderIcon size={16} className={styles.spinner} />
+                        ) : (
+                          <ImageIcon size={16} />
+                        )}
+                        <span className={styles.placeholderName}>{item.name}</span>
+                      </span>
+                    )}
+                  </button>
+                </Tooltip>
               </li>
             );
           })}
@@ -257,9 +262,9 @@ export function MessageAttachments({
                   {ROW_ICON[kind]}
                 </span>
                 <span className={styles.rowText}>
-                  <span className={styles.rowName} title={item.name}>
-                    {item.name}
-                  </span>
+                  <Tooltip content={item.name} describe={false}>
+                    <span className={styles.rowName}>{item.name}</span>
+                  </Tooltip>
                   <span className={styles.rowMeta}>
                     {facts.join(" · ")}
                     {item.note ? <span className={styles.note}>{` · ${item.note}`}</span> : null}

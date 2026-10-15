@@ -1,11 +1,13 @@
 .composer {
   /* Anchors the drag-over overlay. */
   position: relative;
+  /* Toolbar labels hide when the composer itself is narrow (see the end of this file). */
+  container: composer / inline-size;
   display: flex;
   flex-direction: column;
   gap: var(--aidex-space-2);
   width: 100%;
-  padding: var(--aidex-space-6) var(--aidex-space-4) var(--aidex-space-4) var(--aidex-space-6);
+  padding: var(--aidex-space-4) var(--aidex-space-3) var(--aidex-space-3) var(--aidex-space-4);
   border: 1px solid var(--aidex-color-border);
   border-radius: var(--aidex-radius-2xl);
   background: var(--aidex-color-surface-raised);
@@ -29,17 +31,18 @@
   opacity: 0.6;
 }
 
+/* Grows with its text from three lines (one when docked) up to --aidex-composer-editor-max, then scrolls. */
 .field {
   width: 100%;
-  min-height: calc(2 * 1.6em);
-  max-height: 40vh;
+  min-height: calc(3em * var(--aidex-leading-relaxed));
+  max-height: var(--aidex-composer-editor-max);
   padding: 0;
   border: 0;
   outline: none;
   resize: none;
   background: transparent;
-  font-size: 17px;
-  line-height: 1.6;
+  font-size: var(--aidex-text-chat);
+  line-height: var(--aidex-leading-relaxed);
   field-sizing: content;
 }
 
@@ -50,8 +53,9 @@
 .toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-left: calc(-1 * var(--aidex-space-2));
+  gap: var(--aidex-control-gap-sm);
+  min-width: 0;
+  margin-inline-start: calc(-1 * var(--aidex-space-1));
 }
 
 .attachments {
@@ -63,18 +67,68 @@
 .group {
   display: flex;
   align-items: center;
-  gap: var(--aidex-space-3);
+  gap: var(--aidex-control-gap-sm);
   min-width: 0;
+}
+
+/*
+ * The start group takes the room that is left and shrinks its labels first (they ellipsize); when
+ * even its buttons do not fit, it scrolls sideways instead of pushing Send out of the composer.
+ * Scrolling clips anything drawn outside the group, so focus rings are drawn inside the controls.
+ */
+.start {
+  flex: 1 1 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.start :focus-visible {
+  outline-offset: -2px;
+}
+
+/* Fades mark the edges that hide controls (attributes from useOverflowEdges). */
+.start[data-overflow-start] {
+  mask-image: linear-gradient(to right, transparent, black var(--aidex-space-4));
+}
+
+.start[data-overflow-end] {
+  mask-image: linear-gradient(to left, transparent, black var(--aidex-space-4));
+}
+
+.start[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    black var(--aidex-space-4),
+    black calc(100% - var(--aidex-space-4)),
+    transparent
+  );
+}
+
+/* Text the app puts between the controls, e.g. "Chat · project": one line that ellipsizes. */
+.start > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--aidex-text-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.end {
+  flex: none;
+  margin-inline-start: auto;
 }
 
 .compact {
   gap: var(--aidex-space-1);
-  padding: var(--aidex-space-3) var(--aidex-space-3) var(--aidex-space-3) var(--aidex-space-5);
-  border-radius: var(--aidex-radius-xl);
+  padding: var(--aidex-space-2-5) var(--aidex-space-2-5) var(--aidex-space-2) var(--aidex-space-3-5);
 }
 
 .compact .field {
-  min-height: 1.6em;
+  min-height: calc(1em * var(--aidex-leading-relaxed));
 }
 
 .hint {
@@ -85,11 +139,28 @@
   margin: 0;
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
-  line-height: 1.4;
+  line-height: var(--aidex-leading-xs);
   cursor: default;
 }
 
 .hint svg {
   flex: none;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
   color: var(--aidex-color-warning);
+}
+
+/* A narrow composer keeps only the toolbar's icons; the text stays readable by screen readers. */
+@container composer (max-width: 520px) {
+  .start > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
 }

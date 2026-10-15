@@ -1,6 +1,7 @@
+/* Square buttons as tall as a standard control, inside the content padding. */
 .rail {
   flex: none;
-  width: 44px;
+  width: calc(var(--aidex-control-md) + 2 * var(--aidex-space-1));
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -28,7 +29,7 @@
   right: 0;
   z-index: 1;
   width: 3px;
-  height: 20px;
+  height: var(--aidex-icon-xl);
   border-radius: var(--aidex-radius-full) 0 0 var(--aidex-radius-full);
   background: var(--aidex-color-accent);
   pointer-events: none;
@@ -83,15 +84,15 @@
   position: relative;
   display: inline-grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-xl);
+  height: var(--aidex-icon-xl);
 }
 
 /* Status overlay; the ring keeps it legible over the glyph. */
 .rail .glyph .status {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
+  right: calc(-1 * var(--aidex-space-0-5));
+  bottom: calc(-1 * var(--aidex-space-0-5));
   box-shadow: 0 0 0 2px var(--aidex-color-surface-raised);
 }
 
@@ -115,6 +116,6 @@
 .divider {
   flex: none;
   height: 1px;
-  margin: 2px var(--aidex-space-1);
+  margin: var(--aidex-space-0-5) var(--aidex-space-1);
   background: var(--aidex-color-border-subtle);
 }

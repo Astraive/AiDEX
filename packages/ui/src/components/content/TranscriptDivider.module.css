@@ -6,6 +6,7 @@
   margin: var(--aidex-space-2) 0;
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
+  line-height: var(--aidex-leading-xs);
 }
 
 .rule {
@@ -33,8 +34,8 @@
 }
 
 .icon svg {
-  width: 14px;
-  height: 14px;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
 }
 
 .label {

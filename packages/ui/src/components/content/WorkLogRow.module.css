@@ -1,6 +1,10 @@
+/*
+ * The label starts 28px in (padding 4 + icon box 16 + gap 8), and the detail is indented by the
+ * same amount, so both line up.
+ */
 .row {
+  --work-log-indent: calc(var(--aidex-space-1) + var(--aidex-icon-md) + var(--aidex-control-gap));
   min-width: 0;
-  padding: 1px 0;
 }
 
 .headerRow {
@@ -15,14 +19,14 @@
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 6px;
+  gap: var(--aidex-control-gap);
   min-width: 0;
-  min-height: 28px;
-  padding: 2px var(--aidex-space-1);
+  min-height: var(--aidex-control-xs);
+  padding: 0 var(--aidex-space-1);
   border-radius: var(--aidex-radius-sm);
   color: var(--aidex-color-text-secondary);
   font-size: var(--aidex-text-sm);
-  line-height: 1.5;
+  line-height: var(--aidex-leading-relaxed);
   text-align: left;
 }
 
@@ -49,14 +53,14 @@
   display: inline-grid;
   flex: none;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
   color: var(--aidex-color-text-muted);
 }
 
 .icon svg {
-  width: 16px;
-  height: 16px;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
 }
 
 [data-status="failed"] > .headerRow .icon {
@@ -83,6 +87,8 @@
 
 .spinner {
   flex: none;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
   color: var(--aidex-color-text-muted);
   animation: spin 900ms linear infinite;
 }
@@ -100,6 +106,8 @@
 
 .chevron {
   flex: none;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
   margin-left: auto;
   color: var(--aidex-color-text-muted);
   opacity: 0.7;
@@ -127,20 +135,25 @@
   font-size: var(--aidex-text-xs);
 }
 
-/* Detail aligns with the label (icon 20px + gap 6px + padding 4px), scrolls, and stays selectable. */
+/* The collapsing wrapper (CollapsiblePanel); the detail inside it keeps its own margins and scrolling. */
+.panel {
+  min-width: 0;
+}
+
+/* Detail aligns with the label, scrolls, and stays selectable. */
 .detail {
   max-height: 384px;
-  margin: var(--aidex-space-1) 0 var(--aidex-space-2) 30px;
+  margin: var(--aidex-space-1) 0 var(--aidex-space-2) var(--work-log-indent);
   overflow: auto;
   overscroll-behavior: contain;
   color: var(--aidex-color-text-secondary);
   font-size: var(--aidex-text-sm);
-  line-height: 1.55;
+  line-height: var(--aidex-leading-relaxed);
   user-select: text;
 }
 
 /* A group's members are rows themselves, so they render in full instead of in a scroll box. */
-.group > .detail {
+.group > .panel > .detail {
   max-height: none;
   margin-top: 0;
   margin-left: var(--aidex-space-3);

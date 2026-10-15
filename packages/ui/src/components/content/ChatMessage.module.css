@@ -11,13 +11,13 @@
 
 /* The tighter bottom-right corner points the bubble at its sender. */
 .bubble {
-  max-width: 75%;
-  padding: var(--aidex-space-3) var(--aidex-space-4);
-  border-radius: var(--aidex-radius-xl) var(--aidex-radius-xl) calc(var(--aidex-radius-sm) / 2) var(--aidex-radius-xl);
+  max-width: 80%;
+  padding: var(--aidex-space-2-5) var(--aidex-space-3-5);
+  border-radius: var(--aidex-radius-xl) var(--aidex-radius-xl) var(--aidex-radius-xs) var(--aidex-radius-xl);
   background: var(--aidex-color-surface-strong);
   color: var(--aidex-color-text);
-  font-size: var(--aidex-text-md);
-  line-height: 1.6;
+  font-size: var(--aidex-text-chat);
+  line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -25,13 +25,13 @@
 .body {
   min-width: 0;
   color: var(--aidex-color-text);
-  font-size: var(--aidex-text-md);
-  line-height: 1.75;
+  font-size: var(--aidex-text-chat);
+  line-height: var(--aidex-prose-line-height);
   overflow-wrap: break-word;
 }
 
 .body :where(p, ul, ol, pre, figure) {
-  margin: 0 0 var(--aidex-space-4);
+  margin: 0 0 var(--aidex-prose-block-gap);
 }
 
 .body > :first-child {
@@ -46,7 +46,7 @@
   display: flex;
   align-items: center;
   gap: var(--aidex-space-3);
-  min-height: 32px;
+  min-height: var(--aidex-row-sm);
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
 }

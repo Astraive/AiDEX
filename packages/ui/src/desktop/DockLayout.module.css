@@ -14,18 +14,26 @@
   position: sticky;
   bottom: 0;
   z-index: 1;
-  padding: var(--aidex-space-6) var(--aidex-space-6) var(--aidex-space-5);
-  background: linear-gradient(to bottom, transparent, var(--aidex-color-bg) var(--aidex-space-6));
+  padding: var(--aidex-space-3) var(--aidex-chat-lane-pad) var(--aidex-space-4);
+  background: linear-gradient(to bottom, transparent, var(--aidex-color-bg) var(--aidex-space-4));
 }
 
 .dockInner {
   margin-inline: auto;
 }
 
+/* The chat lane: the same width as the conversation column above it. */
 .prose {
-  max-width: 790px;
+  max-width: var(--aidex-chat-max-width);
 }
 
 .default {
-  max-width: 1100px;
+  max-width: var(--aidex-page-max-width-full);
+}
+
+/* A narrow main area (the app shell's `aidex-main` container) keeps more of its width for the lane. */
+@container aidex-main (max-width: 640px) {
+  .dock {
+    padding-inline: var(--aidex-chat-lane-pad-narrow);
+  }
 }

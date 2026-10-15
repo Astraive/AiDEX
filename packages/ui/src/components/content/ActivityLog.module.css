@@ -5,14 +5,14 @@
   color: var(--aidex-color-text-secondary);
   font-family: var(--aidex-font-mono);
   font-size: var(--aidex-text-xs);
-  line-height: 1.8;
+  line-height: var(--aidex-leading-sm);
 }
 
 .entry {
   display: flex;
   align-items: flex-start;
-  gap: var(--aidex-space-4);
-  padding: var(--aidex-space-2) 0;
+  gap: var(--aidex-space-3);
+  padding: var(--aidex-space-1-5) 0;
   border-bottom: 1px solid var(--aidex-color-border-subtle);
 }
 

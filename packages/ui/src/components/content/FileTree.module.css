@@ -5,21 +5,32 @@
   list-style: none;
 }
 
+/* The tree item is what takes focus; its ring is drawn on its own row, not around its children. */
+.item:focus-visible {
+  outline: none;
+}
+
+.item:focus-visible > .row {
+  outline: 2px solid var(--aidex-color-focus);
+  outline-offset: -2px;
+}
+
 .row {
   display: flex;
   align-items: center;
-  gap: var(--aidex-space-2);
+  gap: var(--aidex-control-gap-sm);
   width: 100%;
-  min-height: 36px;
-  padding: var(--aidex-space-1) var(--aidex-space-2);
-  padding-left: calc(var(--aidex-space-2) + var(--file-tree-depth, 0) * var(--aidex-space-5));
-  border: 0;
+  min-height: var(--aidex-row-sm);
+  padding: 0 var(--aidex-control-pad-x-xs);
+  padding-left: calc(var(--aidex-control-pad-x-xs) + var(--file-tree-depth, 0) * var(--aidex-space-4));
   border-radius: var(--aidex-radius-sm);
   background: transparent;
   color: var(--aidex-color-text-secondary);
   font-size: var(--aidex-text-sm);
+  line-height: var(--aidex-leading-sm);
   text-align: left;
   cursor: pointer;
+  user-select: none;
   transition:
     background-color var(--aidex-duration-fast) var(--aidex-ease),
     color var(--aidex-duration-fast) var(--aidex-ease);
@@ -51,22 +62,22 @@
 }
 
 .chevron {
-  width: 14px;
+  width: var(--aidex-icon-sm);
   transition: transform var(--aidex-duration-fast) var(--aidex-ease);
 }
 
 .chevron svg {
-  width: 14px;
-  height: 14px;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
 }
 
-[aria-expanded="true"] > .chevron {
+.open > .chevron {
   transform: rotate(90deg);
 }
 
 .icon svg {
-  width: 16px;
-  height: 16px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .selected .icon {

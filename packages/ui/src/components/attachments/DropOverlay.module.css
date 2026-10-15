@@ -1,5 +1,5 @@
 .overlay {
-  z-index: 40;
+  z-index: var(--aidex-z-overlay);
   display: grid;
   place-items: center;
   padding: var(--aidex-space-4);
@@ -47,7 +47,7 @@
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-sm);
   font-weight: 500;
-  box-shadow: 0 8px 24px var(--aidex-color-shadow);
+  box-shadow: var(--aidex-popup-shadow);
 }
 
 .pill svg {

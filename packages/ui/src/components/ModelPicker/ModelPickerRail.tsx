@@ -12,6 +12,7 @@ import {
 import { BrandIcon } from "../../icons/brands/BrandIcon";
 import { StarFilledIcon } from "../../icons/interface";
 import { StatusDot } from "../../primitives/StatusDot";
+import { Tooltip } from "../../primitives/Tooltip";
 import { cx } from "../../utils/cx";
 import type { ModelPickerProvider } from "./types";
 import { isProviderSelectable, providerRailLabel, providerStatusTone, type RailSelection } from "./view";
@@ -117,36 +118,37 @@ export function ModelPickerRail({ providers, selected, onSelect, onFocusSearch, 
             <Fragment key={item.selection ?? "\u0000favorites"}>
               {startsRuntimeGroup ? <span className={styles.divider} aria-hidden="true" /> : null}
               <div className={styles.item}>
-                <button
-                  ref={(node) => {
-                    buttonRefs.current[index] = node;
-                  }}
-                  type="button"
-                  className={cx(styles.button, isSelected && styles.selected, !item.enabled && styles.disabled)}
-                  aria-label={label}
-                  aria-pressed={isSelected}
-                  aria-disabled={item.enabled ? undefined : true}
-                  title={label}
-                  tabIndex={index === focusIndex ? 0 : -1}
-                  onFocus={() => setFocusIndex(index)}
-                  onClick={() => {
-                    if (item.enabled) onSelect(item.selection);
-                  }}
-                >
-                  {provider ? (
-                    <span className={styles.glyph}>
-                      <BrandIcon
-                        brand={provider.brand}
-                        monogramLabel={provider.name}
-                        size={20}
-                        aria-hidden
-                      />
-                      <StatusDot tone={providerStatusTone(provider.status)} size="sm" className={styles.status} />
-                    </span>
-                  ) : (
-                    <StarFilledIcon size={20} className={styles.favorites} />
-                  )}
-                </button>
+                <Tooltip content={label} side="right">
+                  <button
+                    ref={(node) => {
+                      buttonRefs.current[index] = node;
+                    }}
+                    type="button"
+                    className={cx(styles.button, isSelected && styles.selected, !item.enabled && styles.disabled)}
+                    aria-label={label}
+                    aria-pressed={isSelected}
+                    aria-disabled={item.enabled ? undefined : true}
+                    tabIndex={index === focusIndex ? 0 : -1}
+                    onFocus={() => setFocusIndex(index)}
+                    onClick={() => {
+                      if (item.enabled) onSelect(item.selection);
+                    }}
+                  >
+                    {provider ? (
+                      <span className={styles.glyph}>
+                        <BrandIcon
+                          brand={provider.brand}
+                          monogramLabel={provider.name}
+                          size={20}
+                          aria-hidden
+                        />
+                        <StatusDot tone={providerStatusTone(provider.status)} size="sm" className={styles.status} />
+                      </span>
+                    ) : (
+                      <StarFilledIcon size={20} className={styles.favorites} />
+                    )}
+                  </button>
+                </Tooltip>
               </div>
               {item.selection === null && providers.length > 0 ? (
                 <span className={styles.divider} aria-hidden="true" />
