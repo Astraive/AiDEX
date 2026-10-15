@@ -20,7 +20,7 @@ export function LiveSessionSidebar({
   const { route, navigate } = useNavigation();
   const { setPendingPrompt, setPendingAttachments } = usePreferences();
   const sessions = useRpc("conversation.list");
-  // Listing decrypts every conversation, which counts as vault use: only while the user is present.
+  // Listing decrypts every conversation: only while the user is present.
   usePoll(sessions.refetch, 2000);
   return (
     <SectionSidebar title={title ?? (agent ? "Agents" : "Conversations")}>

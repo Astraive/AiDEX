@@ -369,9 +369,9 @@ export function ConversationPage({
     permissionTouched.current = true;
     setPermission("full_access");
   }, [route.id, resolved.key]);
-  // Each read decrypts the conversation, which counts as vault use: polls run while the user is
-  // present, and without input only while a run executes. A run waiting for an approval does not
-  // hold the vault open, so an unattended window lets the idle auto-lock happen.
+  // Each read decrypts the conversation (a background read AiDEX Core does not count as vault use):
+  // polls run while the user is present, and without input only while a run executes. A run waiting
+  // for an approval does not hold the vault open, so an unattended window lets the idle auto-lock happen.
   usePoll(session.refetch, running ? 250 : 1500, {
     enabled: !!route.id,
     whileAway: executing,

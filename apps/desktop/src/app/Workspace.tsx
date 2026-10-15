@@ -5,23 +5,29 @@ import { useKeyChord } from "../hooks/useKeyChord";
 import { MainLayout } from "../layouts/MainLayout";
 import { screenKeyOf } from "../lib/routes";
 import { DEFAULT_NEW_SESSION_SHORTCUT, DEFAULT_PROVIDERS_SHORTCUT } from "../lib/shortcuts";
+import { VaultLockProvider } from "../services/VaultLockProvider";
 import { NavigationProvider, useNavigation } from "./providers/navigation";
 import { PreferencesProvider, usePreferences } from "./providers/preferences";
 import { ToastProvider } from "./providers/toast";
 import { homeSidebar, screens } from "./registry";
 
-/** The signed-in workspace: providers plus the route-driven shell. */
+/**
+ * The signed-in workspace: providers plus the route-driven shell. `VaultLockProvider` follows vault
+ * locks for every query below it, so a lock from outside the app clears what screens decrypted.
+ */
 export function Workspace() {
   return (
-    <NavigationProvider initialRoute={{ page: "chat" }}>
-      <PreferencesProvider>
-        <ToastProvider>
-          <ProviderCatalogProvider>
-            <WorkspaceScreens />
-          </ProviderCatalogProvider>
-        </ToastProvider>
-      </PreferencesProvider>
-    </NavigationProvider>
+    <VaultLockProvider>
+      <NavigationProvider initialRoute={{ page: "chat" }}>
+        <PreferencesProvider>
+          <ToastProvider>
+            <ProviderCatalogProvider>
+              <WorkspaceScreens />
+            </ProviderCatalogProvider>
+          </ToastProvider>
+        </PreferencesProvider>
+      </NavigationProvider>
+    </VaultLockProvider>
   );
 }
 

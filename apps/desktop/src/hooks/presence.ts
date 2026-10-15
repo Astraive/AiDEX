@@ -1,8 +1,8 @@
 // Whether someone is using the window, which decides the polls that may run. Most screen polls read
-// encrypted records, and every such read counts as vault use: it restarts the vault's idle auto-lock.
-// A window left open on a polling screen must not keep the vault unlocked, so those polls stop once
-// the window is hidden or has had no input for `AWAY_AFTER_MS`, and catch up as soon as the user is
-// back. The tracker is pure (clock and visibility are injected) so the rules are tested without a DOM;
+// encrypted records. AiDEX Core does not count its background status, list and view reads as vault
+// use, but other reads restart the vault's idle auto-lock, and an unattended window has no reason to
+// keep decrypting records. So those polls stop once the window is hidden or has had no input for
+// `AWAY_AFTER_MS`, and catch up as soon as the user is back. The tracker is pure (clock and visibility are injected) so the rules are tested without a DOM;
 // `windowPresence` wires one to the window and `usePoll` uses it.
 
 /** No keyboard, pointer, wheel, touch, or focus input for this long counts as away. */

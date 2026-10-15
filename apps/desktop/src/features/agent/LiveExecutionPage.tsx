@@ -96,8 +96,8 @@ export function LiveExecutionPage() {
       setRunTexts((previous) => pruneRunTexts(previous, snapshot.runs, isActive));
   }, [snapshot]);
   const running = runs.some(isActive);
-  // Reads decrypt the conversation (vault use): only while the user is present, except while a run
-  // executes, which holds the vault open anyway.
+  // Reads decrypt the conversation: only while the user is present, except while a run executes,
+  // which holds the vault open anyway.
   usePoll(
     session.refetch,
     running || !live.active ? ACTIVE_POLL_MS : IDLE_POLL_MS,

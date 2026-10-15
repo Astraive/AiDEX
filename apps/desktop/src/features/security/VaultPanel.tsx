@@ -56,8 +56,8 @@ export function VaultPanel({ status }: Props) {
   const vault = status.vault.data;
   const state = vault?.state;
   const unlocked = state === "unlocked";
-  // Read when the vault unlocks and after every change made here, not on each Security poll: every
-  // read goes through the vault and would count as use, holding off its idle auto-lock.
+  // Read when the vault unlocks and after every change made here, not on each Security poll: the
+  // names do not change on their own, and each read decrypts the vault's secret index.
   const secrets = useRpc("vault.secret.list", undefined, { enabled: unlocked });
   const [replacing, setReplacing] = useState<SecretMeta>();
   const [deleting, setDeleting] = useState<SecretMeta>();

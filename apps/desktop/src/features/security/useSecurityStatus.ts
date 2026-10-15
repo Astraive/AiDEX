@@ -79,7 +79,8 @@ export function useSecurityStatus(withExecution: boolean): SecurityStatus {
   }, []);
 
   // `approval.list`, `execution.status`, and the panels' reads go through the vault: only while the
-  // user is present, so an unattended Security page never holds off the idle auto-lock.
+  // user is present, so an unattended Security page neither keeps decrypting records nor holds off the
+  // idle auto-lock through a read AiDEX Core counts as use.
   usePoll(refresh, SECURITY_POLL_MS);
 
   const vaultState = vault.data?.state;

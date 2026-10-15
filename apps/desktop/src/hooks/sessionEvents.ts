@@ -1,5 +1,6 @@
-// The resume-cursor rules of one session's `events.subscribe` stream (protocol/events/README.md),
-// as pure functions so they can be tested without a daemon. `useSessionUpdates` applies them.
+// The resume-cursor rules of an `events.subscribe` stream (protocol/events/README.md), as pure
+// functions so they can be tested without a daemon. `useSessionUpdates` applies them to one
+// session's stream, and `VaultLockProvider` (`../services`) to the drive-wide `vault.locked` events.
 import type { EventEnvelope, EventStreamError, StreamWatermark } from "@aidex/client/dto/daemon";
 
 /** Live-only types: never stored or replayed, and their cursor is only the latest durable one. */
@@ -37,9 +38,22 @@ function isEnvelope(data: unknown): data is EventEnvelope {
 
 /** Classify one `events.subscribe` notification for the follower of `sessionId` at `cursor`. */
 export function sessionStreamStep(method: string, data: unknown, sessionId: string, cursor: number): SessionStreamStep {
+  return streamStep(method, data, cursor, (envelope) => envelope.scope.session_id === sessionId);
+}
+
+/**
+ * Classify one `events.subscribe` notification for a follower, at `cursor`, of the events `follows`
+ * accepts (its subscription filter's events; anything else is ignored, never delivered).
+ */
+export function streamStep(
+  method: string,
+  data: unknown,
+  cursor: number,
+  follows: (envelope: EventEnvelope) => boolean,
+): SessionStreamStep {
   switch (method) {
     case "events.event": {
-      if (!isEnvelope(data) || data.scope.session_id !== sessionId) return IGNORED;
+      if (!isEnvelope(data) || !follows(data)) return IGNORED;
       // Ephemeral events share the latest durable cursor: never deduplicate or acknowledge by it.
       if (EPHEMERAL_EVENTS.has(data.event.type)) return { kind: "event", envelope: data, durable: false, cursor };
       if (data.cursor <= cursor) return IGNORED;

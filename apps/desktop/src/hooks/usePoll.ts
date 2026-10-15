@@ -6,7 +6,8 @@ import { windowPresence, type PollOptions } from "./presence";
  * the window is visible and had input in the last minute. When the user comes back, it polls at once.
  * `whileAway` keeps a visible window polling without input, for reads tied to work the daemon already
  * holds the vault open for (an executing run). Use it for every timer that reads through the daemon,
- * so an unattended window never holds off the vault's idle auto-lock.
+ * so an unattended window neither keeps decrypting records nor holds off the vault's idle auto-lock
+ * through a read AiDEX Core counts as use.
  */
 export function usePoll(
   poll: () => void,
