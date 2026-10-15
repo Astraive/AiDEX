@@ -51,17 +51,42 @@
   --aidex-font-sans: "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --aidex-font-display: "Inter Display", "Inter", "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
   --aidex-font-mono: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
+  --aidex-text-3xs: 10px;
+  --aidex-text-2xs: 11px;
   --aidex-text-xs: 12px;
+  --aidex-text-label: 13px;
   --aidex-text-sm: 14px;
-  --aidex-text-md: 15px;
+  --aidex-text-md: 14px;
   --aidex-text-lg: 16px;
   --aidex-text-xl: 20px;
-  --aidex-text-display: 48px;
+  --aidex-text-2xl: 24px;
+  --aidex-text-display: 30px;
 
-  /* Spacing: step N is N * 4px */
+  /* Line height. The body leading stays unitless because many rules set only a font size and inherit
+     it; the px steps are for rules whose font size is fixed (menu items, tooltips, rows). */
+  --aidex-leading-body: 1.42857;
+  --aidex-leading-xs: 16px;
+  --aidex-leading-sm: 20px;
+  --aidex-leading-md: 20px;
+  --aidex-leading-relaxed: 1.625;
+
+  /* Reading text. Appearance settings override these at runtime (../themes/appearance.ts and the
+     html[data-message-spacing] blocks in ../styles.css). The code line height is round(size * 1.54). */
+  --aidex-text-chat: 14px;
+  --aidex-text-code: 13px;
+  --aidex-code-line-height: 20px;
+  --aidex-prose-line-height: 1.625;
+  --aidex-prose-block-gap: 12px;
+  --aidex-transcript-gap: 20px;
+
+  /* Spacing: step N is N * 4px, with half steps below 16px. Density remaps steps 3-8 in ../styles.css. */
+  --aidex-space-0-5: 2px;
   --aidex-space-1: 4px;
+  --aidex-space-1-5: 6px;
   --aidex-space-2: 8px;
+  --aidex-space-2-5: 10px;
   --aidex-space-3: 12px;
+  --aidex-space-3-5: 14px;
   --aidex-space-4: 16px;
   --aidex-space-5: 20px;
   --aidex-space-6: 24px;
@@ -73,17 +98,97 @@
   --aidex-space-12: 48px;
 
   /* Shape */
-  --aidex-radius-sm: 8px;
-  --aidex-radius-md: 12px;
-  --aidex-radius-lg: 16px;
-  --aidex-radius-xl: 20px;
-  --aidex-radius-2xl: 28px;
+  --aidex-radius-xs: 4px;
+  --aidex-radius-sm: 6px;
+  --aidex-radius-md: 10px;
+  --aidex-radius-lg: 12px;
+  --aidex-radius-xl: 16px;
+  --aidex-radius-2xl: 22px;
   --aidex-radius-full: 999px;
+
+  /* Controls and rows (heights, inline padding, gaps). Density remaps heights and padding in ../styles.css. */
+  --aidex-control-xs: 24px;
+  --aidex-control-sm: 28px;
+  --aidex-control-md: 32px;
+  --aidex-control-lg: 36px;
+  --aidex-control-xl: 40px;
+  --aidex-control-pad-x: 12px;
+  --aidex-control-pad-x-sm: 10px;
+  --aidex-control-pad-x-xs: 8px;
+  --aidex-control-gap: 8px;
+  --aidex-control-gap-sm: 6px;
+  --aidex-control-gap-xs: 4px;
+  --aidex-row-sm: 28px;
+  --aidex-row-md: 32px;
+  --aidex-row-lg: 44px;
+
+  /* Icons and small fixed parts. These do not change with density. */
+  --aidex-icon-xs: 12px;
+  --aidex-icon-sm: 14px;
+  --aidex-icon-md: 16px;
+  --aidex-icon-lg: 18px;
+  --aidex-icon-xl: 20px;
+  --aidex-badge-height: 20px;
+  --aidex-badge-height-sm: 16px;
+  --aidex-kbd-height: 20px;
+  --aidex-switch-width: 32px;
+  --aidex-switch-height: 18px;
+  --aidex-switch-thumb: 14px;
+  --aidex-checkbox-size: 16px;
+  /* Minimum hit area, used only by @media (pointer: coarse) ::after extensions. */
+  --aidex-touch-target: 44px;
+  --aidex-scrollbar-size: 6px;
+
+  /* Shell frame. Constant at every density, so the dock threshold (rail + 4 * 8 + sidebar + main minimum)
+     is exact. --aidex-sidebar-width is overridden inline by the sidebar width setting or a drag. */
+  --aidex-shell-pad: 8px;
+  --aidex-shell-gap: 8px;
+  --aidex-rail-width: 52px;
+  --aidex-sidebar-width: 256px;
+  --aidex-sidebar-min-width: 208px;
+  --aidex-sidebar-max-width: 480px;
+  --aidex-topbar-height: 48px;
+  --aidex-main-min-width: 640px;
+
+  /* Pages and chat. The -narrow values apply under @container aidex-main (max-width: 640px). */
+  --aidex-page-max-width: 896px;
+  --aidex-page-max-width-wide: 1024px;
+  --aidex-page-max-width-full: 1152px;
+  --aidex-page-pad-top: 24px;
+  --aidex-page-pad-x: 24px;
+  --aidex-page-pad-x-narrow: 16px;
+  --aidex-page-pad-bottom: 48px;
+  --aidex-page-gap: 24px;
+  --aidex-chat-max-width: 736px;
+  --aidex-chat-lane-pad: 24px;
+  --aidex-chat-lane-pad-narrow: 12px;
+  --aidex-composer-editor-max: min(40vh, 208px);
+
+  /* Floating surfaces */
+  --aidex-popover-offset: 4px;
+  --aidex-popover-min-width: 160px;
+  --aidex-tooltip-max-width: 320px;
+  --aidex-dialog-width-md: 512px;
+  --aidex-dialog-width-lg: 720px;
+  --aidex-dialog-width-xl: 960px;
+  --aidex-toast-max-width: 360px;
+  --aidex-popup-shadow: 0 16px 40px -18px var(--aidex-color-shadow);
+
+  /* Stacking order, lowest first. Menus, selects, CommandMenu and ModelPicker use --aidex-z-popover. */
+  --aidex-z-overlay: 40;
+  --aidex-z-sidebar-overlay: 45;
+  --aidex-z-dialog: 50;
+  --aidex-z-dialog-media: 60;
+  --aidex-z-toast: 100;
+  --aidex-z-popover: 130;
+  --aidex-z-tooltip: 140;
 
   /* Motion */
   --aidex-duration-fast: 120ms;
   --aidex-duration-base: 180ms;
   --aidex-ease: cubic-bezier(0.2, 0, 0, 1);
+  /* Sidebar collapse and overlay slide; 0ms when motion is reduced (../styles.css). */
+  --aidex-duration-panel: 180ms;
 
   /* Data visualization: categorical series slots, assigned in this fixed order and never cycled.
      The order is the colorblind-safety mechanism: validated against the dark surfaces
