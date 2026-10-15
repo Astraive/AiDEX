@@ -1,12 +1,12 @@
 .topBar {
   display: grid;
   flex: none;
-  /* Side slots keep their content width; the centered slot gives way when the window narrows. */
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  /* The start slot shrinks (its title ellipsizes) before the end actions; the centre takes the rest. */
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--aidex-space-4);
-  min-height: 48px;
-  padding: 4px 12px;
+  gap: var(--aidex-space-2);
+  min-height: var(--aidex-topbar-height);
+  padding: 0 var(--aidex-space-3);
 }
 
 .start,
@@ -15,6 +15,20 @@
   display: flex;
   align-items: center;
   gap: var(--aidex-space-2);
+  min-width: 0;
+}
+
+.start > * {
+  flex: none;
+}
+
+/* Text in the start slot (the page title) gives way first, with an ellipsis. */
+.start > :not(button) {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .end {
@@ -23,4 +37,26 @@
 
 .center {
   min-width: 0;
+}
+
+.statusPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--aidex-space-1);
+  max-width: var(--aidex-tooltip-max-width);
+  padding: var(--aidex-space-3);
+}
+
+.statusLabel {
+  margin: 0;
+  font-size: var(--aidex-text-sm);
+  font-weight: 600;
+  line-height: var(--aidex-leading-sm);
+}
+
+.statusDetail {
+  color: var(--aidex-color-text-muted);
+  font-size: var(--aidex-text-xs);
+  line-height: var(--aidex-leading-xs);
+  overflow-wrap: anywhere;
 }

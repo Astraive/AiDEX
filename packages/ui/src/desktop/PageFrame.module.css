@@ -1,20 +1,28 @@
 .frame {
   display: flex;
   flex-direction: column;
-  gap: var(--aidex-space-8);
+  gap: var(--aidex-page-gap);
   width: 100%;
   margin-inline: auto;
-  padding: var(--aidex-space-8) var(--aidex-space-6) var(--aidex-space-12);
+  padding: var(--aidex-page-pad-top) var(--aidex-page-pad-x) var(--aidex-page-pad-bottom);
 }
 
+/* Widths include the side padding. */
 .narrow {
-  max-width: 908px;
+  max-width: var(--aidex-page-max-width);
 }
 
 .default {
-  max-width: 1148px;
+  max-width: var(--aidex-page-max-width-wide);
 }
 
 .wide {
-  max-width: 1328px;
+  max-width: var(--aidex-page-max-width-full);
+}
+
+/* A narrow main region (AppShell's `aidex-main` container) keeps more width for content. */
+@container aidex-main (max-width: 640px) {
+  .frame {
+    padding-inline: var(--aidex-page-pad-x-narrow);
+  }
 }

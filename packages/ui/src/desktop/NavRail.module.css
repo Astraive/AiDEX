@@ -1,20 +1,43 @@
 .rail {
   user-select: none;
+  display: flex;
   flex: none;
-  width: 72px;
-  padding: var(--aidex-space-2) 0;
-  overflow-y: auto;
+  flex-direction: column;
+  width: var(--aidex-rail-width);
+  overflow: hidden;
   border: 1px solid var(--aidex-color-border-subtle);
   border-radius: var(--aidex-radius-xl);
   background: var(--aidex-color-surface);
+}
+
+/* In a short window the rail scrolls without a bar; fades mark an edge that hides destinations. */
+.scroller {
+  --_fade: var(--aidex-space-3);
+
+  flex: 1;
+  min-height: 0;
+  padding: var(--aidex-space-2) 0;
+  overflow-y: auto;
   scrollbar-width: none;
+}
+
+.scroller[data-overflow-start] {
+  mask-image: linear-gradient(to bottom, transparent, black var(--_fade));
+}
+
+.scroller[data-overflow-end] {
+  mask-image: linear-gradient(to bottom, black calc(100% - var(--_fade)), transparent);
+}
+
+.scroller[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(to bottom, transparent, black var(--_fade), black calc(100% - var(--_fade)), transparent);
 }
 
 .list {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--aidex-space-2);
+  gap: var(--aidex-space-1);
   margin: 0;
   padding: 0;
   list-style: none;
