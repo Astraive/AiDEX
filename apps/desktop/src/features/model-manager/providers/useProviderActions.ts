@@ -8,7 +8,7 @@ import { useToast } from "../../../app/providers/toast";
 import { useProviderCatalog } from "../catalog/ProviderCatalog";
 import { nativeModelKey, parseModelKey } from "../catalog/modelKeys";
 import { accountUpdateParams } from "../catalog/providerAccounts";
-import { applyRuntimeEdit, type RuntimeEdit } from "./runtimeEdit";
+import { updateStoredRuntime, type RuntimeEdit } from "./runtimeEdit";
 import { storeRuntimeKey } from "./runtimeSecret";
 
 export type ProviderActions = {
@@ -34,16 +34,6 @@ export type ProviderActions = {
   /** Signs a managed account out first (best effort), so its saved credentials leave with the runtime. */
   removeRuntime: (runtime: RuntimeConfig) => Promise<boolean>;
 };
-
-/**
- * `runtime.update` replaces the stored configuration, including the account profile and auth that
- * AiDEX Core binds when a sign-in or import finishes, so the edit goes onto a fresh read. Bridge calls
- * run one at a time, so a binding that finished before the read is kept.
- */
-async function updateStoredRuntime(id: string, edit: RuntimeEdit) {
-  const stored = await call("runtime.config.get", { id });
-  return call("runtime.update", applyRuntimeEdit(stored, edit));
-}
 
 /**
  * Before a runtime with an account profile is removed, its saved account (and the runtime's saved
