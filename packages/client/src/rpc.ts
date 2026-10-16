@@ -6,6 +6,10 @@ import type {
   ReplayParams,
 } from "./dto/daemon";
 import type {
+  PassphraseChangeParams,
+  SecretList,
+  SecretMeta,
+  SecretSetParams,
   VaultInitParams,
   VaultInitResult,
   VaultLockResult,
@@ -21,6 +25,7 @@ import type {
   DefaultModel,
   ModelList,
   ModelListParams,
+  NetworkStatus,
   ProviderAccount,
   ProviderAddParams,
   ProviderHealth,
@@ -28,24 +33,30 @@ import type {
   ProviderPreset,
 } from "./dto/models";
 import type {
+  RuntimeAccountStatus,
   RuntimeConfig,
   RuntimeDriver,
   RuntimeDriverInfo,
   RuntimeHealth,
   RuntimeInstallResult,
+  RuntimeLoginStatus,
   RuntimeModel,
 } from "./dto/runtime";
 import type {
-  Approval,
+  ApprovalList,
+  ApprovalListParams,
   Run,
   SessionConfig,
   SessionDetail,
   SessionSummary,
   ContentChunk,
+  CheckpointList,
+  ConversationList,
   HistoryPage,
   HistoryScope,
   Checkpoint,
   ConversationForkParams,
+  PageParams,
   SendParams,
 } from "./dto/sessions";
 import type {
@@ -104,8 +115,16 @@ import type {
   AttachmentUploadTicket,
 } from "./dto/attachments";
 import type { ExecutionStatus } from "./dto/execution";
-import type { AppPreferences, ModelPreferences } from "./dto/preferences";
-import type { Appearance, AppearancePatch } from "./dto/preferences";
+import type { AppPreferences, Appearance, AppearancePatch, ModelPreferences } from "./dto/preferences";
+import type { AuthFlowStart, AuthFlowStatus } from "./dto/auth";
+import type {
+  ApplyReport,
+  CheckReport,
+  RollbackReport,
+  UpdateRollbackParams,
+  UpdateSourceParams,
+  UpdateStatus,
+} from "./dto/updates";
 import type {
   InferenceCatalog,
   InferenceOptions,
@@ -139,25 +158,15 @@ export type RpcMethods = {
   };
   "auth.start": {
     params: { provider_id: string; method: "chatgpt" };
-    result: {
-      flow_id: string;
-      provider_id: string;
-      authorization_url: string;
-      expires_at: number;
-    };
+    result: AuthFlowStart;
   };
-  "auth.open": { params: { authorization_url: string }; result: unknown };
+  "auth.open": { params: { authorization_url: string }; result: { opened: true } };
   "auth.status": {
     params: { flow_id?: string; provider_id?: string };
-    result: {
-      state: string;
-      provider_id: string;
-      account_label?: string | null;
-      error?: string | null;
-    };
+    result: AuthFlowStatus;
   };
-  "auth.cancel": { params: { flow_id: string }; result: unknown };
-  "auth.disconnect": { params: { provider_id: string }; result: unknown };
+  "auth.cancel": { params: { flow_id: string }; result: AuthFlowStatus };
+  "auth.disconnect": { params: { provider_id: string }; result: AuthFlowStatus };
   "settings.get": { params: undefined; result: AppPreferences };
   "model.preferences.get": { params: undefined; result: ModelPreferences };
   "model.preferences.set": {
@@ -181,10 +190,7 @@ export type RpcMethods = {
     params: { id: string; delete_data: boolean };
     result: { workspace: Workspace; deleted_data: boolean };
   };
-  "conversation.list": {
-    params: undefined;
-    result: { sessions: SessionSummary[] };
-  };
+  "conversation.list": { params: PageParams | undefined; result: ConversationList };
   "conversation.create": { params: SessionConfig; result: SessionDetail };
   "conversation.fork": { params: ConversationForkParams; result: SessionDetail };
   "conversation.get": {
@@ -210,8 +216,8 @@ export type RpcMethods = {
     result: ContentChunk;
   };
   "checkpoint.list": {
-    params: { session_id: string; offset?: number; limit?: number };
-    result: { checkpoints: Checkpoint[]; total_checkpoints: number };
+    params: PageParams & { session_id: string };
+    result: CheckpointList;
   };
   "checkpoint.compare": {
     params: { session_id: string; id: string };
@@ -238,10 +244,7 @@ export type RpcMethods = {
   "run.get": { params: { id: string }; result: Run };
   "run.cancel": { params: { id: string }; result: Run };
   "run.resume": { params: { id: string }; result: Run };
-  "approval.list": {
-    params: { run_id?: string };
-    result: { approvals: Approval[] };
-  };
+  "approval.list": { params: ApprovalListParams | undefined; result: ApprovalList };
   "approval.respond": {
     params: {
       id: string;
@@ -267,6 +270,9 @@ export type RpcMethods = {
     result: DefaultModel;
   };
   "model.default": { params: undefined; result: DefaultModel };
+  "network.status": { params: undefined; result: NetworkStatus };
+  /** Turns offline mode on or off; while it is on, AiDEX refuses network use. */
+  "network.offline": { params: { enabled: boolean }; result: NetworkStatus };
   "provider.presets": {
     params: undefined;
     result: { presets: ProviderPreset[] };
@@ -287,37 +293,52 @@ export type RpcMethods = {
   "runtime.update": { params: RuntimeConfig; result: RuntimeConfig };
   "runtime.remove": { params: { id: string }; result: { removed: boolean } };
   "runtime.config.get": { params: { id: string }; result: RuntimeConfig };
+  /** Adds or replaces a runtime without the id checks of `runtime.add` and `runtime.update`. */
+  "runtime.config.save": { params: RuntimeConfig; result: RuntimeConfig };
   "runtime.health": { params: { id: string }; result: RuntimeHealth };
   "runtime.models": { params: { id: string }; result: { models: RuntimeModel[] } };
   "runtime.install": {
     params: { driver: RuntimeDriver; source?: string };
     result: RuntimeInstallResult;
   };
-  "runtime.auth.start": {
-    params: { id: string };
-    result: {
-      flow_id: string;
-      provider_id: string;
-      authorization_url: string;
-      expires_at: number;
-    };
-  };
+  "runtime.auth.start": { params: { id: string }; result: AuthFlowStart };
   "runtime.auth.status": {
     params: { id: string; flow_id?: string };
-    result: {
-      state: string;
-      provider_id: string;
-      account_label?: string | null;
-      error?: string | null;
-    };
+    result: AuthFlowStatus;
   };
   "runtime.auth.cancel": {
     params: { id: string; flow_id: string };
-    result: unknown;
+    result: AuthFlowStatus;
   };
-  "vault.secret.set": {
-    params: { name: string; value: string; consumers: string[]; kind?: string };
-    result: unknown;
+  /** A managed runtime account (Codex only); never returns credential bytes. */
+  "runtime.account.status": { params: { id: string }; result: RuntimeAccountStatus };
+  /**
+   * Imports an explicit absolute `auth.json` file (or its directory) into the runtime's encrypted
+   * account profile once the official CLI confirms it.
+   */
+  "runtime.profile.import": {
+    params: { id: string; source: string };
+    result: RuntimeAccountStatus;
+  };
+  /** Starts the official CLI's browser login in an app-owned temporary home. */
+  "runtime.login.start": { params: { id: string }; result: RuntimeLoginStatus };
+  "runtime.login.status": {
+    params: { id: string; flow_id: string };
+    result: RuntimeLoginStatus;
+  };
+  "runtime.login.cancel": {
+    params: { id: string; flow_id: string };
+    result: RuntimeLoginStatus;
+  };
+  /** Signs out and removes the runtime's encrypted account profile and session snapshots. */
+  "runtime.login.logout": { params: { id: string }; result: RuntimeAccountStatus };
+  "vault.secret.set": { params: SecretSetParams; result: SecretMeta };
+  "vault.secret.list": { params: undefined; result: SecretList };
+  /** Refused for `managed` records; the result describes the deleted secret. */
+  "vault.secret.delete": { params: { name: string }; result: { deleted: SecretMeta } };
+  "vault.passphrase.change": {
+    params: PassphraseChangeParams;
+    result: { changed: boolean };
   };
   "daemon.status": { params: undefined; result: DaemonStatus };
   "daemon.ping": { params: undefined; result: { pong: true } };
@@ -327,6 +348,13 @@ export type RpcMethods = {
   "vault.init": { params: VaultInitParams; result: VaultInitResult };
   "vault.unlock": { params: VaultUnlockParams; result: VaultStatus };
   "vault.lock": { params: undefined; result: VaultLockResult };
+  "update.status": { params: undefined; result: UpdateStatus };
+  /** Stages and verifies a package without changing anything. */
+  "update.check": { params: UpdateSourceParams; result: CheckReport };
+  /** Switches to a verified package; it takes effect on the next launch. */
+  "update.apply": { params: UpdateSourceParams; result: ApplyReport };
+  /** Swaps the current and previous versions after re-verifying the previous one. */
+  "update.rollback": { params: UpdateRollbackParams | undefined; result: RollbackReport };
   "workspace.list": { params: undefined; result: WorkspaceList };
   "workspace.selected": { params: undefined; result: SelectedWorkspace };
   "skill.list": { params: SkillListParams | undefined; result: SkillList };

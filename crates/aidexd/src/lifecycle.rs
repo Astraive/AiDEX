@@ -32,8 +32,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How long `launch` waits for a spawned daemon to answer `daemon.status`.
-pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long `launch` waits for a spawned daemon to answer `daemon.status`:
+/// generous, for a slow drive or a loaded host. A daemon that exits during
+/// startup is reported at once.
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long `stop` waits for the daemon to remove its endpoint.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
@@ -273,6 +275,7 @@ impl Daemon {
         let broker = Arc::clone(self.services.broker());
         let native = self.services.native().clone();
         let inference = self.services.inference().clone();
+        let runtime = self.services.runtime().ok().cloned();
         drop(self.services);
         let root = self.root.clone();
         let options = self.options;
@@ -288,6 +291,11 @@ impl Daemon {
                     &options.drive_present,
                     |outcome| {
                         native.shutdown();
+                        // Official logins end and no vendor process outlives
+                        // the daemon; nothing starts on this manager afterwards.
+                        if let Some(runtime) = &runtime {
+                            let _ = runtime.shutdown();
+                        }
                         let _ = inference.shutdown();
                         record_stopping(&events, outcome);
                         // No tool process outlives the daemon (or the drive).

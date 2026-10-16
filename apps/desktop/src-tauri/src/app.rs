@@ -20,6 +20,7 @@ pub fn run() {
             commands::daemon_start,
             commands::daemon_stop,
             commands::rpc_call,
+            commands::rpc_call_long,
             commands::rpc_subscribe,
             commands::rpc_unsubscribe,
             commands::select_drive,

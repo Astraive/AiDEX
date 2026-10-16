@@ -1,3 +1,3 @@
 # Agent adapters
 
-Planned normalized runtime interface for external CLI/API agents. Third-party processes remain subject to broker policy and capability limits.
+Implemented as `aidex-adapters` in `crates/adapters`: external agent CLIs run as `RuntimeExecutor`s for the native engine, in the runtime sandbox, with credentials handed over only at launch. See [`crates/adapters/README.md`](../adapters/README.md).

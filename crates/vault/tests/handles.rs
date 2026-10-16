@@ -210,3 +210,103 @@ fn debug_output_of_secret_bearing_types_contains_no_secret() {
         }
     }
 }
+
+#[test]
+fn versioned_resolution_is_bound_to_one_revision_and_leaves_no_handle() {
+    let root = tempfile::tempdir().unwrap();
+    let (_dir, mut vault, _) = create_with_secret(root.path());
+    let first = vault.secret_version(&name(NAME)).unwrap();
+    assert_eq!(
+        first.secret_ref,
+        vault.meta(&name(NAME)).unwrap().secret_ref
+    );
+    assert_eq!(first.revision, 1);
+    assert_eq!(
+        vault
+            .resolve_versioned(&name(NAME), &openai(), &first)
+            .unwrap()
+            .expose(),
+        VALUE.as_bytes()
+    );
+    assert_eq!(vault.active_handles(), 0);
+
+    // The usual policy checks still apply to a current version.
+    let error = vault
+        .resolve_versioned(&name(NAME), &github_mcp(), &first)
+        .unwrap_err();
+    assert_eq!(error.kind(), VaultErrorKind::ConsumerNotAllowed);
+
+    vault
+        .put(
+            &name(NAME),
+            SecretKind::ApiKey,
+            SecretBytes::from(b"replacement-marker".to_vec()),
+            policy(&[openai()]),
+        )
+        .unwrap();
+    let second = vault.secret_version(&name(NAME)).unwrap();
+    assert_eq!(second.secret_ref, first.secret_ref);
+    assert_eq!(second.revision, 2);
+    let error = vault
+        .resolve_versioned(&name(NAME), &openai(), &first)
+        .unwrap_err();
+    assert_eq!(error.kind(), VaultErrorKind::HandleDenied);
+    assert_eq!(denial(error), HandleDenial::RevisionChanged);
+    assert_eq!(
+        HandleDenial::RevisionChanged.as_str(),
+        "secret_revision_changed"
+    );
+    assert_eq!(vault.active_handles(), 0);
+
+    // Re-creating a deleted secret is a new record, never the bound one.
+    vault.delete(&name(NAME)).unwrap();
+    assert_eq!(
+        vault
+            .resolve_versioned(&name(NAME), &openai(), &second)
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::SecretNotFound
+    );
+    vault
+        .put(
+            &name(NAME),
+            SecretKind::ApiKey,
+            SecretBytes::from(VALUE.to_owned()),
+            policy(&[openai()]),
+        )
+        .unwrap();
+    let third = vault.secret_version(&name(NAME)).unwrap();
+    assert_ne!(third.secret_ref, second.secret_ref);
+    assert_eq!(third.revision, 1);
+    assert_eq!(
+        denial(
+            vault
+                .resolve_versioned(&name(NAME), &openai(), &second)
+                .unwrap_err()
+        ),
+        HandleDenial::RevisionChanged
+    );
+    assert_eq!(vault.active_handles(), 0);
+}
+
+#[test]
+fn secret_versions_serialize_without_names_or_values() {
+    let root = tempfile::tempdir().unwrap();
+    let (_dir, vault, _) = create_with_secret(root.path());
+    let version = vault.secret_version(&name(NAME)).unwrap();
+    let wire = serde_json::to_value(&version).unwrap();
+    assert_eq!(wire["revision"], 1);
+    assert_eq!(
+        wire["secret_ref"]["secret_id"],
+        version.secret_ref.secret_id.as_str()
+    );
+    let text = wire.to_string();
+    assert!(!text.contains(NAME) && !text.contains(VALUE), "{text}");
+    assert_eq!(
+        serde_json::from_value::<aidex_vault::SecretVersion>(wire.clone()).unwrap(),
+        version
+    );
+    let mut extra = wire;
+    extra["value"] = serde_json::json!("x");
+    assert!(serde_json::from_value::<aidex_vault::SecretVersion>(extra).is_err());
+}

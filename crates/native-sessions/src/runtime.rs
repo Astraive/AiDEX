@@ -71,6 +71,13 @@ pub enum RuntimeToolStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    /// The native identity of this launch, reported before the first turn can
+    /// produce effects so a crash mid-turn still leaves a reference to resume.
+    /// In memory only: the event is never stored, and the harness decides what
+    /// part of the reference it persists.
+    SessionStarted {
+        runtime_ref: Value,
+    },
     TextDelta {
         text: String,
     },
@@ -117,6 +124,21 @@ impl std::fmt::Display for RuntimeError {
 }
 impl std::error::Error for RuntimeError {}
 
+/// Whether a saved `runtime_ref` is bound to a native branch and snapshot, so
+/// `RuntimeOperation::Resume` may continue it: an object whose
+/// `native_branch_id` and `snapshot_digest` are non-empty strings. References
+/// saved before native continuation have neither, so their conversations
+/// continue with `Start` and a transcript replay instead. Adapters and the
+/// harness both decide with this one rule.
+pub fn is_resumable_reference(runtime_ref: &Value) -> bool {
+    ["native_branch_id", "snapshot_digest"].iter().all(|key| {
+        runtime_ref
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
 /// Implementations must validate declared modes/permissions/model support, use
 /// the selected confined root, honor cancellation with managed process-tree
 /// termination, and pause BEFORE the requested effect when callback returns Pause.
@@ -131,4 +153,29 @@ pub trait RuntimeExecutor: Send + Sync {
         on_event: &mut dyn FnMut(&RuntimeEvent) -> RuntimeControl,
         cancel: &CancelToken,
     ) -> Result<RuntimeResponse, RuntimeError>;
+    /// Release whatever a launch of `run_id` kept for an approval decision
+    /// (a paused process, its temporary home and credential): the harness
+    /// will not continue it, because the run was cancelled, failed,
+    /// interrupted, resumed, or its continuation ended. Called without any
+    /// engine lock, possibly more than once and for runs that kept nothing,
+    /// so it must be idempotent. A later `Resume` of the run launches anew.
+    /// The default keeps nothing to release.
+    fn release(&self, _run_id: &str) {}
+    /// Whether the launch of `run_id` paused for an approval still waits for
+    /// its decision: its process is live and can take one. The harness asks
+    /// before it records a decision, so a decision that could no longer reach
+    /// the runtime (the paused process ended: its wall timeout, a crash) is
+    /// never recorded as made. Its approval expires instead, and the run
+    /// returns to `interrupted`. The default assumes it does; `execute` then
+    /// refuses the continuation with `approval_expired`, which the harness
+    /// settles the same way.
+    fn awaits_decision(&self, _run_id: &str) -> bool {
+        true
+    }
+    /// Forget the native state a saved `runtime_ref` of this runtime names
+    /// (a snapshot of a refused, superseded or finished native thread): the
+    /// harness no longer holds any reference to it. Best effort and
+    /// idempotent; a reference that names nothing of this runtime's is
+    /// ignored. The default keeps nothing to forget.
+    fn forget(&self, _runtime_ref: &Value) {}
 }

@@ -98,6 +98,43 @@ export function supportsModelDiscovery(driver: RuntimeDriver): boolean {
   return RUNTIME_DISCOVERY_DRIVERS.includes(driver);
 }
 
+/**
+ * What a `runtime.health` status means to the screens. Besides the documented statuses, a runtime
+ * with an account AiDEX manages (Codex) can report its account's status (`runtime.account.status`):
+ * `authenticated_cached` (signed in, but the runtime could not be checked, e.g. offline),
+ * `auth_pending` (a sign-in is running), and `signed_out`. Unknown codes stay `unknown` and are shown
+ * as a generic warning, never as raw text.
+ */
+export type RuntimeHealthKind =
+  | "ready"
+  | "binary_missing"
+  | "auth_required"
+  | "auth_pending"
+  | "signed_in_unverified"
+  | "auth_unverified"
+  | "unknown";
+
+export function runtimeHealthKind(status: string): RuntimeHealthKind {
+  switch (status) {
+    case "ready":
+      return "ready";
+    case "binary_missing":
+      return "binary_missing";
+    case "auth_required":
+    case "signed_out":
+      return "auth_required";
+    case "auth_pending":
+      return "auth_pending";
+    case "authenticated_cached":
+      return "signed_in_unverified";
+    case "installed_auth_unverified":
+    case "protocol_ready_auth_unverified":
+      return "auth_unverified";
+    default:
+      return "unknown";
+  }
+}
+
 /** Picker readiness of a runtime from its health check. */
 export function runtimePickerStatus(
   health: RuntimeHealthState | undefined,
@@ -106,18 +143,21 @@ export function runtimePickerStatus(
   if (!health || health.state === "loading")
     return { status: "warning", statusText: "Checking runtime status." };
   if (health.state === "error") return { status: "error", statusText: health.message };
-  switch (health.health.status) {
+  switch (runtimeHealthKind(health.health.status)) {
     case "ready":
       return { status: "ready" };
     case "binary_missing":
       return { status: "setup", statusText: `Install ${name} in Providers to use it.` };
     case "auth_required":
       return { status: "setup" };
-    case "installed_auth_unverified":
-    case "protocol_ready_auth_unverified":
+    case "auth_pending":
+      return { status: "warning", statusText: `A ${name} sign-in is in progress.` };
+    case "signed_in_unverified":
+      return { status: "warning", statusText: "Signed in; the runtime could not be checked right now." };
+    case "auth_unverified":
       return { status: "warning", statusText: "Installed; sign-in could not be verified." };
-    default:
-      return { status: "warning", statusText: health.health.status };
+    case "unknown":
+      return { status: "warning", statusText: "The runtime reported a status this app does not know." };
   }
 }
 

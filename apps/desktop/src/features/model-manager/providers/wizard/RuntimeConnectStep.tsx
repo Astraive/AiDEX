@@ -15,6 +15,7 @@ import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
 import type { RuntimeAuth, RuntimeConfig, RuntimeDriverInfo } from "@aidex/client/dto/runtime";
 import { parseArgv, RUNTIME_VAULT_ENV, runtimeDriverName } from "../../catalog/runtimes";
+import { updateStoredRuntime } from "../runtimeEdit";
 import { storeRuntimeKey } from "../runtimeSecret";
 import { RUNTIME_ID, slugify, uniqueId } from "./wizardLogic";
 
@@ -110,16 +111,17 @@ export function RuntimeConnectStep({ driver, takenIds, chatGptAccounts, existing
         await storeRuntimeKey(runtimeId, secretName.trim(), value);
         storedKey.current = `${runtimeId}/${secretName.trim()}`;
       }
-      const config: RuntimeConfig = {
-        id: runtimeId,
-        driver: driver.driver,
+      const edit = {
         executable: executable.trim(),
         argv: parseArgv(argv),
-        profile: existing?.profile ?? null,
         enabled: true,
         auth: runtimeAuth(),
       };
-      const saved = await call(existing ? "runtime.update" : "runtime.add", config);
+      // Back to fix a runtime this wizard saved: the edit goes onto the configuration as stored now,
+      // so an account a sign-in or import bound since (its `profile`) is kept, never this step's copy.
+      const saved = existing
+        ? await updateStoredRuntime(existing.id, edit)
+        : await call("runtime.add", { ...edit, id: runtimeId, driver: driver.driver, profile: null });
       onSaved(saved);
     } catch (caught) {
       setError(toAidexError(caught).message);

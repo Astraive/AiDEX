@@ -3,8 +3,8 @@
 mod common;
 
 use aidex_vault::{
-    RecoveryKey, SecretBytes, SecretKind, UnlockMethod, VaultError, VaultErrorKind, VaultService,
-    VaultServiceConfig, VaultState,
+    HandleDenial, RecoveryKey, SecretBytes, SecretKind, UnlockMethod, VaultError, VaultErrorKind,
+    VaultService, VaultServiceConfig, VaultState,
 };
 use common::*;
 use std::{
@@ -150,6 +150,61 @@ fn idle_vaults_lock_themselves() {
 }
 
 #[test]
+fn passive_reads_do_not_hold_off_the_idle_lock_but_writes_still_do() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(vault_dir(root.path())).unwrap();
+    let service = service(root.path(), Some(Duration::from_millis(1_000)));
+    service.init(&passphrase(PASSPHRASE), false).unwrap();
+    let put = || {
+        service
+            .put_secret(
+                &name(NAME),
+                SecretKind::ApiKey,
+                SecretBytes::from(VALUE.to_owned()),
+                policy(&[openai()]),
+            )
+            .unwrap();
+    };
+    put();
+    // Operations inside a passive scope work as usual...
+    VaultService::passively(|| {
+        assert!(VaultService::is_passive());
+        VaultService::passively(|| service.list_secrets().unwrap());
+        // ...and a nested scope leaves the outer one passive.
+        assert!(VaultService::is_passive());
+    });
+    assert!(!VaultService::is_passive());
+
+    // Writes keep the vault unlocked past its idle period...
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(1_500) {
+        thread::sleep(Duration::from_millis(150));
+        put();
+    }
+    assert_eq!(service.status().state, VaultState::Unlocked);
+    // ...passive reads, as frequent, do not: the vault locks, and once it has
+    // they fail closed like any other operation.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while service.status().state == VaultState::Unlocked {
+        assert!(
+            Instant::now() < deadline,
+            "passive reads held the vault open"
+        );
+        thread::sleep(Duration::from_millis(150));
+        VaultService::passively(|| {
+            let _ = service.secret_meta(&name(NAME));
+            let _ = service.list_secrets();
+        });
+    }
+    let refused = VaultService::passively(|| service.list_secrets());
+    assert_eq!(refused.unwrap_err().kind(), VaultErrorKind::Locked);
+    // Another thread's reads are never passive because of this one's scope.
+    VaultService::passively(|| {
+        assert!(!thread::spawn(VaultService::is_passive).join().unwrap());
+    });
+}
+
+#[test]
 fn damaged_vaults_are_reported_not_hidden() {
     let root = tempfile::tempdir().unwrap();
     let (dir, vault, _) = create_with_secret(root.path());
@@ -195,4 +250,70 @@ fn external_changes_end_the_session_instead_of_being_overwritten() {
     assert_eq!(error.kind(), VaultErrorKind::Conflict);
     assert!(service.ends_session(&error));
     assert_eq!(service.status().state, VaultState::Locked);
+}
+
+#[test]
+fn versioned_resolution_refuses_a_replaced_value_and_a_locked_vault() {
+    let root = tempfile::tempdir().unwrap();
+    let service = service(root.path(), None);
+    service.init(&passphrase(PASSPHRASE), false).unwrap();
+    let put = |value: &str| {
+        service
+            .put_secret(
+                &name(NAME),
+                SecretKind::ApiKey,
+                SecretBytes::from(value.to_owned()),
+                policy(&[openai()]),
+            )
+            .unwrap()
+    };
+    let meta = put(VALUE);
+    let bound = service.secret_version(&name(NAME)).unwrap();
+    assert_eq!(bound.secret_ref, meta.secret_ref);
+    assert_eq!(service.secret_version(&name(NAME)).unwrap(), bound);
+    assert_eq!(
+        service
+            .resolve_versioned(&name(NAME), &openai(), &bound)
+            .unwrap()
+            .expose(),
+        VALUE.as_bytes()
+    );
+
+    put("REPLACEMENT-MARKER-VALUE");
+    let current = service.secret_version(&name(NAME)).unwrap();
+    assert_eq!(current.secret_ref, bound.secret_ref);
+    assert_eq!(current.revision, bound.revision + 1);
+    let error = service
+        .resolve_versioned(&name(NAME), &openai(), &bound)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            VaultError::HandleDenied(HandleDenial::RevisionChanged)
+        ),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("MARKER"), "{error}");
+    // The refusal kept the session: the current version still resolves.
+    assert_eq!(service.status().state, VaultState::Unlocked);
+    assert_eq!(
+        service
+            .resolve_versioned(&name(NAME), &openai(), &current)
+            .unwrap()
+            .expose(),
+        b"REPLACEMENT-MARKER-VALUE"
+    );
+
+    // Neither the refusal nor the resolutions left a live handle.
+    let outcome = service.lock();
+    assert!(outcome.was_unlocked);
+    assert_eq!(outcome.revoked_handles, 0);
+    for error in [
+        service.secret_version(&name(NAME)).unwrap_err(),
+        service
+            .resolve_versioned(&name(NAME), &openai(), &current)
+            .unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), VaultErrorKind::Locked);
+    }
 }

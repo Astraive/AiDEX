@@ -6,7 +6,7 @@ import { toAidexError } from "@aidex/client/errors";
 import type { ProviderKind } from "@aidex/client/dto/models";
 import type { RuntimeConfig } from "@aidex/client/dto/runtime";
 import { useProviderCatalog } from "../../catalog/ProviderCatalog";
-import { supportsModelDiscovery } from "../../catalog/runtimes";
+import { runtimeHealthKind, supportsModelDiscovery } from "../../catalog/runtimes";
 import { runtimeSummary } from "../providerItems";
 
 const PREVIEW_COUNT = 6;
@@ -66,12 +66,13 @@ export function ResultStep({
       void checkRuntime(runtime.id);
       const health = await call("runtime.health", { id: runtime.id });
       const summary = runtimeSummary(runtime, { state: "ready", health }, target.title);
-      if (health.status === "binary_missing")
+      const kind = runtimeHealthKind(health.status);
+      if (kind === "binary_missing")
         return { state: "failed", message: summary.detail ?? summary.headline };
       const note =
-        health.status === "ready"
+        kind === "ready"
           ? undefined
-          : health.status === "auth_required"
+          : kind === "auth_required"
             ? "Sign in from the runtime's settings before starting a conversation."
             : summary.detail;
       if (!supportsModelDiscovery(runtime.driver) || !health.installed)

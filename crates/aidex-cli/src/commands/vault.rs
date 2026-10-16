@@ -433,17 +433,33 @@ fn list(drive: Option<&Path>, output: Output) -> Result<Exit, CliError> {
         if list.secrets.is_empty() {
             println!("No secrets stored.");
         }
-        for meta in &list.secrets {
-            println!(
-                "{}  {}  {}  updated {}",
+        for line in list_lines(&list) {
+            println!("{line}");
+        }
+    })?;
+    Ok(Exit::Success)
+}
+
+/// One line per secret. Records AiDEX manages (`managed`) are marked: `aidex
+/// vault set` and `aidex vault delete` refuse them.
+fn list_lines(list: &SecretList) -> Vec<String> {
+    list.secrets
+        .iter()
+        .map(|meta| {
+            let managed = if list.managed.contains(&meta.name) {
+                "  (managed by AiDEX)"
+            } else {
+                ""
+            };
+            format!(
+                "{}  {}  {}  updated {}{managed}",
                 meta.name,
                 meta.kind,
                 consumers_text(meta),
                 meta.updated_at.as_str()
-            );
-        }
-    })?;
-    Ok(Exit::Success)
+            )
+        })
+        .collect()
 }
 
 fn delete(name: String, drive: Option<&Path>, output: Output) -> Result<Exit, CliError> {
@@ -538,6 +554,42 @@ fn print_status(status: &VaultStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn meta(name: &str, kind: &str) -> Value {
+        json!({
+            "secret_ref": {"vault_id": "01J00000000000000000000000", "secret_id": "01J00000000000000000000001"},
+            "name": name,
+            "kind": kind,
+            "created_at": "2026-10-13T00:00:00Z",
+            "updated_at": "2026-10-13T00:00:00Z",
+            "policy": {"allowed_consumers": []},
+        })
+    }
+
+    #[test]
+    fn listed_secrets_mark_the_records_aidex_manages() {
+        let list: SecretList = serde_json::from_value(json!({
+            "secrets": [meta("aidex-preferences", "generic"), meta("openai", "api_key")],
+            "managed": ["aidex-preferences"],
+        }))
+        .unwrap();
+        let lines = list_lines(&list);
+        assert!(
+            lines[0].starts_with("aidex-preferences  generic  (no consumers)")
+                && lines[0].ends_with("  (managed by AiDEX)"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("openai  api_key") && !lines[1].contains("managed"),
+            "{lines:?}"
+        );
+        // A daemon that predates `managed` lists nothing as managed.
+        let older: SecretList =
+            serde_json::from_value(json!({"secrets": [meta("openai", "api_key")]})).unwrap();
+        assert!(older.managed.is_empty());
+        assert!(!list_lines(&older)[0].contains("managed"));
+    }
 
     #[test]
     fn one_trailing_newline_is_removed() {

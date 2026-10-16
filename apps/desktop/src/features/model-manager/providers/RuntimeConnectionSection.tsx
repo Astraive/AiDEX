@@ -8,35 +8,27 @@ import { parseArgv } from "../catalog/runtimes";
 import type { RuntimeItem } from "./providerItems";
 import { useProviderActions } from "./useProviderActions";
 
-/** Profiles are managed encrypted profile ids, not host directories. */
-const PROFILE = /^[A-Za-z0-9_-]{1,64}$/;
-
-/** Executable, arguments, and profile of a runtime, with status and install helpers. */
-export function RuntimeConnectionSection({ item }: { item: RuntimeItem }) {
+/**
+ * Executable and arguments of a runtime, with status and install helpers. Its account profile is
+ * managed by sign-in and import in the Account section, never typed here: Save applies only these
+ * fields to the stored configuration, and waits while `accountBusy` (an import, sign-in, or sign-out
+ * in the Account section is about to bind or unbind the account).
+ */
+export function RuntimeConnectionSection({ item, accountBusy = false }: { item: RuntimeItem; accountBusy?: boolean }) {
   const catalog = useProviderCatalog();
   const actions = useProviderActions();
   const { runtime, driver, health } = item;
   const [executable, setExecutable] = useState(runtime.executable);
   const [argv, setArgv] = useState(runtime.argv.join("\n"));
-  const [profile, setProfile] = useState(runtime.profile ?? "");
   const [installed, setInstalled] = useState<string | null>(null);
-  const profileError = profile.trim() && !PROFILE.test(profile.trim())
-    ? "Use 1-64 letters, digits, dashes, or underscores."
-    : undefined;
-  const dirty =
-    executable !== runtime.executable ||
-    argv !== runtime.argv.join("\n") ||
-    profile !== (runtime.profile ?? "");
+  const dirty = executable !== runtime.executable || argv !== runtime.argv.join("\n");
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!executable.trim() || profileError) return;
-    await actions.updateRuntime({
-      ...runtime,
-      executable: executable.trim(),
-      argv: parseArgv(argv),
-      profile: profile.trim() || null,
-    });
+    if (!executable.trim()) return;
+    if (accountBusy) return;
+    // Applied to the configuration as stored now, so its account profile and sign-in stay as they are.
+    await actions.updateRuntime(runtime.id, { executable: executable.trim(), argv: parseArgv(argv) });
   };
 
   const install = async () => {
@@ -111,20 +103,11 @@ export function RuntimeConnectionSection({ item }: { item: RuntimeItem }) {
             value={argv}
             onChange={(event) => setArgv(event.target.value)}
           />
-          <TextField
-            label="Profile (optional)"
-            size="md"
-            spellCheck={false}
-            value={profile}
-            error={profileError}
-            hint="A managed, encrypted profile ID on the drive."
-            onChange={(event) => setProfile(event.target.value)}
-          />
           <Stack direction="row" gap={2} wrap>
             <Button
               type="submit"
               variant="primary"
-              disabled={!dirty || !executable.trim() || !!profileError || actions.busy !== null}
+              disabled={!dirty || !executable.trim() || actions.busy !== null || accountBusy}
             >
               {actions.busy === "update" ? "Saving…" : "Save"}
             </Button>

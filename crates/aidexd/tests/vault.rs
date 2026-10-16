@@ -76,8 +76,24 @@ fn vault_methods_drive_the_full_lifecycle_over_ipc() {
     assert_eq!(meta.policy.allowed_consumers.len(), 2);
     let listed: SecretList = client.call_as(SECRET_LIST, Value::Null).unwrap();
     assert_eq!(listed.secrets, std::slice::from_ref(&meta));
+    assert!(listed.managed.is_empty());
     let raw = client.call(SECRET_LIST, Value::Null).unwrap();
     assert!(!raw.to_string().contains(VALUE), "{raw}");
+    // Records AiDEX owns are refused before the vault is touched.
+    for (method, params) in [
+        (
+            SECRET_SET,
+            json!({"name": "oauth.openai.access", "value": VALUE, "consumers": ["provider:openai"]}),
+        ),
+        (
+            SECRET_DELETE,
+            json!({"name": "native-record-encryption-key"}),
+        ),
+    ] {
+        let (kind, data) = rpc_kind(client.call(method, params).unwrap_err());
+        assert_eq!(kind, Some(ErrorCode::PolicyDenied), "{method}");
+        assert_eq!(data, Some(json!({"reason": "managed_secret"})), "{method}");
+    }
     let current = status(&mut client);
     assert_eq!(
         (current.state, current.secrets, current.unlocked_by),

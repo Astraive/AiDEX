@@ -117,6 +117,11 @@ pub(crate) fn configure(command: &mut Command) {
 
 /// Create the job and assign the helper. The helper is still blocked reading its plan,
 /// so nothing it starts can predate the assignment.
+///
+/// Breakaway is never allowed: every process a member starts joins the job and ends
+/// with the tree. A program the user goes on using (a browser a CLI opens for a sign-in)
+/// must therefore not be started inside a tree; the official runtime login asks the CLI
+/// for its authorization page and the client opens it outside.
 pub(crate) fn contain(child: &Child) -> Result<TreeHandle, SandboxError> {
     let mut info = ExtendedLimitInfo::new();
     info.limit_kill_on_job_close();

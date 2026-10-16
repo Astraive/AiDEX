@@ -57,7 +57,7 @@ fn scoped(
 }
 pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<(), RouterError> {
     let s = services.clone();
-    router.register("history.list", move |_, p| {
+    router.register_passive("history.list", move |_, p| {
         let p: view::HistoryParams = parse_params(p)?;
         let (messages, extras) = scoped(&s, p.session_id.as_deref(), p.run_id.as_deref())?;
         view::history(&messages, p.offset, p.limit, &extras)

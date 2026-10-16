@@ -101,6 +101,10 @@ pub fn samples(text: &str) -> Vec<EventKind> {
             content: t(),
         },
         EventKind::AgentDelta { text: t() },
+        EventKind::AgentRunDelta {
+            agent_id: id("run_child"),
+            text: t(),
+        },
         EventKind::AgentSubagentCreated {
             child_session_id: id("ses_child"),
             role: t(),

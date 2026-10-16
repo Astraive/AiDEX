@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CodeBlock,
   List,
@@ -10,59 +10,177 @@ import { PageFrame } from "@aidex/ui/desktop";
 import { Button, Card, Select, Stack, Text } from "@aidex/ui/primitives";
 import { call, callUntyped } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
-import type { ContentChunk } from "@aidex/client/dto/sessions";
+import type { Checkpoint, ContentChunk } from "@aidex/client/dto/sessions";
 import { useNavigation } from "../../app/providers/navigation";
+import { useAidexStatus } from "../../hooks/useAidexStatus";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
+import { useSessionUpdates } from "../../hooks/useSessionUpdates";
+import { pageRangeLabel } from "../sessions/pageRange";
+import { CoreStatusNotice } from "../system/CoreStatusNotice";
+import {
+  newerWindow,
+  olderWindow,
+  selectionDropped,
+  shownWindow,
+  type PageWindow,
+} from "./checkpointPages";
+import { createLatestRequest } from "./latestRequest";
+
+/**
+ * While the session's event stream is down, or a read failed (a locked vault, until it is unlocked
+ * again), the page is re-read this often instead, while the user is present.
+ */
+const POLL_MS = 5000;
+
 export function CheckpointsPage() {
   const { route, replace } = useNavigation();
+  const { connectionKey, daemonRunning } = useAidexStatus();
   const sessions = useRpc("conversation.list");
   const session = useRpc(
     "conversation.get",
     { id: route.id ?? "" },
     { enabled: !!route.id },
   );
-  const [checkpointId, setCheckpointId] = useState("");
+  const total = session.data?.total_checkpoints;
+  const [page, setPage] = useState<PageWindow>(null);
+  const shown = shownWindow(page, total ?? 0);
+  const listEnabled = !!route.id && total !== undefined;
+  const checkpoints = useRpc(
+    "checkpoint.list",
+    { session_id: route.id ?? "", ...shown },
+    { enabled: listEnabled },
+  );
+  const listTotal = checkpoints.data?.total_checkpoints;
+  const { refetch: refetchSession } = session;
+  const { refetch: refetchList } = checkpoints;
+  // Session events (a run editing files) re-read the list; a poll stands in while the stream is down.
+  // After a failed read it re-reads what failed, so the page recovers once the vault is unlocked
+  // again (the vault.unlocked event is drive-wide and never reaches this session's stream).
+  const live = useSessionUpdates(route.id, refetchList);
+  const recovering = !!session.error || !!checkpoints.error;
+  usePoll(
+    () => {
+      if (session.error) refetchSession();
+      else refetchList();
+    },
+    POLL_MS,
+    { enabled: !!route.id && (recovering || (listEnabled && !live.active)) },
+  );
+  // The newest page is placed by the conversation's count. When the list counts more, re-read the
+  // conversation so that page moves on to the new checkpoints; when it counts fewer, re-read the list.
+  useEffect(() => {
+    if (total === undefined || listTotal === undefined || total === listTotal)
+      return;
+    if (listTotal > total) refetchSession();
+    else refetchList();
+  }, [total, listTotal, refetchSession, refetchList]);
+  // Kept apart from the list, so re-reading or moving the newest page never closes the selection.
+  const [selected, setSelected] = useState<Checkpoint>();
   const [before, setBefore] = useState<ContentChunk>();
   const [current, setCurrent] = useState<string>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  // Late workspace and checkpoint-content answers must not replace a newer selection.
+  const [selection] = useState(createLatestRequest);
+  const [contentReads] = useState(createLatestRequest);
   const compare = useRpc(
     "checkpoint.compare",
-    { session_id: route.id ?? "", id: checkpointId },
-    { enabled: !!route.id && !!checkpointId },
+    { session_id: route.id ?? "", id: selected?.id ?? "" },
+    { enabled: !!route.id && !!selected },
   );
-  const selected = session.data?.checkpoints.find(
-    (checkpoint) => checkpoint.id === checkpointId,
+  const listed = checkpoints.data?.checkpoints ?? [];
+
+  const clearSelection = () => {
+    selection.invalidate();
+    contentReads.invalidate();
+    setSelected(undefined);
+    setBefore(undefined);
+    setCurrent(undefined);
+  };
+  useEffect(() => {
+    clearSelection();
+    setPage(null);
+    setError(undefined);
+    // clearSelection only touches stable guards and state setters.
+  }, [route.id]);
+  // The open checkpoint holds decrypted content read under one daemon and vault session: it closes
+  // when the daemon changes or stops (its vault is locked) and when a read is refused as locked.
+  useEffect(() => {
+    clearSelection();
+  }, [connectionKey, daemonRunning]);
+  const lockedOut = selectionDropped(
+    session.error,
+    checkpoints.error,
+    compare.error,
   );
-  const readBefore = (offset = 0) =>
+  useEffect(() => {
+    if (lockedOut) clearSelection();
+  }, [lockedOut]);
+
+  // A content read refused as locked: close the selection and re-read the conversation, whose error
+  // then says why (and clears by itself once the vault is unlocked again).
+  const dropLocked = () => {
+    clearSelection();
+    refetchSession();
+  };
+
+  const showPage = (next: PageWindow) => {
+    clearSelection();
+    setPage(next);
+  };
+  const showNewer = () => {
+    if (!checkpoints.data) return;
+    const next = newerWindow(
+      checkpoints.data.total_checkpoints,
+      checkpoints.data.next_offset,
+    );
+    if (next !== undefined) showPage(next);
+  };
+
+  const readBefore = (offset = 0) => {
+    if (!route.id || !selected) return;
+    const token = contentReads.begin();
     void call("checkpoint.content", {
-      session_id: route.id!,
-      id: checkpointId,
+      session_id: route.id,
+      id: selected.id,
       offset,
     })
-      .then(setBefore)
-      .catch((caught) => setError(toAidexError(caught).message));
-  const open = async (id: string) => {
-    setCheckpointId(id);
+      .then((content) => {
+        if (contentReads.isCurrent(token)) setBefore(content);
+      })
+      .catch((caught) => {
+        if (!contentReads.isCurrent(token)) return;
+        const failure = toAidexError(caught);
+        if (selectionDropped(failure)) dropLocked();
+        else setError(failure.message);
+      });
+  };
+  const open = async (checkpoint: Checkpoint) => {
+    const token = selection.begin();
+    contentReads.invalidate();
+    setSelected(checkpoint);
     setBefore(undefined);
     setCurrent(undefined);
     setError(undefined);
-    const cp = session.data?.checkpoints.find(
-      (candidate) => candidate.id === id,
-    );
-    if (!cp || !session.data?.workspace_id) return;
+    const workspaceId = session.data?.workspace_id;
+    if (!workspaceId) return;
     try {
       const file = (await callUntyped("workspace.files.read", {
-        workspace_id: session.data.workspace_id,
-        path: cp.path,
+        workspace_id: workspaceId,
+        path: checkpoint.path,
       })) as { content: string | null; truncated: boolean; binary: boolean };
+      if (!selection.isCurrent(token)) return;
       setCurrent(
         file.binary
           ? "[binary content]"
           : `${file.content ?? ""}${file.truncated ? "\n[excerpt]" : ""}`,
       );
     } catch (caught) {
-      setCurrent(`[Unavailable: ${toAidexError(caught).message}]`);
+      if (!selection.isCurrent(token)) return;
+      const failure = toAidexError(caught);
+      if (selectionDropped(failure)) dropLocked();
+      else setCurrent(`[Unavailable: ${failure.message}]`);
     }
   };
   const restore = async () => {
@@ -79,16 +197,21 @@ export function CheckpointsPage() {
         id: selected.id,
         expected_digest: selected.after_digest,
       });
-      setCheckpointId("");
-      setBefore(undefined);
-      setCurrent(undefined);
+      clearSelection();
       session.refetch();
+      checkpoints.refetch();
     } catch (caught) {
       setError(toAidexError(caught).message);
     } finally {
       setBusy(false);
     }
   };
+
+  const problem =
+    error ??
+    session.error?.message ??
+    checkpoints.error?.message ??
+    compare.error?.message;
   return (
     <PageFrame width="default">
       <Stack gap={5}>
@@ -96,6 +219,7 @@ export function CheckpointsPage() {
           title="Checkpoints and changes"
           description="Inspect and restore snapshots captured before agent file changes."
         />
+        <CoreStatusNotice requires="daemon" />
         <Select
           label="Conversation"
           value={route.id ?? ""}
@@ -105,18 +229,13 @@ export function CheckpointsPage() {
               .filter((s) => !s.locked)
               .map((s) => ({ value: s.id, label: s.title || s.id })),
           ]}
-          onChange={(event) => {
-            setCheckpointId("");
-            replace({ page: route.page, id: event.target.value || undefined });
-          }}
+          onChange={(event) =>
+            replace({ page: route.page, id: event.target.value || undefined })
+          }
         />
-        {(error || session.error || compare.error) && (
-          <Notice tone="danger">
-            {error ?? session.error?.message ?? compare.error?.message}
-          </Notice>
-        )}
+        {problem && <Notice tone="danger">{problem}</Notice>}
         <List>
-          {session.data?.checkpoints.map((checkpoint) => (
+          {[...listed].reverse().map((checkpoint) => (
             <ListRow
               key={checkpoint.id}
               title={checkpoint.path}
@@ -126,17 +245,44 @@ export function CheckpointsPage() {
                   ? `${checkpoint.before_bytes} original bytes`
                   : "New file",
               ]}
-              onSelect={() => void open(checkpoint.id)}
+              onSelect={() => void open(checkpoint)}
             />
           ))}
         </List>
-        {session.data && !session.data.checkpoints.length && (
+        {checkpoints.data && !checkpoints.data.total_checkpoints && (
           <Text tone="muted">
             No file-change snapshots in this conversation.
           </Text>
         )}
-        {session.data?.checkpoints_truncated && (
-          <Notice>Showing the latest 100 checkpoints.</Notice>
+        {checkpoints.data?.checkpoints_truncated && (
+          <Notice>
+            Some checkpoints of this page were left out to fit the response.
+          </Notice>
+        )}
+        {checkpoints.data && checkpoints.data.total_checkpoints > 0 && (
+          <Stack direction="row" gap={2}>
+            <Button
+              variant="outline"
+              disabled={shown.offset === 0}
+              onClick={() => showPage(olderWindow(shown))}
+            >
+              Older checkpoints
+            </Button>
+            <Text>
+              {pageRangeLabel(
+                checkpoints.data.offset,
+                listed.length,
+                checkpoints.data.total_checkpoints,
+              )}
+            </Text>
+            <Button
+              variant="outline"
+              disabled={checkpoints.data.next_offset == null}
+              onClick={showNewer}
+            >
+              Newer checkpoints
+            </Button>
+          </Stack>
         )}
         {selected && (
           <Card padding="md">
@@ -160,7 +306,7 @@ export function CheckpointsPage() {
                   }
                   code={before.content}
                 />
-              )}{" "}
+              )}
               {before?.next_offset != null && (
                 <Button
                   variant="ghost"

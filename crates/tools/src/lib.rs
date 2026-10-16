@@ -36,6 +36,7 @@ pub use context::{CancelToken, ToolContext, ToolLimits};
 pub use descriptor::{RiskProfile, ToolDescriptor, ToolId, ToolSpec};
 pub use diff::{DiffKind, DiffPreview, FileDiff};
 pub use error::{InputError, LaunchError, ToolError};
+pub use fs::path_scope;
 #[cfg(feature = "direct-launcher")]
 pub use launcher::DirectLauncher;
 pub use launcher::{LaunchOutcome, LaunchRequest, ProcessLauncher};

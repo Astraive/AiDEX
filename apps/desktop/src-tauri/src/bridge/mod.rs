@@ -3,7 +3,7 @@
 mod connection;
 mod subscriptions;
 
-pub use connection::Connection;
+pub use connection::{call_long, Connection};
 pub use subscriptions::{
     EndedPayload, NotificationEmitter, NotificationPayload, Subscribed, Subscriptions, ENDED_EVENT,
     NOTIFICATION_EVENT,

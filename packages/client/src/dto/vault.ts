@@ -1,6 +1,8 @@
-// Mirrors the `vault.*` DTOs in crates/aidexd/src/methods/vault.rs and `aidex_vault::VaultStatus`
-// (crates/vault/src/service.rs). Hand-written until schema generation exists. Passphrases and recovery
-// keys travel only as params over the authenticated local IPC; they never appear in results.
+// Mirrors the `vault.*` DTOs in crates/aidexd/src/methods/vault.rs, `aidex_vault::VaultStatus`
+// (crates/vault/src/service.rs) and `aidex_vault::SecretMeta` (crates/vault/src/model.rs).
+// Hand-written until schema generation exists. Passphrases, recovery keys and secret values travel
+// only as params over the authenticated local IPC; they never appear in results, and no method
+// reads a secret's value back.
 
 export type VaultState = "missing" | "locked" | "unlocked" | "unavailable";
 
@@ -33,3 +35,45 @@ export type VaultLockResult = { state: VaultState; was_unlocked: boolean; revoke
 
 /** `aidex_vault::MIN_PASSPHRASE_CHARS`. */
 export const MIN_PASSPHRASE_CHARS = 8;
+
+/** `aidex_vault::SecretKind`: a label for how a value is used, not how it is protected. */
+export type SecretKind = "api_key" | "token" | "password" | "ssh_key" | "private_key" | "generic";
+
+/**
+ * A value-free description of a stored secret. `name` is 1-128 characters of `A-Z a-z 0-9 . _ -`
+ * starting with a letter or digit; `allowed_consumers` are exact `<kind>:<target>` scopes
+ * (`provider`, `mcp`, `process` or `git`) that may be issued handles. Times are RFC 3339.
+ */
+export type SecretMeta = {
+  secret_ref: { vault_id: string; secret_id: string };
+  name: string;
+  kind: SecretKind;
+  created_at: string;
+  updated_at: string;
+  policy: { allowed_consumers: string[] };
+};
+
+/**
+ * Params of `vault.secret.set`, which creates or replaces `name`. `consumers` replaces the whole
+ * policy (an empty list releases the value to no one), so merge the existing consumers first to
+ * keep them. `kind` defaults to `generic`.
+ */
+export type SecretSetParams = {
+  name: string;
+  value: string;
+  consumers: string[];
+  kind?: SecretKind;
+};
+
+/**
+ * Result of `vault.secret.list` (needs an unlocked vault). `managed` names the records AiDEX itself
+ * owns (record and runtime keys, preferences, `oauth.*` sign-ins): `vault.secret.set` and
+ * `vault.secret.delete` refuse them with `policy_denied` and `data.reason = "managed_secret"`.
+ */
+export type SecretList = { secrets: SecretMeta[]; managed: string[] };
+
+/**
+ * Params of `vault.passphrase.change` (needs an unlocked vault). `old_passphrase` may be omitted
+ * only after a recovery-key unlock; otherwise it is refused (`data.reason = "passphrase_required"`).
+ */
+export type PassphraseChangeParams = { old_passphrase?: string; new_passphrase: string };

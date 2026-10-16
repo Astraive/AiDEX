@@ -11,6 +11,8 @@ type Props = {
   displayName?: string | null;
   onRename?: (name: string | null) => Promise<boolean>;
   onRemove?: () => Promise<boolean>;
+  /** What else removing deletes, shown in the confirmation. */
+  removeDetail?: string;
   busy: boolean;
   error: string | null;
 };
@@ -18,7 +20,17 @@ type Props = {
 const MAX_NAME = 64;
 
 /** Editor header: brand, title, badges, and the Rename and Remove actions. */
-export function EditorHeader({ brand, title, badges, displayName, onRename, onRemove, busy, error }: Props) {
+export function EditorHeader({
+  brand,
+  title,
+  badges,
+  displayName,
+  onRename,
+  onRemove,
+  removeDetail,
+  busy,
+  error,
+}: Props) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -111,6 +123,7 @@ export function EditorHeader({ brand, title, badges, displayName, onRename, onRe
       )}
       <Dialog open={confirming} title={`Remove ${title}?`} onClose={() => setConfirming(false)}>
         <Text>Conversations that use it will stop working until you choose another model.</Text>
+        {removeDetail ? <Text>{removeDetail}</Text> : null}
         {error && (
           <Notice tone="danger" role="alert">
             {error}

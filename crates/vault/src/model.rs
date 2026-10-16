@@ -176,6 +176,19 @@ pub struct SecretMeta {
     pub policy: SecretPolicy,
 }
 
+/// Which stored revision of a secret is current: its record and how many times
+/// its value was written. Replacing the value raises `revision`; deleting and
+/// re-creating a secret gives it a new `secret_ref`. Contains no name or value.
+/// Callers bind an approval or a resume to it and resolve with
+/// [`VaultService::resolve_versioned`](crate::VaultService::resolve_versioned);
+/// the vault never stores it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretVersion {
+    pub secret_ref: SecretRef,
+    pub revision: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

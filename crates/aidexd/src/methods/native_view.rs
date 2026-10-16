@@ -26,6 +26,10 @@ pub struct RunView {
     pub effective_max_tokens: Option<u32>,
     pub estimated_input_tokens: Option<u32>,
     pub model_used: Option<String>,
+    /// The run saved an external runtime reference that `run.resume` can
+    /// continue (bound to a native branch and snapshot, as
+    /// [`aidex_native_sessions::is_resumable_reference`] decides). A reference
+    /// saved before native continuation, or whose snapshot failed, is not.
     pub has_runtime_ref: bool,
     pub transcript_omitted: bool,
     pub pending_call_count: usize,
@@ -41,6 +45,12 @@ pub struct RunView {
     pub permission_mode: Option<PermissionMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    /// Inference attempts repeated after a retryable provider failure (each
+    /// used a step); 0 for runs recorded before the counter existed.
+    pub inference_retries: u32,
+    /// The most older messages one request of this run left out of the model's
+    /// view to fit its context window; history itself is unchanged.
+    pub context_trimmed_messages: u32,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct CheckpointView {
@@ -205,13 +215,18 @@ pub fn run(r: &Run) -> RunView {
         effective_max_tokens: r.effective_max_tokens,
         estimated_input_tokens: r.estimated_input_tokens,
         model_used: r.model_used.clone(),
-        has_runtime_ref: r.runtime_ref.is_some(),
+        has_runtime_ref: r
+            .runtime_ref
+            .as_ref()
+            .is_some_and(aidex_native_sessions::is_resumable_reference),
         transcript_omitted: true,
         pending_call_count: r.pending_calls.len(),
         message_index: r.message_index,
         mode: r.mode,
         permission_mode: r.permission_mode,
         workspace_id: r.workspace_id.clone(),
+        inference_retries: r.inference_retries,
+        context_trimmed_messages: r.context_trimmed_messages,
     }
 }
 pub fn checkpoint(c: &Checkpoint) -> CheckpointView {
@@ -538,5 +553,52 @@ fn bounded_value(value: &Value, depth: usize, nodes: &mut usize) -> Value {
                 .collect(),
         ),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored(extra: Value) -> Run {
+        let mut run = json!({
+            "id": "run_fixture", "session_id": "session_fixture", "parent_run_id": null,
+            "status": "interrupted", "steps": 3, "error": null, "created_at": 1, "updated_at": 2,
+        });
+        run.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(run).unwrap()
+    }
+
+    #[test]
+    fn run_views_carry_the_counters_and_report_a_resumable_reference() {
+        // Runs saved before the counters existed read as zero.
+        let older = serde_json::to_value(run(&stored(json!({})))).unwrap();
+        assert_eq!(older["inference_retries"], 0);
+        assert_eq!(older["context_trimmed_messages"], 0);
+        assert_eq!(older["has_runtime_ref"], false);
+
+        let counted = serde_json::to_value(run(&stored(
+            json!({"inference_retries": 2, "context_trimmed_messages": 7}),
+        )))
+        .unwrap();
+        assert_eq!(counted["inference_retries"], 2);
+        assert_eq!(counted["context_trimmed_messages"], 7);
+
+        // Only a reference `run.resume` can continue counts.
+        let bound = json!({"native_branch_id": "branch", "snapshot_digest": "snapshot"});
+        for (reference, resumable) in [
+            (bound.clone(), true),
+            (json!({"native_session_id": "thread"}), false),
+            (
+                json!({"native_branch_id": "branch", "snapshot_digest": " "}),
+                false,
+            ),
+            (json!("opaque"), false),
+        ] {
+            let view = run(&stored(json!({"runtime_ref": reference})));
+            assert_eq!(view.has_runtime_ref, resumable, "{reference}");
+        }
     }
 }

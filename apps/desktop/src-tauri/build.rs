@@ -9,6 +9,7 @@ fn main() {
         "daemon_start",
         "daemon_stop",
         "rpc_call",
+        "rpc_call_long",
         "rpc_subscribe",
         "rpc_unsubscribe",
         "select_drive",

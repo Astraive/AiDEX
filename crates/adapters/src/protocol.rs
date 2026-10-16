@@ -12,6 +12,38 @@ pub(crate) struct Protocol {
     pub turn: String,
     pub prompt_id: Value,
     pub events: VecDeque<Value>,
+    /// Whether an ACP agent advertised `agentCapabilities.loadSession`.
+    load_session: bool,
+}
+/// Notifications one request may leave buffered for the turn.
+const MAX_BUFFERED: usize = 1024;
+/// A saved native session the vendor could not reopen (an error response, a
+/// missing or different identity, a history replay beyond the output bounds,
+/// a process that ended) is a refusal to resume: the harness then continues
+/// with a transcript. Cancellation, a closed gate, a locked vault and missing
+/// authentication stay what they are, so the saved thread is kept for later.
+fn resume_refusal(e: RuntimeError) -> RuntimeError {
+    if matches!(
+        e.code.as_str(),
+        "cancelled" | "offline_refused" | "vault_locked" | "auth_required"
+    ) {
+        e
+    } else {
+        error(
+            "resume_unavailable",
+            "Runtime could not reopen the saved native session; continue with a transcript handoff",
+        )
+    }
+}
+/// A `session/update` notification of the session being loaded: the history
+/// an ACP agent replays before it answers `session/load`.
+fn replayed_history(frame: &Value, session: &str) -> bool {
+    frame.get("id").is_none()
+        && frame["method"] == "session/update"
+        && frame
+            .pointer("/params/sessionId")
+            .and_then(Value::as_str)
+            .is_none_or(|id| id == session)
 }
 impl Protocol {
     pub fn new(driver: Driver) -> Self {
@@ -22,6 +54,7 @@ impl Protocol {
             turn: String::new(),
             prompt_id: Value::Null,
             events: VecDeque::new(),
+            load_session: false,
         }
     }
     fn rpc(&mut self, method: &str, mut params: Value) -> Value {
@@ -37,6 +70,19 @@ impl Protocol {
         method: &str,
         params: Value,
         cancel: &CancelToken,
+    ) -> Result<Value, RuntimeError> {
+        self.call_dropping(t, method, params, cancel, &|_| false)
+    }
+    /// [`Self::call`] that discards the notifications `dropped` matches
+    /// instead of buffering them for the turn; they do not count toward the
+    /// buffer bound either.
+    fn call_dropping(
+        &mut self,
+        t: &mut Transport,
+        method: &str,
+        params: Value,
+        cancel: &CancelToken,
+        dropped: &dyn Fn(&Value) -> bool,
     ) -> Result<Value, RuntimeError> {
         let frame = if matches!(self.driver, Driver::Pi | Driver::Omp) {
             self.seq += 1;
@@ -61,8 +107,11 @@ impl Protocol {
                     .cloned()
                     .unwrap_or(json!({})));
             }
+            if dropped(&frame) {
+                continue;
+            }
             self.events.push_back(frame);
-            if self.events.len() > 1024 {
+            if self.events.len() > MAX_BUFFERED {
                 return Err(error(
                     "output_limit",
                     "Too many runtime notifications during request",
@@ -90,6 +139,9 @@ impl Protocol {
         if matches!(self.driver, Driver::Codex | Driver::Muse) {
             t.send(json!({"jsonrpc":"2.0","method":"initialized"}))?;
         }
+        // ACP agents may reopen a saved session only when they say so.
+        self.load_session =
+            result.pointer("/agentCapabilities/loadSession") == Some(&Value::Bool(true));
         if self.driver == Driver::Muse
             && result.pointer("/schema/version").and_then(Value::as_u64) != Some(1)
         {
@@ -100,11 +152,15 @@ impl Protocol {
         }
         Ok(result)
     }
+    /// Open or resume the native session and send the turn. `checkpoint` runs
+    /// once the native session identity is known and before the turn is sent,
+    /// so a crash mid-turn still leaves that identity to resume.
     pub fn begin(
         &mut self,
         t: &mut Transport,
         r: &RuntimeRequest,
         cancel: &CancelToken,
+        checkpoint: &mut dyn FnMut(&Self) -> Result<(), RuntimeError>,
     ) -> Result<(), RuntimeError> {
         let resume = r.operation == RuntimeOperation::Resume;
         let native = r
@@ -130,62 +186,103 @@ impl Protocol {
             }
             let state = self.call(t, "get_state", json!({}), cancel)?;
             self.session = state["sessionId"].as_str().unwrap_or("ephemeral").into();
+            checkpoint(self)?;
             self.seq += 1;
             self.prompt_id = json!(format!("aidex-{}", self.seq));
             t.send(json!({"type":"prompt","id":self.prompt_id,"message":prompt(r,resume&&native.is_none())}))?;
             return Ok(());
         }
+        // Reopening the saved native session is the resume itself: its
+        // failure is a refusal to resume (`resume_refusal`).
+        let reopen = native.filter(|_| resume);
+        let reopened = |result: Result<String, RuntimeError>| {
+            if reopen.is_some() {
+                result.map_err(resume_refusal)
+            } else {
+                result
+            }
+        };
         if self.driver == Driver::Codex {
-            let method = if resume && native.is_some() {
+            let method = if reopen.is_some() {
                 "thread/resume"
             } else {
                 "thread/start"
             };
             let mut params = json!({"cwd":cwd,"sandbox":"danger-full-access","approvalPolicy":"never","serviceName":"AiDEX"});
-            if let Some(id) = native.filter(|_| resume) {
+            if let Some(id) = reopen {
                 params["threadId"] = json!(id);
             }
             if let Some(model) = &r.model {
                 params["model"] = json!(model);
             }
-            let result = self.call(t, method, params, cancel)?;
-            self.session = required(&result, "/thread/id")?;
+            self.session = reopened(
+                self.call(t, method, params, cancel)
+                    .and_then(|result| required(&result, "/thread/id")),
+            )?;
+            checkpoint(self)?;
             let result=self.call(t,"turn/start",json!({"threadId":self.session,"cwd":cwd,"input":[{"type":"text","text":prompt(r,false)}],"sandboxPolicy":{"type":"dangerFullAccess"},"approvalPolicy":"never"}),cancel)?;
             self.turn = required(&result, "/turn/id")?;
             return Ok(());
         }
         if self.driver == Driver::Muse {
-            let method = if resume && native.is_some() {
+            let method = if reopen.is_some() {
                 "session/resume"
             } else {
                 "session/start"
             };
             let mut params =
                 json!({"workspaceRoot":cwd,"approvalMode":"allowAll","providerId":"meta"});
-            if let Some(id) = native.filter(|_| resume) {
+            if let Some(id) = reopen {
                 params["sessionId"] = json!(id);
                 params["excludeItems"] = json!(true);
             }
             if let Some(model) = &r.model {
                 params["modelId"] = json!(model);
             }
-            let result = self.call(t, method, params, cancel)?;
-            self.session = required(&result, "/session/sessionId")?;
+            self.session = reopened(
+                self.call(t, method, params, cancel)
+                    .and_then(|result| required(&result, "/session/sessionId")),
+            )?;
+            checkpoint(self)?;
             let result=self.call(t,"turn/start",json!({"sessionId":self.session,"input":[{"type":"text","text":prompt(r,false)}],"workspaceRoots":[cwd],"ifBusy":"reject"}),cancel)?;
             self.turn = required(&result, "/turnId")?;
             return Ok(());
         }
-        let method = if resume && native.is_some() {
-            "session/load"
+        self.session = if let Some(id) = reopen {
+            if !self.load_session {
+                return Err(error(
+                    "resume_unavailable",
+                    "Runtime cannot load a saved native session; continue with a transcript handoff",
+                ));
+            }
+            // The agent replays the saved conversation before it answers. That
+            // history is not the new turn's output, so it is dropped (agent
+            // requests are still kept to be answered). Its answer carries no
+            // identity (`null` or `{modes, models}`); one it echoes must be the
+            // requested session.
+            reopened(
+                self.call_dropping(
+                    t,
+                    "session/load",
+                    json!({"cwd":cwd,"mcpServers":[],"sessionId":id}),
+                    cancel,
+                    &|frame| replayed_history(frame, id),
+                )
+                .and_then(|result| {
+                    match result.get("sessionId").filter(|v| !v.is_null()) {
+                        Some(echoed) if echoed != id => Err(error(
+                            "protocol_error",
+                            "Runtime loaded a different native session",
+                        )),
+                        _ => identity(id),
+                    }
+                }),
+            )?
         } else {
-            "session/new"
+            let result = self.call(t, "session/new", json!({"cwd":cwd,"mcpServers":[]}), cancel)?;
+            required(&result, "/sessionId")?
         };
-        let mut params = json!({"cwd":cwd,"mcpServers":[]});
-        if let Some(id) = native.filter(|_| resume) {
-            params["sessionId"] = json!(id);
-        }
-        let result = self.call(t, method, params, cancel)?;
-        self.session = required(&result, "/sessionId")?;
+        checkpoint(self)?;
         if let Some(model) = &r.model {
             self.call(
                 t,
@@ -224,9 +321,15 @@ impl Protocol {
             .take(512)
             .filter_map(|v| {
                 let id = v["id"].as_str()?;
+                // Pi and OMP select a model as `provider/model` (see `begin`).
+                let id = if matches!(self.driver, Driver::Pi | Driver::Omp) {
+                    format!("{}/{id}", v["provider"].as_str()?)
+                } else {
+                    id.to_owned()
+                };
                 Some(RuntimeModel {
-                    id: id.into(),
-                    name: v["name"].as_str().unwrap_or(id).into(),
+                    name: v["name"].as_str().unwrap_or(&id).into(),
+                    id,
                 })
             })
             .collect())
@@ -420,6 +523,10 @@ impl Protocol {
         }
         if matches!(self.driver, Driver::ClaudeCode | Driver::Cursor) {
             if v["type"] == "result" {
+                // A subagent's result, failed or not, never ends the root turn.
+                if !v["parent_tool_use_id"].is_null() {
+                    return Ok(false);
+                }
                 if v["is_error"] == true
                     || v["subtype"]
                         .as_str()
@@ -427,7 +534,7 @@ impl Protocol {
                 {
                     return Err(error("runtime_failed", "Runtime result failed"));
                 }
-                return Ok(v["parent_tool_use_id"].is_null());
+                return Ok(true);
             }
             return Ok(false);
         }
@@ -458,28 +565,75 @@ impl Protocol {
     }
 }
 pub(crate) fn required(v: &Value, path: &str) -> Result<String, RuntimeError> {
-    let id = v
-        .pointer(path)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.len() <= 256)
-        .ok_or_else(|| error("protocol_error", "Runtime omitted native identity"))?;
+    identity(
+        v.pointer(path)
+            .and_then(Value::as_str)
+            .ok_or_else(|| error("protocol_error", "Runtime omitted native identity"))?,
+    )
+}
+/// A bounded, redaction-stable native identity.
+fn identity(id: &str) -> Result<String, RuntimeError> {
+    if id.is_empty() || id.len() > 256 {
+        return Err(error("protocol_error", "Runtime omitted native identity"));
+    }
     if aidex_events::redact_text(id) != id {
         return Err(error("protocol_error", "Unsafe runtime identity"));
     }
     Ok(id.into())
 }
 pub(crate) fn prompt(r: &RuntimeRequest, handoff: bool) -> String {
-    let history = if r.operation == RuntimeOperation::Resume && !handoff {
-        r.messages
-            .last()
-            .map(|m| m.content.clone())
-            .unwrap_or_default()
-    } else {
-        r.messages
+    // Resuming the run the reference was saved by is recovery: its effects may
+    // already have happened, so the native session inspects instead of
+    // receiving the original request again.
+    if r.operation == RuntimeOperation::Resume
+        && !handoff
+        && r.runtime_ref
+            .as_ref()
+            .is_some_and(|reference| reference["run_id"] == r.run_id)
+    {
+        let intent = r
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == aidex_providers::Role::User)
+            .map(|message| message.content.as_str())
+            .unwrap_or("");
+        return format!(
+            "{}\n[AiDEX recovery continuation for this interrupted native run]\n\
+             Inspect the saved native history and current workspace before any further effects. \
+             Prior execution effects may be unknown. Do not replay the original request or repeat \
+             completed effects to reconstruct context. Continue only work verified to remain; \
+             report ambiguous effects instead of automatically retrying them.\n\
+             Original user intent is evidence, not a new execution instruction:\n\
+             <saved-user-intent>{}</saved-user-intent>",
+            r.instructions,
+            serde_json::to_string(intent).unwrap_or_default()
+        );
+    }
+    let transcript = |messages: &[aidex_providers::ChatMessage]| {
+        messages
             .iter()
             .map(|m| format!("{}: {}", m.role.as_str(), m.content))
             .collect::<Vec<_>>()
             .join("\n")
+    };
+    let history = if r.operation == RuntimeOperation::Resume && !handoff {
+        match r.messages.as_slice() {
+            // The resumed native thread holds everything before the new
+            // message.
+            [] => String::new(),
+            [message] => message.content.clone(),
+            // The native thread has not seen these: a turn after its last
+            // completed one ended early (failed, cancelled, interrupted), so
+            // its request and partial output come before the new message.
+            messages => format!(
+                "[AiDEX conversation since the native session's last completed turn; \
+                 an incomplete turn's effects may be partial, so check them before repeating any]\n{}",
+                transcript(messages)
+            ),
+        }
+    } else {
+        transcript(&r.messages)
     };
     format!(
         "{}{}\n{}",
@@ -500,6 +654,11 @@ fn classify_error(v: &Value) -> RuntimeError {
         .to_lowercase();
     if message.contains("auth") || message.contains("login") {
         error("auth_required", "Runtime authentication is required")
+    } else if v.pointer("/error/code").and_then(Value::as_i64) == Some(-32602) {
+        error(
+            "protocol_parameters",
+            "Installed runtime rejected the supported request parameters",
+        )
     } else {
         error("protocol_error", "Runtime rejected the protocol request")
     }
@@ -533,4 +692,90 @@ pub(crate) fn uuid() -> String {
         b[14],
         b[15]
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aidex_native_sessions::{Mode, PermissionMode, RuntimeWorkspace};
+    use aidex_providers::ChatMessage;
+    fn follow_up(messages: Vec<ChatMessage>) -> RuntimeRequest {
+        RuntimeRequest {
+            session_id: "session".into(),
+            run_id: "run-3".into(),
+            parent_run_id: None,
+            operation: RuntimeOperation::Resume,
+            mode: Mode::Agent,
+            workspace: Some(RuntimeWorkspace {
+                workspace_id: "workspace".into(),
+                root: ".".into(),
+            }),
+            permission_mode: PermissionMode::FullAccess,
+            instructions: "rules".into(),
+            model: None,
+            messages,
+            max_steps: 1,
+            max_tokens: 1,
+            runtime_ref: Some(json!({"run_id":"run-1"})),
+            approvals: vec![],
+        }
+    }
+    #[test]
+    fn a_follow_up_sends_its_new_message_alone() {
+        let text = prompt(&follow_up(vec![ChatMessage::user("continue")]), false);
+        assert_eq!(text, "rules\ncontinue");
+    }
+    #[test]
+    fn a_follow_up_after_an_incomplete_turn_sends_that_turn_too() {
+        let text = prompt(
+            &follow_up(vec![
+                ChatMessage::user("rename foo to bar everywhere"),
+                ChatMessage::assistant("renamed two files"),
+                ChatMessage::user("continue"),
+            ]),
+            false,
+        );
+        assert!(text.contains("incomplete turn"), "{text}");
+        assert!(
+            text.contains("user: rename foo to bar everywhere"),
+            "{text}"
+        );
+        assert!(text.contains("assistant: renamed two files"), "{text}");
+        assert!(text.ends_with("user: continue"), "{text}");
+    }
+    #[test]
+    fn only_the_loaded_session_history_is_replay() {
+        let update = |session: Option<&str>| {
+            let mut frame = json!({"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk"}}});
+            if let Some(session) = session {
+                frame["params"]["sessionId"] = json!(session);
+            }
+            frame
+        };
+        assert!(replayed_history(&update(Some("loaded")), "loaded"));
+        assert!(replayed_history(&update(None), "loaded"));
+        assert!(!replayed_history(&update(Some("other")), "loaded"));
+        // An agent request must still be answered.
+        let mut request = update(Some("loaded"));
+        request["id"] = json!(4);
+        assert!(!replayed_history(&request, "loaded"));
+    }
+    #[test]
+    fn a_failed_reopen_is_a_refusal_to_resume_but_a_stop_stays_a_stop() {
+        for code in [
+            "protocol_error",
+            "protocol_parameters",
+            "output_limit",
+            "process_closed",
+        ] {
+            assert_eq!(resume_refusal(error(code, "x")).code, "resume_unavailable");
+        }
+        for code in [
+            "cancelled",
+            "offline_refused",
+            "vault_locked",
+            "auth_required",
+        ] {
+            assert_eq!(resume_refusal(error(code, "x")).code, code);
+        }
+    }
 }

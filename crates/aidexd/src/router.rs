@@ -168,6 +168,24 @@ impl Router {
         self.insert(method, Route::Call(Box::new(handler)))
     }
 
+    /// Register a read clients poll in the background (a status, a list, a
+    /// conversation view): what it reads through the vault does not count as
+    /// vault use (`VaultService::passively`), so polling never holds the idle
+    /// auto-lock off. Only a person's actions and executing runs keep the
+    /// vault awake. A locked vault still refuses the read.
+    pub fn register_passive<F>(
+        &mut self,
+        method: &'static str,
+        handler: F,
+    ) -> Result<(), RouterError>
+    where
+        F: Fn(&CallContext, Value) -> Result<Value, RpcError> + Send + Sync + 'static,
+    {
+        self.register(method, move |context, params| {
+            aidex_vault::VaultService::passively(|| handler(context, params))
+        })
+    }
+
     /// Register a subscription method (convention: `<domain>.subscribe`).
     ///
     /// The transport answers the call with `{ "subscription": "<id>", "data": <handler result> }`
@@ -292,6 +310,31 @@ mod tests {
             Some(ErrorCode::MethodNotFound)
         );
         assert!(!context.is_cancelled());
+    }
+
+    #[test]
+    fn passive_methods_run_in_a_passive_vault_scope_and_others_do_not() {
+        let mut router = Router::new();
+        router
+            .register_passive("demo.poll", |_, _| {
+                Ok(json!(aidex_vault::VaultService::is_passive()))
+            })
+            .unwrap();
+        router
+            .register("demo.act", |_, _| {
+                Ok(json!(aidex_vault::VaultService::is_passive()))
+            })
+            .unwrap();
+        let context = CallContext::detached(ClientInfo::new("test", "1"), ShutdownSignal::new());
+        assert_eq!(
+            router.call(&context, "demo.poll", Value::Null).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            router.call(&context, "demo.act", Value::Null).unwrap(),
+            json!(false)
+        );
+        assert!(!aidex_vault::VaultService::is_passive());
     }
 
     #[test]

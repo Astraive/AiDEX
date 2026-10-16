@@ -21,6 +21,7 @@ import {
 } from "../catalog/providerAccounts";
 import {
   runtimeBrand,
+  runtimeHealthKind,
   runtimeName,
   type RuntimeHealthState,
 } from "../catalog/runtimes";
@@ -109,7 +110,7 @@ export function runtimeSummary(
   if (!health || health.state === "loading")
     return { headline: "Checking runtime status", tone: "neutral" };
   if (health.state === "error") return { headline: "Unavailable", detail: health.message, tone: "danger" };
-  switch (health.health.status) {
+  switch (runtimeHealthKind(health.health.status)) {
     case "ready":
       return { headline: "Available", tone: "success" };
     case "binary_missing":
@@ -120,15 +121,26 @@ export function runtimeSummary(
       };
     case "auth_required":
       return { headline: "Not authenticated", detail: "Sign in to use this runtime.", tone: "warning" };
-    case "installed_auth_unverified":
-    case "protocol_ready_auth_unverified":
+    case "auth_pending":
+      return { headline: "Signing in", detail: "Finish the sign-in in Account.", tone: "warning" };
+    case "signed_in_unverified":
+      return {
+        headline: "Signed in",
+        detail: "The saved account could not be checked right now, for example while offline.",
+        tone: "warning",
+      };
+    case "auth_unverified":
       return {
         headline: "Needs attention",
         detail: "Installed; sign-in could not be verified.",
         tone: "warning",
       };
-    default:
-      return { headline: "Needs attention", detail: health.health.status, tone: "warning" };
+    case "unknown":
+      return {
+        headline: "Needs attention",
+        detail: "The runtime reported a status this app does not know. Check status again.",
+        tone: "warning",
+      };
   }
 }
 

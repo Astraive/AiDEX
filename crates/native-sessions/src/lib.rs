@@ -28,4 +28,4 @@ pub use attachments::{
 };
 pub use catalog::{Session, SessionCatalog, SessionError};
 pub use model::*;
-pub use store::{SessionStore, StoreError, digest, id, now};
+pub use store::{NATIVE_RECORD_KEY_SECRET, SessionStore, StoreError, digest, id, now};

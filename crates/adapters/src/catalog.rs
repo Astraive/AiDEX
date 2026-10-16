@@ -161,8 +161,16 @@ impl Driver {
             modes: vec![Mode::Agent],
             permission_modes: vec![PermissionMode::FullAccess],
             limitations,
+            // `native_cli` and `profile_import` are the managed account
+            // (`runtime.login.*`, `runtime.profile.import`); other drivers
+            // refuse them with `auth_unsupported`.
             auth_methods: if self == Self::Codex {
-                vec!["codex_oauth".into(), "vault".into()]
+                vec![
+                    "native_cli".into(),
+                    "profile_import".into(),
+                    "codex_oauth".into(),
+                    "vault".into(),
+                ]
             } else {
                 vec!["vault".into()]
             },

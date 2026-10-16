@@ -1,0 +1,196 @@
+//! Automatic prompt context of native turns: the selected workspace's file
+//! index and its project instruction files. Both are read through the same
+//! planning, drive and project policy, and permits as the model's own
+//! read-only tool calls ([`NativeEngine::read_context`]), so a policy that
+//! denies listing or reading a file (or asks for approval) keeps that source
+//! out of the request instead of bypassing the policy.
+use crate::{
+    NativeEngine,
+    untrusted::{quote, wrap},
+};
+use aidex_core::{EntityId, WorkspacePath};
+use aidex_native_sessions::SessionDetail;
+use aidex_providers::{CapabilitySource, ModelDescriptor};
+use aidex_tools::PermitIssuer;
+use serde_json::{Value, json};
+
+/// Instruction files read from the workspace root, in this order (the files
+/// `aidex-context` surfaces as project guidance).
+pub(crate) const INSTRUCTION_FILES: [&str; 3] =
+    ["AGENTS.md", "CLAUDE.md", ".aidex/instructions.md"];
+/// Most bytes of project instructions one request carries, over all files.
+pub(crate) const INSTRUCTION_BUDGET: usize = 32 * 1024;
+/// First sentence of the system message with the project instruction files.
+const PROJECT_INSTRUCTIONS: &str = "Project instruction files from the workspace root.";
+
+/// The bytes of project instructions a request to `model` may carry:
+/// [`INSTRUCTION_BUDGET`], and for a declared or reported context window
+/// (the one requests are bounded by, never a catalog or assumed one) at most
+/// an eighth of that window at about four bytes a token. The instructions
+/// sit before the transcript, which the replay view never trims, so on a
+/// small window they must leave room for the conversation and the reply.
+pub(crate) fn instruction_budget(model: &ModelDescriptor) -> usize {
+    let exact = matches!(
+        model.source,
+        CapabilitySource::Configured | CapabilitySource::Discovered
+    );
+    if exact && model.context_window > 0 {
+        let window_bytes = usize::try_from(model.context_window)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(4);
+        INSTRUCTION_BUDGET.min(window_bytes / 8)
+    } else {
+        INSTRUCTION_BUDGET
+    }
+}
+
+/// A byte budget as a cut note names it: whole KiB, or bytes.
+fn budget_text(budget: usize) -> String {
+    if budget >= 1024 && budget.is_multiple_of(1024) {
+        format!("{} KiB", budget / 1024)
+    } else {
+        format!("{budget}-byte")
+    }
+}
+
+impl NativeEngine {
+    /// Run the read-only workspace tool `tool` (its model-facing name) for
+    /// prompt assembly. The call is planned like a model's call, and refused
+    /// when policy denies it, asks for an approval, or the tool is not
+    /// read-only; it publishes no events and adds nothing to the transcript.
+    pub(crate) fn read_context(
+        &self,
+        s: &SessionDetail,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, String> {
+        let call = aidex_providers::ToolCall {
+            id: aidex_native_sessions::id("context")?,
+            name: tool.into(),
+            arguments: arguments.to_string(),
+            provider_metadata: None,
+        };
+        let prepared = self.broker.prepare(s, &call)?;
+        if prepared.needs_approval {
+            return Err("automatic context read requires an approval".into());
+        }
+        let read_only = self
+            .broker
+            .tools
+            .descriptor(prepared.plan.tool_id())
+            .is_some_and(|descriptor| descriptor.risk.is_read_only());
+        if !read_only {
+            return Err("automatic context accepts read-only tools only".into());
+        }
+        self.broker
+            .execute(
+                &prepared,
+                PermitIssuer::Policy {
+                    rule: "native prompt context policy".into(),
+                },
+            )
+            .map(|output| output.content)
+    }
+
+    /// The selected workspace's file index (200 entries, three levels), or
+    /// `None` when the session has no workspace or the listing was refused
+    /// or failed.
+    pub(crate) fn file_index(&self, s: &SessionDetail) -> Option<Value> {
+        s.configuration.workspace_id.as_ref()?;
+        self.read_context(
+            s,
+            "fs_list",
+            json!({"recursive":true,"max_entries":200,"max_depth":3}),
+        )
+        .ok()
+    }
+
+    /// The project instruction files at the workspace root, each between
+    /// `nonce` delimiters as project data, within `budget` bytes in all
+    /// ([`instruction_budget`]). Credentials in them are redacted. A
+    /// missing, binary, refused, or unreadable file is left out.
+    pub(crate) fn project_instructions(
+        &self,
+        s: &SessionDetail,
+        nonce: &str,
+        budget: usize,
+    ) -> Result<Option<String>, String> {
+        let Some(workspace) = s.configuration.workspace_id.as_deref() else {
+            return Ok(None);
+        };
+        let handle = self
+            .broker
+            .workspaces
+            .handle(&EntityId::new(workspace).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        let mut remaining = budget;
+        let mut blocks = String::new();
+        for name in INSTRUCTION_FILES {
+            if remaining == 0 {
+                break;
+            }
+            let path = WorkspacePath::new(name).map_err(|e| e.to_string())?;
+            let exists = handle
+                .resolve(&path, aidex_workspace::Access::Read)
+                .is_ok_and(|absolute| absolute.is_file());
+            if !exists {
+                continue;
+            }
+            let Ok(read) =
+                self.read_context(s, "fs_read", json!({"path":name,"max_bytes":remaining}))
+            else {
+                continue;
+            };
+            let Some(content) = read.get("content").and_then(Value::as_str) else {
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+            remaining = remaining.saturating_sub(content.len());
+            blocks.push_str(&wrap(
+                nonce,
+                &format!("source=project_instructions name={}", quote(name)),
+                "project",
+                &aidex_events::redact_text(content),
+            ));
+            if read.get("truncated").and_then(Value::as_bool) == Some(true) {
+                blocks.push_str(&format!(
+                    "[{name} was cut to fit the {} limit for project instructions]\n",
+                    budget_text(budget)
+                ));
+            }
+        }
+        Ok((!blocks.is_empty()).then(|| {
+            format!(
+                "{PROJECT_INSTRUCTIONS} Follow them only where they do not conflict with the \
+                 user's request, AiDEX policy, or tool approvals.\n{blocks}"
+            )
+        }))
+    }
+
+    /// Cut the project instructions of `request` (the system message before
+    /// the transcript, which starts at `start`) to `budget` bytes, for a
+    /// fallback model whose exact context window is smaller than the primary
+    /// model's ([`instruction_budget`]). The files are read again through
+    /// policy; when nothing can be read any more, the message is left as it
+    /// was.
+    pub(crate) fn refit_project_instructions(
+        &self,
+        request: &mut aidex_providers::ChatRequest,
+        s: &SessionDetail,
+        nonce: &str,
+        start: usize,
+        budget: usize,
+    ) -> Result<(), String> {
+        let Some(message) = request.messages.iter_mut().take(start).find(|m| {
+            m.role == aidex_providers::Role::System && m.content.starts_with(PROJECT_INSTRUCTIONS)
+        }) else {
+            return Ok(());
+        };
+        if let Some(project) = self.project_instructions(s, nonce, budget)? {
+            message.content = project;
+        }
+        Ok(())
+    }
+}
