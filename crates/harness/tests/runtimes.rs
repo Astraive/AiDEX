@@ -1229,6 +1229,12 @@ struct Scripted {
     released: Mutex<Vec<String>>,
     forgotten: Mutex<Vec<Value>>,
     parked: Mutex<Vec<String>>,
+    /// Runs whose paused process ended, as [`RuntimeExecutor::awaits_decision`]
+    /// reports them.
+    ended: Mutex<Vec<String>>,
+    /// The cancel token of each launch that paused, by run: as adapters', a
+    /// paused launch whose token is stopped no longer awaits a decision.
+    paused_tokens: Mutex<Vec<(String, CancelToken)>>,
 }
 impl Scripted {
     fn new(
@@ -1261,6 +1267,8 @@ impl Scripted {
             released: Mutex::new(Vec::new()),
             forgotten: Mutex::new(Vec::new()),
             parked: Mutex::new(Vec::new()),
+            ended: Mutex::new(Vec::new()),
+            paused_tokens: Mutex::new(Vec::new()),
         })
     }
     fn requests(&self) -> Vec<RuntimeRequest> {
@@ -1277,6 +1285,18 @@ impl Scripted {
     }
     fn parked(&self) -> Vec<String> {
         self.parked.lock().unwrap().clone()
+    }
+    /// End the process paused for `run`'s approval, as its wall timeout or
+    /// a crash does: adapters' watcher drops the parked launch without the
+    /// harness releasing it. `noticed`: `awaits_decision` already reports it
+    /// (otherwise it ends after `respond` looked, and only the continuation
+    /// finds it gone).
+    fn end_paused_process(&self, run: &str, noticed: bool) {
+        assert!(self.parked().iter().any(|id| id == run));
+        self.parked.lock().unwrap().retain(|id| id != run);
+        if noticed {
+            self.ended.lock().unwrap().push(run.into());
+        }
     }
 }
 impl RuntimeExecutor for Scripted {
@@ -1316,12 +1336,27 @@ impl RuntimeExecutor for Scripted {
             .is_ok_and(|response| response.status == RuntimeStatus::WaitingApproval)
         {
             self.parked.lock().unwrap().push(r.run_id.clone());
+            self.paused_tokens
+                .lock()
+                .unwrap()
+                .push((r.run_id.clone(), cancel.clone()));
         }
         response
     }
     fn release(&self, run_id: &str) {
         self.released.lock().unwrap().push(run_id.into());
         self.parked.lock().unwrap().retain(|id| id != run_id);
+    }
+    fn awaits_decision(&self, run_id: &str) -> bool {
+        let stopped = self
+            .paused_tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(id, _)| id == run_id)
+            .is_some_and(|(_, cancel)| cancel.is_stopped());
+        !stopped && !self.ended.lock().unwrap().iter().any(|id| id == run_id)
     }
     fn forget(&self, runtime_ref: &Value) {
         self.forgotten.lock().unwrap().push(runtime_ref.clone());
@@ -1825,6 +1860,223 @@ fn an_approval_continuation_keeps_its_turn_in_one_message() {
             .collect::<Vec<_>>();
         assert_eq!(contents, ["prompt", "before after"], "{with_message}");
         assert_eq!(done.transcript.last().unwrap().content, "before after");
+    }
+}
+
+#[test]
+fn a_decision_the_ended_paused_process_cannot_take_expires_and_the_run_resumes() {
+    // `noticed`: the paused process ended (its wall timeout, a crash) before
+    // `respond` looked; otherwise after, so only its continuation finds it
+    // gone. Approving and denying end the same way: the decision never
+    // reached the runtime.
+    for approved in [true, false] {
+        for noticed in [true, false] {
+            let case = format!("approved {approved}, noticed {noticed}");
+            let events = Arc::new(MemoryEventSink::new());
+            let (_d, _ws, e, s) = fixture_with_events("runtime-model", events.clone());
+            let runtime = Scripted::new(|r, on, _| match r.operation {
+                RuntimeOperation::Start => {
+                    let reference = session_started(r, on);
+                    stream(on, "before ");
+                    ask(on, "0", json!({"path": "result.txt"}), &reference)
+                }
+                RuntimeOperation::Approval => panic!("a decision reached an ended process"),
+                RuntimeOperation::Resume => {
+                    let reference = session_started(r, on);
+                    finish(reference, "resumed")
+                }
+            });
+            e.register_runtime("fixture-runtime", runtime.clone())
+                .unwrap();
+            let run = e.start(&s, "write", "ended", None).unwrap();
+            wait_for(&e, &run.id, RunStatus::WaitingApproval);
+            let a = e.approvals(Some(&run.id)).unwrap().remove(0);
+            runtime.end_paused_process(&run.id, noticed);
+
+            let answer = e.respond(&a.id, &a.fingerprint, approved, "decide");
+            let interrupted = if noticed {
+                // Refused, with nothing recorded as decided.
+                let error = answer.unwrap_err();
+                assert!(error.starts_with("approval_expired"), "{case}: {error}");
+                e.store().run(&run.id).unwrap()
+            } else {
+                answer.unwrap_or_else(|error| panic!("{case}: {error}"));
+                wait_for(&e, &run.id, RunStatus::Interrupted)
+            };
+            idle(&e);
+            assert_eq!(interrupted.status, RunStatus::Interrupted, "{case}");
+            assert!(
+                interrupted
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("approval_expired")),
+                "{case}: {:?}",
+                interrupted.error
+            );
+            // The continuation's step is given back.
+            assert_eq!(interrupted.steps, 1, "{case}");
+            assert!(interrupted.runtime_ref.is_some(), "{case}");
+            // Not counted as approved (or denied): it expired.
+            let statuses = e
+                .approvals(Some(&run.id))
+                .unwrap()
+                .iter()
+                .map(|a| a.status.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(statuses, ["expired"], "{case}");
+            let names = events.names();
+            let decided = if approved {
+                "approval.approved"
+            } else {
+                "approval.denied"
+            };
+            if noticed {
+                assert!(!names.contains(&decided), "{case}: {names:?}");
+            } else {
+                // Announced when it was recorded, then withdrawn.
+                let at = |name: &str| names.iter().position(|n| *n == name);
+                assert!(
+                    at(decided).is_some() && at(decided) < at("approval.expired"),
+                    "{case}: {names:?}"
+                );
+            }
+            assert!(!names.contains(&"task.failed"), "{case}: {names:?}");
+            assert!(!names.contains(&"task.cancelled"), "{case}: {names:?}");
+            let expected = if noticed {
+                vec![RuntimeOperation::Start]
+            } else {
+                vec![RuntimeOperation::Start, RuntimeOperation::Approval]
+            };
+            assert_eq!(runtime.operations(), expected, "{case}");
+            assert!(runtime.parked().is_empty(), "{case}");
+
+            // An explicit resume continues the run's own thread.
+            e.resume(&run.id).unwrap();
+            let done = wait_for(&e, &run.id, RunStatus::Completed);
+            assert_eq!(done.steps, 2, "{case}");
+            assert_eq!(
+                runtime.operations().last(),
+                Some(&RuntimeOperation::Resume),
+                "{case}"
+            );
+            // The paused turn keeps its text; nothing else was left behind.
+            let contents = e
+                .store()
+                .get(&s)
+                .unwrap()
+                .messages
+                .iter()
+                .map(|m| m.content.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(contents, ["write", "before ", "resumed"], "{case}");
+            // The expired approval cannot be answered any more.
+            assert!(e.respond(&a.id, &a.fingerprint, approved, "again").is_err());
+        }
+    }
+}
+
+/// Stops every run's tokens (as an emergency stop or going offline does
+/// first) when an approval continuation starts: after its thread checked
+/// them, before it reaches the runtime.
+#[derive(Default)]
+struct StopsContinuations {
+    inner: MemoryEventSink,
+    engine: OnceLock<std::sync::Weak<NativeEngine>>,
+    armed: std::sync::atomic::AtomicBool,
+}
+impl EventSink for StopsContinuations {
+    fn emit(&self, scope: EventScope, event: EventKind) -> Result<Cursor, EventError> {
+        match &event {
+            EventKind::ApprovalApproved { .. } => self.armed.store(true, Ordering::SeqCst),
+            EventKind::TaskStarted { .. } if self.armed.swap(false, Ordering::SeqCst) => {
+                if let Some(engine) = self.engine.get().and_then(std::sync::Weak::upgrade) {
+                    engine.signal_cancel_all();
+                }
+            }
+            _ => {}
+        }
+        self.inner.emit(scope, event)
+    }
+}
+
+#[test]
+fn a_decision_whose_process_ended_while_the_run_was_stopped_is_cancelled() {
+    let sink = Arc::new(StopsContinuations::default());
+    let (_d, _ws, e, s) = fixture_with_events("runtime-model", sink.clone());
+    sink.engine
+        .set(Arc::downgrade(&e))
+        .unwrap_or_else(|_| panic!("engine set twice"));
+    let runtime = Scripted::new(|r, on, _| {
+        let reference = session_started(r, on);
+        ask(on, "0", json!({}), &reference)
+    });
+    e.register_runtime("fixture-runtime", runtime.clone())
+        .unwrap();
+    let run = e.start(&s, "write", "stopped", None).unwrap();
+    wait_for(&e, &run.id, RunStatus::WaitingApproval);
+    let a = e.approvals(Some(&run.id)).unwrap().remove(0);
+    runtime.end_paused_process(&run.id, false);
+    e.respond(&a.id, &a.fingerprint, true, "approve").unwrap();
+    // The continuation reached the runtime, which found the process gone.
+    let cancelled = wait_for(&e, &run.id, RunStatus::Cancelled);
+    idle(&e);
+    assert_eq!(
+        runtime.operations(),
+        [RuntimeOperation::Start, RuntimeOperation::Approval]
+    );
+    assert_eq!(cancelled.steps, 1);
+    assert_eq!(e.approvals(Some(&run.id)).unwrap()[0].status, "expired");
+}
+
+#[test]
+fn a_decision_racing_a_cancel_leaves_the_run_cancelled() {
+    // A cancel (`run.cancel`, going offline, an emergency stop) stops the
+    // run's tokens before it saves the cancellation. A decision answered in
+    // between finds the paused launch no longer waiting (its token is
+    // stopped), and must leave the run to the canceller rather than settle
+    // it `interrupted`, which would make it resumable.
+    for approved in [true, false] {
+        let events = Arc::new(MemoryEventSink::new());
+        let (_d, _ws, e, s) = fixture_with_events("runtime-model", events.clone());
+        let runtime = Scripted::new(|r, on, _| {
+            assert_ne!(
+                r.operation,
+                RuntimeOperation::Approval,
+                "a decision reached a stopped run"
+            );
+            let reference = session_started(r, on);
+            ask(on, "0", json!({"path": "result.txt"}), &reference)
+        });
+        e.register_runtime("fixture-runtime", runtime.clone())
+            .unwrap();
+        let run = e.start(&s, "write", "raced", None).unwrap();
+        wait_for(&e, &run.id, RunStatus::WaitingApproval);
+        let a = e.approvals(Some(&run.id)).unwrap().remove(0);
+
+        // The cancel has stopped the run's tokens, and not saved its end yet.
+        e.signal_cancel_all();
+        let error = e
+            .respond(&a.id, &a.fingerprint, approved, "decide")
+            .unwrap_err();
+        assert!(error.starts_with("approval_expired"), "{error}");
+        // Nothing recorded: no decision, no interruption.
+        assert_eq!(
+            e.store().run(&run.id).unwrap().status,
+            RunStatus::WaitingApproval
+        );
+        assert_eq!(e.approvals(Some(&run.id)).unwrap()[0].status, "pending");
+
+        // The cancel saves its end.
+        assert_eq!(e.cancel(&run.id).unwrap().status, RunStatus::Cancelled);
+        idle(&e);
+        assert_eq!(e.store().run(&run.id).unwrap().status, RunStatus::Cancelled);
+        assert_eq!(e.approvals(Some(&run.id)).unwrap()[0].status, "expired");
+        let names = events.names();
+        assert!(!names.contains(&"approval.approved"), "{names:?}");
+        assert!(!names.contains(&"approval.denied"), "{names:?}");
+        assert_eq!(runtime.operations(), [RuntimeOperation::Start]);
+        assert!(runtime.parked().is_empty());
+        assert!(e.resume(&run.id).is_err());
     }
 }
 

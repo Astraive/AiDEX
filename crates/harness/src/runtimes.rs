@@ -231,6 +231,26 @@ impl NativeEngine {
         if !runtime.descriptor().supports_approvals || run.runtime_ref.is_none() {
             return Err("runtime approval continuation is unavailable".into());
         }
+        // A stop under way (a cancel registered, or the run's tokens stopped)
+        // ends the wait: the decision is not recorded and the run is left to
+        // whoever stops it, which records it `cancelled` (or reconciliation
+        // `interrupted` after a lock). Checked first, so a cancel that has
+        // not stopped the tokens yet is caught too.
+        if self.stopping(&run) {
+            return Err(RUN_STOPPING.into());
+        }
+        // The paused process ended since it asked (its wall timeout, a
+        // crash): the decision cannot reach it, so it is not recorded. The
+        // approval expires with the run's interruption, and an explicit
+        // resume continues the run from its saved reference.
+        if !runtime.awaits_decision(&run.id) {
+            self.transition(
+                &run.id,
+                RunStatus::Interrupted,
+                Some(PAUSED_PROCESS_ENDED.into()),
+            )?;
+            return Err(PAUSED_PROCESS_ENDED.into());
+        }
         // Checked again where the decision is recorded: the run may have been
         // cancelled or interrupted, and the approval expired, since `respond`
         // looked.
@@ -388,7 +408,9 @@ impl NativeEngine {
             // Cancelled or interrupted meanwhile.
             return Ok(false);
         }
-        let (index, partial) = self.store.update(&run.session_id, |s| {
+        // `resumed`: the placeholder is the paused turn's own, which an
+        // approval continuation goes on with.
+        let (index, partial, resumed) = self.store.update(&run.session_id, |s| {
             let message_index = s
                 .runs
                 .iter()
@@ -403,7 +425,7 @@ impl NativeEngine {
                 .ok_or("run not found")?;
             r.steps += 1;
             if r.parent_run_id.is_some() {
-                return Ok((None, String::new()));
+                return Ok((None, String::new(), false));
             }
             // An approval continuation goes on with the turn its paused launch
             // streamed into its own placeholder (the last message: a root run
@@ -414,11 +436,11 @@ impl NativeEngine {
                 && s.messages[last].role == aidex_providers::Role::Assistant
                 && s.messages[last].tool_calls.is_empty()
             {
-                return Ok((Some(last), s.messages[last].content.clone()));
+                return Ok((Some(last), s.messages[last].content.clone(), true));
             }
             let index = s.messages.len();
             s.messages.push(ChatMessage::assistant(""));
-            Ok((Some(index), String::new()))
+            Ok((Some(index), String::new(), false))
         })?;
         let mut attempt = self.attempt_runtime(
             runtime.as_ref(),
@@ -466,6 +488,34 @@ impl NativeEngine {
                     RunStatus::Interrupted,
                     Some(aidex_events::redact_text(&error).into_owned()),
                 )?;
+                return Ok(false);
+            }
+            (RuntimeLaunch::Approval, Some(APPROVAL_EXPIRED)) => {
+                // The paused process ended after `respond` looked (its wall
+                // timeout, a crash), and the runtime refused the continuation
+                // before sending the decision: nothing ran. The decision
+                // lapses with the process (its approval expires instead of
+                // staying approved or denied), the turn's step is given back
+                // (the paused turn keeps its text), and the run returns to
+                // interrupted, so an explicit resume continues it from its
+                // saved reference. A run cancelled meanwhile stays cancelled.
+                let error = attempt
+                    .result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                self.withdraw_turn(run, index.filter(|_| !resumed))?;
+                self.expire_decision(run, &request)?;
+                if cancel.is_stopped() {
+                    self.transition(id, RunStatus::Cancelled, None)?;
+                } else {
+                    self.transition(
+                        id,
+                        RunStatus::Interrupted,
+                        Some(aidex_events::redact_text(&error).into_owned()),
+                    )?;
+                }
                 return Ok(false);
             }
             _ => {}
@@ -920,6 +970,43 @@ impl NativeEngine {
         }
         Ok(run)
     }
+    /// Expire the decision an approval continuation carried, which the
+    /// runtime refused before sending it (`approval_expired`): the run's
+    /// approval it names, recorded `approved` or `denied` by `respond`, did
+    /// not take effect. `approval.expired` follows the decision's own event.
+    fn expire_decision(&self, run: &Run, request: &RuntimeRequest) -> Result<(), String> {
+        let Some(decision) = request.approvals.first() else {
+            return Ok(());
+        };
+        let expired = self.store.update(&run.session_id, |s| {
+            let runtime_id = s.configuration.runtime_id.clone();
+            Ok(s.approvals
+                .iter_mut()
+                .rev()
+                .find(|a| {
+                    a.run_id == run.id
+                        && a.runtime_id == runtime_id
+                        && matches!(a.status.as_str(), "approved" | "denied")
+                })
+                .filter(|a| {
+                    a.fingerprint == decision.fingerprint
+                        && a.runtime_request_id.as_deref() == Some(decision.request_id.as_str())
+                })
+                .map(|a| {
+                    a.status = "expired".into();
+                    a.id.clone()
+                }))
+        })?;
+        if let Some(id) = expired {
+            self.emit(
+                &run.session_id,
+                EventKind::ApprovalExpired {
+                    approval_id: EntityId::new(&id).map_err(|e| e.to_string())?,
+                },
+            );
+        }
+        Ok(())
+    }
     /// Undo a turn the runtime refused before starting: give back its step
     /// and drop its still-empty assistant placeholder.
     fn withdraw_turn(&self, run: &Run, index: Option<usize>) -> Result<(), String> {
@@ -962,6 +1049,20 @@ pub(crate) const RESUME_UNAVAILABLE: &str = "resume_unavailable";
 /// `RuntimeError.code` of a runtime the runtime gate keeps from running
 /// (offline, a locked vault, an emergency stop).
 const OFFLINE_REFUSED: &str = "offline_refused";
+/// `RuntimeError.code` of an approval continuation whose paused process is
+/// gone: adapters return it before the decision is sent, so nothing ran.
+const APPROVAL_EXPIRED: &str = "approval_expired";
+/// The error of a run whose paused process ended before its approval was
+/// answered ([`RuntimeExecutor::awaits_decision`]), and of `respond` then.
+/// Its words map to `conflict` on the wire.
+const PAUSED_PROCESS_ENDED: &str = "approval_expired: the paused runtime process ended before the \
+                                    decision reached it; the run was interrupted, resume it \
+                                    explicitly";
+/// The error of `respond` for a run whose stop is under way
+/// ([`NativeEngine::stopping`]): the decision is not recorded, and the run
+/// ends as its stop settles it. Its words map to `conflict` on the wire.
+const RUN_STOPPING: &str =
+    "approval_expired: the run is being stopped; the decision was not recorded";
 /// `RuntimeError.code`s of a native protocol request the runtime rejected.
 const PROTOCOL_ERROR: &str = "protocol_error";
 const PROTOCOL_PARAMETERS: &str = "protocol_parameters";

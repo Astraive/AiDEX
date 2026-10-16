@@ -967,6 +967,24 @@ impl NativeEngine {
             entry.tool.cancel();
         }
     }
+    /// Whether a stop of `run` is under way: its tokens were cancelled (a
+    /// cancel, an emergency stop, going offline, a vault lock), or a cancel
+    /// of it or of its parent works on it. Whoever stopped it records how it
+    /// ended (`cancelled`, or `interrupted` by reconciliation after a lock).
+    pub(crate) fn stopping(&self, run: &Run) -> bool {
+        if relock(&self.live)
+            .get(&run.id)
+            .is_some_and(|entry| entry.provider.is_cancelled())
+        {
+            return true;
+        }
+        let cancelling = relock(&self.cancelling);
+        cancelling.contains_key(&run.id)
+            || run
+                .parent_run_id
+                .as_ref()
+                .is_some_and(|parent| cancelling.contains_key(parent))
+    }
     /// Drop the registry entry of `id` when no thread works on it (a runtime
     /// paused for approval), releasing the paused runtime.
     pub(crate) fn drop_paused(&self, id: &str) {
@@ -1240,6 +1258,28 @@ impl NativeEngine {
         }
     }
     pub fn cancel_all(&self) {
+        self.cancel_all_except(&HashSet::new());
+    }
+    /// [`Self::cancel_all`] for a vault lock the user asked for, called
+    /// while the record key is still available: every active run is
+    /// cancelled (and recorded so), except an external run paused for an
+    /// approval. Its launch is only released (its process ended, its
+    /// temporary home removed), and the run is settled as by every other
+    /// end of the vault session, the idle auto-lock included: the lock's own
+    /// cleanup cannot save a cancel, so [`Self::reconcile_after_unlock`]
+    /// interrupts the run (its approval expires) and an explicit
+    /// [`Self::resume`] continues it from its saved reference. A paused
+    /// child whose parent is executing is still cancelled with its parent
+    /// ([`Self::cancel`] cancels a run's active children).
+    pub fn cancel_all_but_paused(&self) {
+        let paused = relock(&self.live)
+            .iter()
+            .filter(|(_, entry)| !entry.executing && entry.runtime.is_some())
+            .map(|(id, _)| id.clone())
+            .collect::<HashSet<_>>();
+        self.cancel_all_except(&paused);
+    }
+    fn cancel_all_except(&self, paused: &HashSet<String>) {
         self.forget_all_attachments();
         // No held plan may run after this, even when a cancelled run's final
         // state cannot be saved (a locked vault): `reconcile_after_unlock`
@@ -1247,7 +1287,7 @@ impl NativeEngine {
         relock(&self.pending).clear();
         if let Ok(runs) = self.store.run_summaries() {
             for run in runs {
-                if run.status.active() {
+                if run.status.active() && !paused.contains(&run.id) {
                     let _ = self.cancel(&run.id);
                 }
             }

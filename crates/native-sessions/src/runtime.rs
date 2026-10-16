@@ -161,6 +161,17 @@ pub trait RuntimeExecutor: Send + Sync {
     /// so it must be idempotent. A later `Resume` of the run launches anew.
     /// The default keeps nothing to release.
     fn release(&self, _run_id: &str) {}
+    /// Whether the launch of `run_id` paused for an approval still waits for
+    /// its decision: its process is live and can take one. The harness asks
+    /// before it records a decision, so a decision that could no longer reach
+    /// the runtime (the paused process ended: its wall timeout, a crash) is
+    /// never recorded as made. Its approval expires instead, and the run
+    /// returns to `interrupted`. The default assumes it does; `execute` then
+    /// refuses the continuation with `approval_expired`, which the harness
+    /// settles the same way.
+    fn awaits_decision(&self, _run_id: &str) -> bool {
+        true
+    }
     /// Forget the native state a saved `runtime_ref` of this runtime names
     /// (a snapshot of a refused, superseded or finished native thread): the
     /// harness no longer holds any reference to it. Best effort and
