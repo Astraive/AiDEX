@@ -1405,6 +1405,17 @@ impl RuntimeExecutor for ExternalRuntime {
     fn release(&self, run_id: &str) {
         self.release_run(run_id);
     }
+    /// A launch parked for `run_id` whose request is still open and whose
+    /// tree still runs (not ended by its wall timeout, a crash, a cancel or
+    /// the closed gate): what an `Approval` continuation needs.
+    fn awaits_decision(&self, run_id: &str) -> bool {
+        let open = (self.network)();
+        self.live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(run_id)
+            .is_some_and(|live| live.pending.is_some() && Self::waiting(live, open))
+    }
     fn forget(&self, runtime_ref: &Value) {
         self.forget_snapshot(runtime_ref);
     }

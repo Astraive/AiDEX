@@ -2085,6 +2085,35 @@ fn a_parked_approval_released_by_cancel_or_a_closed_gate_leaves_no_home_and_resu
     }
 }
 #[test]
+fn a_parked_launch_awaits_its_decision_only_while_its_process_lives() {
+    let (_dir, manager, request) = setup(Driver::Acp, "approval");
+    let executor = manager.executors().unwrap().remove(0);
+    assert!(!executor.awaits_decision(&request.run_id));
+    let (paused, decision) = pause_for_approval(&executor, &request, &CancelToken::new());
+    assert!(executor.awaits_decision(&request.run_id));
+    // Its tree ends with nothing asking it to (as at the sandbox's wall
+    // timeout, or a crash): its watcher releases the launch.
+    manager
+        .process_registry()
+        .terminate_all_within(aidex_sandbox::StopReason::Cancelled, Duration::from_secs(5));
+    wait_until("the ended launch is released", || {
+        manager.parked_runs() == 0 && manager.temporary_homes() == 0
+    });
+    assert!(!executor.awaits_decision(&request.run_id));
+    // A continuation is refused before any decision is sent.
+    let mut approval = request.clone();
+    approval.operation = RuntimeOperation::Approval;
+    approval.runtime_ref = paused.runtime_ref;
+    approval.approvals = vec![decision];
+    assert_eq!(
+        executor
+            .execute(&approval, &mut continue_all, &CancelToken::new())
+            .unwrap_err()
+            .code,
+        "approval_expired"
+    );
+}
+#[test]
 fn releasing_parked_approvals_removes_their_homes_before_it_returns() {
     let (_dir, manager, mut request) = setup(Driver::Acp, "approval");
     let executor = manager.executors().unwrap().remove(0);
