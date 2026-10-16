@@ -19,7 +19,7 @@ The Approvals tab renders `../approvals/LiveApprovalsPanel`.
 
 - Every panel reads AiDEX Core; nothing is sample data. Controls without a daemon method (editing filesystem mounts or network allowlists, choosing a global isolation level) are not shown.
 - Secret values are never read back. The add, replace, and passphrase forms send values straight to the daemon and clear them from state after every attempt. The vault policy rules are mirrored in `secretPolicy.ts` (names, exact `provider:`, `mcp:`, `process:`, and `git:` consumers, at most 32), and the daemon enforces them again.
-- Records AiDEX manages (the daemon's `managed` list from `vault.secret.list`, plus `aidex-preferences`, `aidex-model-preferences`, `native-record-encryption-key`, `external-runtime-encryption-key`, and `oauth.*` when that list is missing) are read-only here.
+- Records AiDEX manages (the daemon's `managed` list from `vault.secret.list`, plus `aidex-preferences`, `aidex-model-preferences`, `aidex-appearance`, `native-record-encryption-key`, `external-runtime-encryption-key`, and `oauth.*` when that list is missing) are read-only here.
 - The audit view keeps no event bodies: commands, messages, reasons, secret names, and consumers are dropped. Its `auditKinds` filter only names kinds in the daemon's catalog (`EVENT_NAMES` in crates/events), which the daemon requires.
 - Copy follows `docs/spec.md` and `docs/security.md`: sensitive actions pass through the execution broker, agents get secret handles rather than values, and isolation fails closed when a host cannot enforce the requested level.
 
