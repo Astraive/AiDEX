@@ -1,7 +1,7 @@
 .conversation {
   width: min(100%, calc(var(--aidex-chat-max-width) + 2 * var(--aidex-chat-lane-pad)));
   margin: 0 auto;
-  padding: var(--aidex-chat-lane-pad);
+  padding: var(--aidex-space-6) var(--aidex-chat-lane-pad);
   display: flex;
   flex-direction: column;
   gap: var(--aidex-space-4);
@@ -12,7 +12,10 @@
   align-items: center;
   gap: var(--aidex-space-4);
 }
+/* A long title takes all the shrinking (it ellipsizes); the header actions keep their size. */
 .header h1 {
+  flex: 0 1 auto;
+  min-width: 0;
   margin: 0;
   font-size: var(--aidex-text-lg);
   font-weight: 600;
@@ -20,6 +23,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.header > :not(h1) {
+  flex: none;
 }
 .empty {
   min-height: 35vh;

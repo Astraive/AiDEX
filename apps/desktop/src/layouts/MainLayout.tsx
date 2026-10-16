@@ -26,8 +26,8 @@ import {
 } from "@aidex/ui/icons";
 import {
   Badge,
-  hasModalLayer,
   IconButton,
+  layerCount,
   Menu,
   MenuItem,
   MenuPopup,
@@ -106,9 +106,12 @@ export function MainLayout({ Sidebar, onNewSession, children }: Props) {
   }, []);
   const closeOverlay = useCallback((open: boolean) => setUserOpen(open), []);
 
-  // Mod+B (or the saved chord) toggles the sidebar, except while a dialog has the screen.
+  // Mod+B (or the saved chord) toggles the sidebar. `useKeyChord` already stands down while a dialog
+  // has the screen; the toggle also waits while a popup (a select, menu or popover) is open, since the
+  // popup would stay where its trigger was as main re-lays out. The open overlay sidebar is one layer.
   useKeyChord(toggleChord, () => {
-    if (!hasModalLayer()) setSidebar(!sidebarOpen);
+    if (layerCount() > (overlayOpen ? 1 : 0)) return;
+    setSidebar(!sidebarOpen);
   });
 
   // The toggle that was pressed may have unmounted: opening a docked sidebar from the top bar puts
