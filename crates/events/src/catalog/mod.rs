@@ -81,9 +81,14 @@ pub enum EventKind {
     },
     #[serde(rename = "agent.message")]
     AgentMessage { role: MessageRole, content: String },
-    /// Live-only incremental output; never stored or replayed.
+    /// Live-only incremental output of a conversation's root runs (a child
+    /// run's output is only in `agent.run_delta`); never stored or replayed.
     #[serde(rename = "agent.delta")]
     AgentDelta { text: String },
+    /// Live-only incremental output of one run (`agent_id` is the run id),
+    /// for every run, root and child; never stored or replayed.
+    #[serde(rename = "agent.run_delta")]
+    AgentRunDelta { agent_id: EntityId, text: String },
     #[serde(rename = "agent.subagent.created")]
     AgentSubagentCreated {
         child_session_id: EntityId,
@@ -420,6 +425,7 @@ pub const EVENT_NAMES: &[&str] = &[
     "agent.started",
     "agent.message",
     "agent.delta",
+    "agent.run_delta",
     "agent.subagent.created",
     "agent.error",
     "agent.retry",
@@ -503,6 +509,7 @@ impl EventKind {
             Self::AgentStarted { .. } => "agent.started",
             Self::AgentMessage { .. } => "agent.message",
             Self::AgentDelta { .. } => "agent.delta",
+            Self::AgentRunDelta { .. } => "agent.run_delta",
             Self::AgentSubagentCreated { .. } => "agent.subagent.created",
             Self::AgentError { .. } => "agent.error",
             Self::AgentRetry { .. } => "agent.retry",
@@ -572,9 +579,13 @@ impl EventKind {
     }
 
     /// Durable events are stored, get a cursor, and replay. Ephemeral events
-    /// (`agent.delta`, `process.output`) are delivered to live subscribers only.
+    /// (`agent.delta`, `agent.run_delta`, `process.output`) are delivered to live
+    /// subscribers only.
     pub fn is_durable(&self) -> bool {
-        !matches!(self, Self::AgentDelta { .. } | Self::ProcessOutput { .. })
+        !matches!(
+            self,
+            Self::AgentDelta { .. } | Self::AgentRunDelta { .. } | Self::ProcessOutput { .. }
+        )
     }
 }
 

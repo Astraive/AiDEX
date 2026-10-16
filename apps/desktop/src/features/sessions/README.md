@@ -1,10 +1,10 @@
 # Sessions feature
 
-Owns Session history (`history` route): every chat and agent run, grouped by day (Today, Yesterday, Earlier).
+Owns Session history (`history` route) and the shared live session list.
 
-- `HistoryPage` shows a local search field, a kind filter (All · Chat · Agent), and the grouped list. Each row opens its chat or agent run with the session id. An empty state offers "Clear filters".
-- `HistorySidebar` holds the Filter section (with counts) and the Workspaces section.
-- `HistoryMessages` pages through stored messages (`history.list`, 20 at a time) and renders them with the chat feature's `Transcript`, so tool calls, artifacts, and plans look as they do in the conversation (rows whose result is on another page show no status). Agent execution details and a conversation's "Earlier messages" use it.
-- Filters live in the route so page and sidebar stay in sync: `route.tab` is the kind (`all`, `chat`, `agent`) and `route.id` is a workspace id. `historyFilters.ts` validates both, since `pageTabs` has no history entry; unknown values fall back to all sessions.
+- `HistoryPage` renders `LiveHistoryPage`: saved conversations from `conversation.list`, 50 per page with Previous and Next and the total. Search filters the current page. Each row opens its chat or agent conversation, and can be pinned or have its history deleted (after a confirmation; project files are kept). Locked conversations ask for the vault to be unlocked.
+- `HistoryMessages` pages through stored messages (`history.list`, 20 at a time) and renders them with the chat feature's `Transcript`, so tool calls, artifacts, and plans look as they do in the conversation (rows whose result is on another page show no status). With `live` it re-reads the page every second, and once more when `live` turns off. The execution page and a conversation's "Earlier messages" use it.
+- `LiveSessionSidebar` lists recent conversations (refreshed every 2 s) for the chat, agent, execution, history and checkpoints pages; `HistorySidebar` uses it.
+- `pageRange.ts` formats "21–40 of 75" labels (an empty page reads "0 of N").
 
-Sessions come from the shared sample data in `../../lib/sample/sessions.ts` until AiDEX Core exposes session history.
+Tests (`pageRange.test.ts`, `node:test`) run with `bun test src/features/sessions`.

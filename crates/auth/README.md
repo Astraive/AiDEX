@@ -51,6 +51,14 @@ consent clear credentials and require sign-in. Disconnect cancels owned flows,
 attempts renewable-session revocation with bounded retries, clears local tokens,
 and retains the account registration. Unconfirmed remote revocation is reported.
 
+`account_binding(provider)` returns a value-free SHA-256 over the provider id
+and the verified issuer, subject and issued client id of the encrypted profile.
+Token refresh does not change it; another account or registration does. It is
+backend-only (never an RPC result) and lets a caller bind a resumed run or an
+approval to the account that started it. It fails closed: `auth_not_found`
+without a profile, `reauthorization_required` while signed out or awaiting
+sign-in, `invalid_identity_token` when the verified identity is incomplete.
+
 The daemon must retain its single-instance ownership of the vault. This service
 does not provide a cross-process token-refresh lock for independently embedded
 consumers.

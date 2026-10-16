@@ -47,6 +47,7 @@ impl NativeEngine {
             .tools
             .plan(&context, &tool, input)
             .map_err(|e| e.to_string())?;
+        // Desktop inspection publishes no process events.
         let launcher = Arc::new(NativeLauncher::new(
             self.broker.sandbox.clone(),
             self.broker
@@ -56,6 +57,8 @@ impl NativeEngine {
                 .join("inspection-processes"),
             plan.fingerprint(),
             aidex_sandbox::SandboxLevel::Brokered,
+            Arc::clone(&context.events),
+            context.scope(),
         ));
         let context = context.with_launcher(launcher);
         let output = self

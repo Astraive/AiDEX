@@ -1,9 +1,9 @@
-import { useEffect } from "react";
 import { SidebarItem, SidebarSection } from "@aidex/ui/desktop";
 import { ChatIcon, ClockIcon, LockIcon, PlusIcon } from "@aidex/ui/icons";
 import { Text } from "@aidex/ui/primitives";
 import { useNavigation } from "../../app/providers/navigation";
 import { usePreferences } from "../../app/providers/preferences";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 import { SectionSidebar } from "../../layouts/SectionSidebar";
 import type { PageId } from "../../lib/routes";
@@ -20,10 +20,8 @@ export function LiveSessionSidebar({
   const { route, navigate } = useNavigation();
   const { setPendingPrompt, setPendingAttachments } = usePreferences();
   const sessions = useRpc("conversation.list");
-  useEffect(() => {
-    const timer = setInterval(sessions.refetch, 2000);
-    return () => clearInterval(timer);
-  }, [sessions.refetch]);
+  // Listing decrypts every conversation: only while the user is present.
+  usePoll(sessions.refetch, 2000);
   return (
     <SectionSidebar title={title ?? (agent ? "Agents" : "Conversations")}>
       <SidebarSection title="Start">

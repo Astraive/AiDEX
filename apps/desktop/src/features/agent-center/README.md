@@ -1,10 +1,12 @@
 # Agent center feature
 
-Owns the Agents catalog (`agents` route) and Agent configuration (`agent-config` route, `id` = agent id).
+Owns the Agents catalog (`agents` route) and AiDEX Native's configuration (`agent-config` route, `id` = `native`). Everything is live from AiDEX Core and composed from `@aidex/ui`.
 
-- `AgentCenterPage` shows built-in agents as `BuiltInAgentCard`s (Configure, Set as default) and optional external runtimes in `ExternalRuntimeList` (Configure or Install, plus Add custom runtime). The default agent is local page state for this session.
-- `AgentConfigPage` edits one agent through `AgentConfigForm`: instructions, default and fallback model, permissions (`PermissionsSection`), and harness limits (`HarnessSection`). The form validates the step and timeout limits. Save shows a Preview toast; Reset restores the sample defaults. Unknown ids fall back to AiDEX Native.
-- `AgentCenterSidebar` is shared by both pages. The agent being configured is the active item.
-- `useAgentActions` holds navigation and Preview actions shared by the catalog and the sidebar.
+- `AgentCenterPage`: AiDEX Native as an `EntityCard` (Configure, Set as default) and the configured agent runtimes from the shared catalog (`useProviderCatalog()`: `runtime.list`, `runtime.catalog`, `runtime.health`), each with its status (`runtimeSummary`, the same copy as Models → Providers), Configure, and Set as default. Configure on a runtime, Manage runtimes, and Add a runtime open Models → Providers (`runtime:<id>`), which owns runtime settings, sign-in, and removal.
+- The default agent is the saved default model for new chats (`AppPreferences.model_id`): a native key (or none, which uses the Models default) makes AiDEX Native the default; Set as default on a runtime saves `runtime:<id>/default` (`runtimeModelKey` with `RUNTIME_DEFAULT_MODEL`), so new chats use that runtime with its own default model. A disabled runtime cannot become the default. Nothing else is persisted for agents.
+- `AgentConfigPage`: AiDEX Native's defaults through `AgentConfigForm` once the preferences have loaded. Any other `id` (an older link to a runtime) opens that runtime in Models → Providers.
+- `AgentConfigForm`: the defaults new conversations copy into their own configuration (`chat/sessionConfig.ts`), saved with `settings.set` (`preferences.updateSettings`): Default model (every model in the picker catalog, native and runtime; empty uses the Models default), Fallback model (native chat models, `fallbackModelOptions`), the permission for Plan and Agent (`permissionChoices`, described as the harness applies it), instructions, and the step and token limits. Save and Discard changes are enabled only when something changed; an invalid field is focused on Save. A conversation that already exists keeps its own copy, changed in its Conversation settings.
+- `nativeDefaults.ts` (pure): the draft, `validateNativeDefaults` (bounds shared with the conversation settings in `chat/sessionSettings.ts`: 1–128 steps, 1–32,768 output tokens, 32 KiB of UTF-8 instructions, a native `provider/model` fallback, a parseable default model key), and the `settings.set` patch.
+- `AgentCenterSidebar`: AiDEX Native, then the configured runtimes (opening Models → Providers), and Add runtime. Shared by both pages.
 
-Agents, runtimes, and their settings are sample data in `sample.ts` until AiDEX Core exposes the agent registry and runtime adapters. Nothing is installed or saved.
+`nativeDefaults.test.ts` runs with `bun run --cwd apps/desktop test`.

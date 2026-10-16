@@ -37,6 +37,12 @@ use std::{
 
 /// Default time a `call` waits for its response.
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Time `update.check`, `update.apply`, and `update.rollback` are given. They re-verify, stage,
+/// and hash a whole bundle and run its self-tests (up to a minute per command), which can take
+/// minutes on a USB drive; the daemon keeps working when a caller stops waiting, so a shorter
+/// limit only reports a failure for an update that still completes. Frontends send these on a
+/// connection of their own, so other calls do not queue behind them.
+pub const UPDATE_CALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);

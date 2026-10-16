@@ -20,16 +20,15 @@ export type PageId =
   | "settings";
 
 /**
- * Pages whose content is still sample data because their backend has not landed (workspaces #11,
- * sessions #12, models #14/#15, agents #19/#23, remote #29). The shell labels them.
- * Home, Settings, and Security mix live Core data with labelled samples and say so themselves.
+ * Pages whose whole content is sample data because their backend has not landed; the shell labels
+ * them with a "Sample data" badge. None is left. What is not live yet says so where it appears:
+ * Settings → Drive labels its host cleanup report as a sample (#28), actions without a backend show
+ * a "Preview" toast, and Remote access (#29) says it is coming soon. Review changes shows the live
+ * Checkpoints page until AiDEX Core exposes workspace diffs.
  */
-export const samplePages: ReadonlySet<PageId> = new Set<PageId>([
-  "agents",
-  "agent-config",
-]);
+export const samplePages: ReadonlySet<PageId> = new Set<PageId>();
 
-/** `tab` selects a section within a page; `id` names the record a page shows (workspace, agent, model). */
+/** `tab` selects a section within a page; `id` names the record a page shows (workspace, conversation, agent, model). */
 export type Route = { page: PageId; tab?: string; id?: string };
 
 export const pageTitles: Record<PageId, string> = {
@@ -78,7 +77,7 @@ export function tabOf<Page extends TabbedPage>(
   ) as PageTab<Page>;
 }
 
-/** Pages whose `id` is an in-page selection (a file, a checkpoint, a filter, a provider, a skill) rather than the record shown. */
+/** Pages whose `id` is an in-page selection (the conversation picked on Review changes or Checkpoints, a provider, a skill, MCP server, or plugin) rather than the record shown. */
 const selectionPages: ReadonlySet<PageId> = new Set([
   "review",
   "checkpoints",

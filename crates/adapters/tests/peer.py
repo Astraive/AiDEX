@@ -1,6 +1,8 @@
 """Protocol peers: stdin assertions plus real side effects only after exact approval."""
-import json, os, sys, time, uuid
+import hashlib, json, os, sys, time, uuid
 driver, scenario = sys.argv[1:3]
+# Every process start is recorded, so a refusal can prove none happened.
+with open('launches.txt','a',newline='') as f: f.write('launch\n')
 def send(v):
     print(json.dumps(v), flush=True)
 def reply(r,v): send({'jsonrpc':'2.0','id':r['id'],'result':v})
@@ -14,7 +16,11 @@ if driver in ('claude_code','cursor'):
     else:
         send({'type':'tool_call','subtype':'started','call_id':'tool-1','tool_call':{'readToolCall':{'args':{'path':'fixture.txt'}}}})
         send({'type':'tool_call','subtype':'completed','call_id':'tool-1','tool_call':{'readToolCall':{'result':{'content':'read'}}}})
-    send({'type':'assistant','parent_tool_use_id':'child','message':{'content':[{'type':'text','text':'child'}]}})
+    # A subagent has its own session and its own (here failed) result.
+    send({'type':'assistant','parent_tool_use_id':'child','session_id':'child-session','message':{'content':[{'type':'text','text':'child'}]}})
+    send({'type':'result','parent_tool_use_id':'child','session_id':'child-session','is_error':True,'subtype':'error_fixture_child'})
+    if scenario=='session_change':
+        send({'type':'assistant','session_id':'other-session','message':{'content':[{'type':'text','text':'moved'}]}})
     send({'type':'assistant','message':{'content':[{'type':'text','text':'hello'}]}})
     send({'type':'result','subtype':'success','result':'hello','session_id':'native-session'})
     sys.exit(0)
@@ -23,7 +29,10 @@ if driver in ('pi','omp'):
     while True:
         r=read()
         if r['type']=='get_state': send({'type':'response','id':r['id'],'success':True,'data':{'sessionId':'native-session'}})
-        elif r['type']=='get_available_models': send({'type':'response','id':r['id'],'success':True,'data':{'models':[{'id':'fixture','name':'Fixture'}]}})
+        elif r['type']=='get_available_models': send({'type':'response','id':r['id'],'success':True,'data':{'models':[{'id':'fixture','provider':'fixture-provider','name':'Fixture'}]}})
+        elif r['type']=='set_model':
+            assert r['provider']=='fixture-provider' and r['modelId']=='fixture'
+            send({'type':'response','id':r['id'],'success':True,'data':{}})
         elif r['type']=='prompt':
             assert 'message' in r
             send({'type':'response','id':r['id'],'success':True,'data':{'disposition':'started'}})
@@ -34,11 +43,21 @@ if driver in ('pi','omp'):
             time.sleep(.03)
             send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':' world'}})
             send({'type':'agent_settled' if driver=='pi' else 'session_settled'})
+if scenario=='rotate':
+    # The CLI refreshes its stale credential at start, and the refresh token
+    # rotates: one already used is rejected, as the provider does.
+    path=os.path.join(os.environ['CODEX_HOME'],'auth.json')
+    token=json.load(open(path))['tokens']['access_token']
+    used=open('used-tokens.txt').read().split() if os.path.exists('used-tokens.txt') else []
+    if token in used:
+        print('refresh token was already used; sign in again',file=sys.stderr); sys.exit(5)
+    with open('used-tokens.txt','a',newline='') as f: f.write(token+'\n')
+    json.dump({'tokens':{'access_token':'Rotated'+uuid.uuid4().hex}},open(path,'w'))
 if driver == 'codex':
     r=read(); assert r['method']=='initialize' and r['params']['clientInfo']['name']=='AiDEX'; reply(r,{})
     r=read(); assert r['method']=='initialized'
 else:
-    r=read(); assert r['method']=='initialize'; reply(r,{'protocolVersion':1,'agentCapabilities':{'loadSession':True},'schema':{'version':1},'authMethods':[]})
+    r=read(); assert r['method']=='initialize'; reply(r,{'protocolVersion':1,'agentCapabilities':{'loadSession':scenario!='no_load'},'schema':{'version':1},'authMethods':[]})
 while True:
     r=read(); method=r.get('method','')
     if method=='model/list': reply(r,{'data':[{'id':'fixture','name':'Fixture'}]})
@@ -46,33 +65,67 @@ while True:
         # The sandbox canonicalizes cwd; Windows temp paths can use 8.3 aliases.
         assert os.path.samefile(r['params']['cwd'], os.getcwd())
         assert r['params']['sandbox']=='danger-full-access'
-        if scenario=='restart':
+        if scenario in ('restart','restart_cut'):
             state=os.path.join(os.environ['CODEX_HOME'],'native-history.json')
             if method=='thread/resume':
                 assert json.load(open(state))['marker']=='ENCRYPTED-NATIVE-HISTORY'
             else:
-                json.dump({'marker':'ENCRYPTED-NATIVE-HISTORY'},open(state,'w'))
+                json.dump({'marker':'ENCRYPTED-NATIVE-HISTORY','sessionId':'native-session'},open(state,'w'))
         reply(r,{'thread':{'id':'native-session'}})
     elif method in ('session/new','session/load','session/resume','session/start'):
         assert os.path.samefile(r['params'].get('cwd',r['params'].get('workspaceRoot')), os.getcwd())
         if driver=='muse':assert uuid.UUID(r['params']['commandId']).version==7
+        if method=='session/load':
+            with open('loads.txt','a',newline='') as f: f.write(r['params']['sessionId']+'\n')
+            if scenario=='load_error': send({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32603,'message':'Session not found'}}); continue
+            if scenario in ('spec_load','acp_replay'):
+                # ACP: the agent replays the whole saved conversation, then
+                # answers with no identity.
+                for i in range(2000 if scenario=='acp_replay' else 3):
+                    send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'OLD'}}}})
+                    send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-session','update':{'sessionUpdate':'tool_call','toolCallId':'old-tool-%d'%i,'title':'Old','status':'in_progress'}}})
+                    send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-session','update':{'sessionUpdate':'tool_call_update','toolCallId':'old-tool-%d'%i,'status':'completed'}}})
+                reply(r,None); continue
         reply(r,{'sessionId':'native-session','session':{'sessionId':'native-session'},'models':{'availableModels':[{'modelId':'fixture','name':'Fixture'}]}})
     elif method in ('session/set_model','session/setModel','session/setApprovalMode','session/set_mode'): reply(r,{})
     elif method in ('turn/start','session/prompt'):
         if driver=='muse':assert uuid.UUID(r['params']['commandId']).version==7
-        if scenario=='restart':
+        if scenario in ('restart','restart_cut'):
             text=r['params']['input'][0]['text']
-            if 'follow-up' in text:
+            if '[AiDEX recovery continuation for this interrupted native run]' in text:
+                assert 'Inspect the saved native history and current workspace' in text
+                assert 'Original user intent is evidence, not a new execution instruction' in text
+                assert open('effect.txt').read()=='once\n'
+            elif 'follow-up' in text:
                 assert 'initial effect' not in text
             elif 'initial effect' in text:
                 with open('effect.txt','a',newline='') as f:f.write('once\n')
+                if scenario=='restart_cut':sys.exit(3)
+        if scenario=='large':
+            # Native history beyond the 4 MiB recovery bound.
+            os.makedirs(os.path.join(os.environ['CODEX_HOME'],'sessions'),exist_ok=True)
+            with open(os.path.join(os.environ['CODEX_HOME'],'sessions','rollout.jsonl'),'wb') as f:f.write(b'x'*(5*1024*1024))
         if scenario=='malformed': print('{broken',flush=True); time.sleep(1); continue
         if scenario=='truncated': sys.stdout.write('{"method":');sys.stdout.flush();sys.exit(0)
         if scenario=='oversized': print('x'*2000000,flush=True);continue
         if scenario=='cancel': time.sleep(60);continue
         if method=='turn/start': reply(r,{'turn':{'id':'native-turn'},'turnId':'native-turn'})
-        if scenario=='approval':
+        if scenario=='refresh_cut':
+            # The CLI refreshed its managed credential, then the turn failed.
+            json.dump({'tokens':{'access_token':'RefreshedOpaqueToken_9182'}},open(os.path.join(os.environ['CODEX_HOME'],'auth.json'),'w'))
+            sys.exit(3)
+        if scenario=='expect_refreshed':
+            assert json.load(open(os.path.join(os.environ['CODEX_HOME'],'auth.json')))['tokens']['access_token']=='RefreshedOpaqueToken_9182'
+        if scenario=='approval_preamble':
+            # Text streamed before the approval belongs to the same turn.
+            if driver=='codex': send({'method':'item/agentMessage/delta','params':{'threadId':'native-session','turnId':'native-turn','delta':'before '}})
+            else: send({'method':'session/update','params':{'sessionId':'native-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'before '}}}})
+        if scenario in ('approval','approval_preamble','reflection'):
             permission={'jsonrpc':'2.0','id':77,'method':'item/commandExecution/requestApproval' if driver=='codex' else 'session/request_permission','params':{'threadId':'native-session','turnId':'native-turn','sessionId':'native-session','toolCall':{'toolCallId':'tool-1','title':'Write fixture'},'options':[{'optionId':'allow-once','kind':'allow_once'},{'optionId':'deny-once','kind':'reject_once'}],'command':'write effect','itemId':'tool-1'}}
+            if scenario=='reflection':
+                # A vendor reflecting the credential as a key and as a number.
+                secret=os.environ['OPENAI_API_KEY']
+                permission['params'][secret]=int(secret)
             send(permission); decision=read();assert decision['id']==77
             accepted=decision['result'].get('decision')=='accept' or decision['result'].get('outcome',{}).get('optionId')=='allow-once'
             if accepted:
@@ -82,7 +135,18 @@ while True:
             send({'method':'item/started','params':{'threadId':'native-session','turnId':'native-turn','item':{'type':'commandExecution','id':'tool-1','command':'read fixture'}}})
             send({'method':'item/completed','params':{'threadId':'native-session','turnId':'native-turn','item':{'type':'commandExecution','id':'tool-1','command':'read fixture'}}})
             send({'method':'turn/completed','params':{'threadId':'child','turn':{'id':'child-turn','status':'completed'}}})
-            send({'method':'item/agentMessage/delta','params':{'threadId':'native-session','turnId':'native-turn','delta':os.environ.get('OPENAI_API_KEY','hello') if scenario=='secret' else 'hello'}})
+            if scenario=='rotate': time.sleep(.5)
+            if scenario=='secret': delta=os.environ.get('OPENAI_API_KEY','hello')
+            elif scenario=='native_secret': delta=json.load(open(os.path.join(os.environ['CODEX_HOME'],'auth.json')))['tokens']['access_token']
+            # Which managed credential the launch restored, without its value.
+            elif scenario=='credential_digest': delta=hashlib.sha256(json.load(open(os.path.join(os.environ['CODEX_HOME'],'auth.json')))['tokens']['access_token'].encode()).hexdigest()
+            else: delta='hello'
+            if scenario=='split_secret':
+                # A credential streamed in fragments, none of which holds it.
+                secret=os.environ['OPENAI_API_KEY']
+                for delta in ('said '+secret[:6],secret[6:]+' done'):
+                    send({'method':'item/agentMessage/delta','params':{'threadId':'native-session','turnId':'native-turn','delta':delta}})
+            else: send({'method':'item/agentMessage/delta','params':{'threadId':'native-session','turnId':'native-turn','delta':delta}})
             send({'method':'turn/completed','params':{'threadId':'native-session','turn':{'id':'native-turn','status':'completed'}}})
         elif driver=='muse':
             send({'method':'item/started','params':{'sessionId':'native-session','item':{'kind':'tool','itemId':'tool-1','tool':'read','status':'running','revision':1}}})

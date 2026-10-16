@@ -17,6 +17,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 pub type StoreError = String;
+/// Vault secret holding the native record encryption key. AiDEX creates and
+/// uses it; clients must not replace or delete it.
+pub const NATIVE_RECORD_KEY_SECRET: &str = "native-record-encryption-key";
 pub struct SessionStore {
     pub(crate) db: Mutex<Connection>,
     vault: Arc<VaultService>,
@@ -80,7 +83,7 @@ impl SessionStore {
         })
     }
     pub(crate) fn key(&self) -> Result<SecretBytes, StoreError> {
-        let name = SecretName::new("native-record-encryption-key").map_err(|e| e.to_string())?;
+        let name = SecretName::new(NATIVE_RECORD_KEY_SECRET).map_err(|e| e.to_string())?;
         let consumer = ConsumerScope::process("native-record-store").map_err(|e| e.to_string())?;
         match self.vault.secret_meta(&name) {
             Ok(_) => {}
@@ -271,7 +274,10 @@ impl SessionStore {
     /// tools, attachments). Options are part of the command fingerprint.
     ///
     /// A repeated command id with the same arguments returns the original run
-    /// before anything else is checked. For a new command, attachment ids must
+    /// before anything else is checked. A new root run is refused while
+    /// another root run of the session is active, and a new child unless its
+    /// parent is an active run of the session (both checked in the
+    /// transaction that records the run). For a new command, attachment ids must
     /// be distinct staged attachments of the session (`attachment_unavailable`
     /// otherwise; also for a child run); in the same transaction as the new
     /// message they become `sent` with the run, command and message index.
@@ -338,6 +344,13 @@ impl SessionStore {
                 return Err(AttachmentReason::AttachmentUnavailable
                     .error("attachments can only be sent with a conversation message"));
             }
+            // Checked where the child is recorded: a parent cancelled or
+            // settled since its caller looked never gains a child.
+            if let Some(parent) = &parent
+                && !s.runs.iter().any(|r| r.id == *parent && r.status.active())
+            {
+                return Err("child requires an active parent".into());
+            }
             let content = if content.trim().is_empty() {
                 ATTACHMENT_ONLY_CONTENT
             } else {
@@ -376,6 +389,9 @@ impl SessionStore {
                 mode: Some(s.configuration.mode),
                 permission_mode: Some(s.configuration.permission_mode),
                 workspace_id: s.configuration.workspace_id.clone(),
+                inference_retries: 0,
+                context_trimmed_messages: 0,
+                tool_outputs: Vec::new(),
             };
             if !run.attachments.is_empty() {
                 self.link_attachments(db, s, &run.attachments, command, &run.id, s.messages.len())?;
@@ -417,16 +433,62 @@ impl SessionStore {
         Ok(result)
     }
     pub fn run(&self, id: &str) -> Result<Run, StoreError> {
-        let session: String = {
-            let db = self.db.lock().map_err(|_| "session store poisoned")?;
-            db.query_row("SELECT session_id FROM runs WHERE id=?", [id], |r| r.get(0))
-                .map_err(|e| e.to_string())?
-        };
+        let session = self.session_of(id)?;
         self.get(&session)?
             .runs
             .into_iter()
             .find(|r| r.id == id)
             .ok_or("run not found".into())
+    }
+    /// Use one step of the run's budget for an inference retry and count it in
+    /// [`Run::inference_retries`], in one transaction. Refused, with nothing
+    /// written, once the run has used `max_steps` steps or is no longer active
+    /// (a cancel stops further retries). Returns the run's retry count.
+    pub fn reserve_inference_retry(&self, run_id: &str) -> Result<u32, StoreError> {
+        let session = self.session_of(run_id)?;
+        self.update(&session, |s| {
+            let maximum = s.configuration.max_steps;
+            let run = s
+                .runs
+                .iter_mut()
+                .find(|r| r.id == run_id)
+                .ok_or("run not found")?;
+            if !run.status.active() {
+                return Err("run is no longer active".into());
+            }
+            if run.steps >= maximum {
+                return Err("native run step budget exhausted before inference retry".into());
+            }
+            run.steps += 1;
+            run.inference_retries = run.inference_retries.saturating_add(1);
+            Ok(run.inference_retries)
+        })
+    }
+    /// Record that a request of the run left `trimmed` older messages out of its
+    /// replay view. [`Run::context_trimmed_messages`] keeps the largest count of
+    /// any request; zero writes nothing.
+    pub fn record_context_trim(&self, run_id: &str, trimmed: u32) -> Result<(), StoreError> {
+        if trimmed == 0 {
+            return Ok(());
+        }
+        let session = self.session_of(run_id)?;
+        self.update(&session, |s| {
+            let run = s
+                .runs
+                .iter_mut()
+                .find(|r| r.id == run_id)
+                .ok_or("run not found")?;
+            run.context_trimmed_messages = run.context_trimmed_messages.max(trimmed);
+            Ok(())
+        })
+    }
+    /// The session a run belongs to, from the plaintext run metadata.
+    fn session_of(&self, run_id: &str) -> Result<String, StoreError> {
+        let db = self.db.lock().map_err(|_| "session store poisoned")?;
+        db.query_row("SELECT session_id FROM runs WHERE id=?", [run_id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())
     }
     pub fn run_summaries(&self) -> Result<Vec<RunSummary>, StoreError> {
         let db = self.db.lock().map_err(|_| "session store poisoned")?;

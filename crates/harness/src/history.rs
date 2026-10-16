@@ -164,17 +164,22 @@ pub(crate) fn flatten_tool_history(
 }
 
 /// Drop assistant messages with no text and no tool calls from
-/// `messages[start..]`.
-pub(crate) fn drop_empty_assistants(messages: &mut Vec<ChatMessage>, start: usize) {
-    let mut index = 0;
-    messages.retain(|message| {
-        let keep = index < start
-            || message.role != Role::Assistant
-            || !message.tool_calls.is_empty()
-            || !message.content.trim().is_empty();
-        index += 1;
-        keep
-    });
+/// `messages[start..]`. Returns, for each message it was given, whether it
+/// was kept.
+pub(crate) fn drop_empty_assistants(messages: &mut Vec<ChatMessage>, start: usize) -> Vec<bool> {
+    let kept: Vec<bool> = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            index < start
+                || message.role != Role::Assistant
+                || !message.tool_calls.is_empty()
+                || !message.content.trim().is_empty()
+        })
+        .collect();
+    let mut flags = kept.iter();
+    messages.retain(|_| flags.next().copied().unwrap_or(true));
+    kept
 }
 
 /// A tool name for display: tool names are identifiers, anything else is
@@ -406,7 +411,8 @@ mod tests {
             assistant(vec![call("c1", "fs_read")]),
             ChatMessage::tool_result("c1", ""),
         ];
-        drop_empty_assistants(&mut messages, 1);
+        let kept = drop_empty_assistants(&mut messages, 1);
+        assert_eq!(kept, [true, true, false, true, false, true, true]);
         let roles: Vec<Role> = messages.iter().map(|m| m.role).collect();
         assert_eq!(
             roles,

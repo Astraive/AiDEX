@@ -7,6 +7,7 @@ import type {
   SessionConfig,
 } from "@aidex/client/dto/sessions";
 import type { ModelTarget } from "../model-manager/catalog/modelKeys";
+import { draftOf, settingsOf, type SessionSettings } from "./sessionSettings";
 
 /** The model fields a conversation is bound to today. */
 export function sessionTargetOf(
@@ -30,6 +31,11 @@ export type SessionConfigInput = {
   isRegisteredWorkspace: (id: string) => boolean;
   target: ModelTarget;
   permission: PermissionMode;
+  /**
+   * New instructions, fallback, or limits (the conversation settings dialog). A field left out keeps
+   * the conversation's value; `fallback_model: null` removes its fallback.
+   */
+  overrides?: Partial<SessionSettings>;
 };
 
 /** Builds and checks a complete configuration; throws an `Error` with user-facing text when it cannot run. */
@@ -41,6 +47,32 @@ export function buildSessionConfig(input: SessionConfigInput): SessionConfig {
     throw new Error("Choose a registered project or No project context.");
   // A conversation keeps its own values, including an explicit null fallback; `??` would let the
   // global preference leak into it on every edit.
+  const kept: SessionSettings = session
+    ? {
+        instructions: session.instructions ?? defaults.instructions,
+        fallback_model: session.fallback_model ?? null,
+        max_steps: session.max_steps ?? defaults.max_steps,
+        max_tokens: session.max_tokens ?? defaults.max_tokens,
+      }
+    : {
+        instructions: defaults.instructions,
+        fallback_model: defaults.fallback_model,
+        max_steps: defaults.max_steps,
+        max_tokens: defaults.max_tokens,
+      };
+  const { overrides } = input;
+  // Checked like the daemon's `SessionConfig::validate`, so a bad value is refused with field wording.
+  const settings = overrides
+    ? settingsOf(
+        draftOf({
+          instructions: overrides.instructions ?? kept.instructions,
+          fallback_model:
+            overrides.fallback_model !== undefined ? overrides.fallback_model : kept.fallback_model,
+          max_steps: overrides.max_steps ?? kept.max_steps,
+          max_tokens: overrides.max_tokens ?? kept.max_tokens,
+        }),
+      )
+    : kept;
   return {
     title: session ? session.title : input.title,
     workspace_id: workspaceId || null,
@@ -49,11 +81,32 @@ export function buildSessionConfig(input: SessionConfigInput): SessionConfig {
     model_id: target.model_id,
     runtime_id: target.runtime_id,
     permission_mode: input.permission,
-    instructions: session ? session.instructions : defaults.instructions,
-    fallback_model: session ? (session.fallback_model ?? null) : defaults.fallback_model,
-    max_steps: session ? session.max_steps : defaults.max_steps,
-    max_tokens: session ? session.max_tokens : defaults.max_tokens,
+    ...settings,
   };
+}
+
+/**
+ * A settings-only write (Conversation settings): the stored conversation with new instructions,
+ * fallback, or limits. Mode, project, permission, and model come from `session` itself, never from page
+ * state, so a page that has not synced them yet cannot rewrite them. A project removed from the
+ * registry since is sent as stored, and the daemon refuses it rather than dropping it silently.
+ */
+export function settingsConfiguration(
+  session: SessionConfig,
+  defaults: AppPreferences,
+  settings: Partial<SessionSettings>,
+): SessionConfig {
+  return buildSessionConfig({
+    session,
+    defaults,
+    title: session.title,
+    mode: session.mode,
+    workspaceId: session.workspace_id ?? "",
+    isRegisteredWorkspace: (id) => id === session.workspace_id,
+    target: sessionTargetOf(session),
+    permission: session.permission_mode,
+    overrides: settings,
+  });
 }
 
 /** Whether two configurations differ in what a run uses: model, runtime, mode, project, or permissions. */

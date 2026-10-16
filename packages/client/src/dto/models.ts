@@ -145,6 +145,9 @@ export type ModelInput = { images: boolean; pdf: boolean };
 
 export type NetworkState = "online" | "offline";
 
+/** Result of `network.status` and `network.offline` (`aidexd::methods::models::NetworkStatus`). */
+export type NetworkStatus = { offline: boolean; network: NetworkState };
+
 export type ModelList = {
   models: ProviderModel[];
   failures: ProviderFailure[];

@@ -6,10 +6,18 @@
 //! failed check reconnects before the real call is sent. A call that fails at the
 //! connection level drops the connection, and the next call reconnects. A failed call
 //! is never re-sent, so no request can run twice.
+//!
+//! The methods in [`LONG_CALL_METHODS`] can run for minutes. [`call_long`] sends each on a
+//! connection of its own with [`UPDATE_CALL_TIMEOUT`], so they never hold the shared slot
+//! (every other screen would wait behind them) and never hit its 60 s limit, which would
+//! drop the shared connection and report a failure for an update the daemon still finishes.
 
 use crate::error::{kind, BridgeError};
 use aidex_core::ServiceErrorCode;
-use aidexd::{Client, ClientInfo};
+use aidexd::{
+    client::{DEFAULT_CALL_TIMEOUT, UPDATE_CALL_TIMEOUT},
+    Client, ClientInfo,
+};
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
@@ -23,6 +31,8 @@ pub const CLIENT_NAME: &str = "aidex-desktop";
 pub const HEALTH_CHECK_AFTER: Duration = Duration::from_secs(5);
 const PING_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_METHOD_LEN: usize = 128;
+/// Methods [`call_long`] accepts: they verify, stage, hash, and self-test a whole bundle.
+pub const LONG_CALL_METHODS: &[&str] = &["update.check", "update.apply", "update.rollback"];
 
 struct Live {
     root: PathBuf,
@@ -31,12 +41,30 @@ struct Live {
 }
 
 /// The shared call connection.
-#[derive(Default)]
 pub struct Connection {
     slot: Mutex<Option<Live>>,
+    call_timeout: Duration,
+}
+
+impl Default for Connection {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(None),
+            call_timeout: DEFAULT_CALL_TIMEOUT,
+        }
+    }
 }
 
 impl Connection {
+    /// A connection whose calls wait `call_timeout` (tests use a short one).
+    #[cfg(test)]
+    pub fn with_call_timeout(call_timeout: Duration) -> Self {
+        Self {
+            call_timeout,
+            ..Self::default()
+        }
+    }
+
     /// Call `method` on the daemon serving `root`.
     pub fn call(&self, root: &Path, method: &str, params: Value) -> Result<Value, BridgeError> {
         validate_method(method)?;
@@ -67,7 +95,10 @@ impl Connection {
         let Some(live) = slot.as_mut() else {
             return Err(BridgeError::internal("daemon connection unavailable"));
         };
-        let outcome = live.client.call(method, params).map_err(BridgeError::from);
+        let outcome = live
+            .client
+            .call_with_timeout(method, params, self.call_timeout)
+            .map_err(BridgeError::from);
         live.last_used = Instant::now();
         if outcome
             .as_ref()
@@ -90,6 +121,34 @@ impl Connection {
     pub fn is_connected(&self) -> bool {
         self.slot.lock().is_ok_and(|slot| slot.is_some())
     }
+}
+
+/// Call one of [`LONG_CALL_METHODS`] on the daemon serving `root`, on a connection of its
+/// own that waits up to [`UPDATE_CALL_TIMEOUT`] and is closed afterwards. Any other method is
+/// refused: it belongs on the shared connection ([`Connection::call`]).
+pub fn call_long(root: &Path, method: &str, params: Value) -> Result<Value, BridgeError> {
+    if !LONG_CALL_METHODS.contains(&method) {
+        return Err(BridgeError::new(
+            ServiceErrorCode::InvalidArgument,
+            kind::INVALID_METHOD,
+            format!("`{method}` is not a long-running method; call it with `rpc_call`"),
+        ));
+    }
+    call_dedicated(root, method, params, UPDATE_CALL_TIMEOUT)
+}
+
+/// Send one call on a new connection that is dropped afterwards. The shared slot is never
+/// touched, so other calls keep flowing while it runs.
+pub(crate) fn call_dedicated(
+    root: &Path,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, BridgeError> {
+    validate_method(method)?;
+    connect(root)?
+        .call_with_timeout(method, params, timeout)
+        .map_err(BridgeError::from)
 }
 
 /// Open a new authenticated connection to the daemon serving `root`.
@@ -157,6 +216,26 @@ mod tests {
             let error = validate_method(invalid).unwrap_err();
             assert_eq!(error.kind, kind::INVALID_METHOD, "{invalid}");
             assert_eq!(error.code, "invalid_argument");
+        }
+    }
+
+    #[test]
+    fn long_calls_accept_only_the_update_operations() {
+        let root = tempfile::tempdir().unwrap();
+        for method in [
+            "daemon.status",
+            "update.status",
+            "vault.lock",
+            "update.apply.extra",
+        ] {
+            let error = call_long(root.path(), method, Value::Null).unwrap_err();
+            assert_eq!(error.kind, kind::INVALID_METHOD, "{method}");
+            assert_eq!(error.code, "invalid_argument");
+        }
+        // Allowed methods get as far as connecting (no daemon runs here).
+        for method in LONG_CALL_METHODS {
+            let error = call_long(root.path(), method, Value::Null).unwrap_err();
+            assert_eq!(error.kind, kind::DAEMON_UNAVAILABLE, "{method}");
         }
     }
 

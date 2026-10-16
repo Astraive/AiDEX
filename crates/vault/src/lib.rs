@@ -32,7 +32,9 @@ pub use error::{HandleDenial, IntegrityTarget, VaultError, VaultErrorKind};
 pub use format::FORMAT_VERSION;
 pub use handles::{MAX_HANDLE_TTL, MAX_HANDLES, SecretHandle};
 pub use kdf::{KdfParams, MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_CHARS};
-pub use model::{MAX_CONSUMERS, MAX_NAME_LEN, SecretKind, SecretMeta, SecretName, SecretPolicy};
+pub use model::{
+    MAX_CONSUMERS, MAX_NAME_LEN, SecretKind, SecretMeta, SecretName, SecretPolicy, SecretVersion,
+};
 pub use observer::{LockNotice, LockReason};
 pub use recovery::RecoveryKey;
 pub use scope::{ConsumerKind, ConsumerScope};

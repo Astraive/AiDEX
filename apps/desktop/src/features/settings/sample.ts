@@ -1,6 +1,6 @@
-// Sample data for the settings that have no backend yet: shortcuts, updates (issue #27), and
-// host residue cleanup (issue #28). Diagnostics and Drive are live. Nothing here is read from,
-// or written to, the drive or the host.
+// Sample data for the settings that have no backend yet: planned shortcuts and host residue cleanup
+// (issue #28). Diagnostics, Drive, and Updates are live. Nothing here is read from, or written to,
+// the drive or the host.
 
 export type Shortcut = {
   id: string;
@@ -17,15 +17,6 @@ export const plannedShortcuts: readonly Shortcut[] = [
   { id: "toggle-sidebar", action: "Toggle sidebar", chord: "Mod+b", wired: false },
   { id: "open-settings", action: "Open settings", chord: "Mod+,", wired: false },
 ];
-
-export const updateChannels = [
-  { value: "stable", label: "Stable" },
-  { value: "beta", label: "Beta" },
-] as const;
-
-export type UpdateChannel = (typeof updateChannels)[number]["value"];
-
-export const sampleVersion = { version: "0.1.0", lastChecked: "Today, 9:02 AM" } as const;
 
 export type ResidueItem = { id: string; label: string; description: string; sizeMb: number };
 

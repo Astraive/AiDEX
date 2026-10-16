@@ -8,6 +8,7 @@
 pub mod contributions;
 mod extensions;
 mod inference;
+mod keep_alive;
 mod mcp;
 mod models;
 mod runtime;
@@ -16,6 +17,7 @@ mod web;
 
 pub use extensions::DaemonExtensions;
 pub use models::{EventsModelObserver, ModelServices, VaultCredentials, model_event_kind};
+pub(crate) use runtime::RuntimeSync;
 pub use web::WebServices;
 
 use crate::{endpoint, lifecycle::ShutdownSignal};
@@ -79,6 +81,8 @@ pub struct Services {
     inference: Arc<aidex_inference::InferenceService>,
     plugins: Arc<aidex_plugins::PluginStore>,
     runtime: Result<Arc<aidex_adapters::RuntimeManager>, String>,
+    runtime_gate: RuntimeGate,
+    runtime_sync: RuntimeSync,
     mcp: Result<Arc<aidex_mcp::McpSupervisor>, String>,
     updates: Result<Arc<Updater>, String>,
     update_recovery: Mutex<Option<Result<UpdateRecovery, String>>>,
@@ -196,14 +200,28 @@ impl Services {
             runtime.join("native-processes"),
             extensions,
         );
-        // Every end of the vault session (lock, idle auto-lock, a dropped session)
-        // cancels native runs, aborts uploads, and records `vault.locked`.
-        vault_lock::clean_up_on_lock(&vault, &native, &events);
-        let inference = inference::open_inference(&paths, &models)?;
         // External runtimes are optional: the daemon starts without them and
         // `runtime.*` reports why they are unavailable.
-        let runtime = runtime::open_runtime(&paths, Arc::clone(&vault), &models)
-            .map_err(|error| error.to_string());
+        let runtime_gate = runtime::runtime_gate(
+            Arc::clone(models.offline()),
+            Arc::downgrade(&vault),
+            Arc::downgrade(&broker),
+        );
+        let runtime = runtime::open_runtime(
+            &paths,
+            Arc::clone(&vault),
+            Arc::clone(&runtime_gate),
+            &models,
+        )
+        .map_err(|error| error.to_string());
+        // Every end of the vault session (lock, idle auto-lock, a dropped session)
+        // cancels native runs, aborts uploads, ends runtime logins and vendor
+        // processes, and records `vault.locked`.
+        vault_lock::clean_up_on_lock(&vault, &native, runtime.as_ref().ok(), &events);
+        // Executing runs count as vault use, so the idle auto-lock waits for
+        // them; a run waiting for an approval does not hold it off.
+        keep_alive::spawn(&vault, &native, &shutdown);
+        let inference = inference::open_inference(&paths, &models)?;
         let updates = open_updates(&paths, &events, updater);
         Ok(Self {
             drive_root: drive_root.to_path_buf(),
@@ -225,6 +243,8 @@ impl Services {
             inference,
             plugins,
             runtime,
+            runtime_gate,
+            runtime_sync: RuntimeSync::default(),
             mcp,
             updates,
             update_recovery: Mutex::new(None),
@@ -320,6 +340,17 @@ impl Services {
     /// opened at startup.
     pub fn runtime(&self) -> Result<&Arc<aidex_adapters::RuntimeManager>, &str> {
         self.runtime.as_ref().map_err(String::as_str)
+    }
+    /// Whether vendor processes may start now: the drive is online, the vault
+    /// is unlocked and no emergency stop is in effect. The runtime manager was
+    /// given this same gate.
+    pub fn runtime_gate_open(&self) -> bool {
+        (self.runtime_gate)()
+    }
+    /// What the daemon keeps about the runtimes it loaded into the engine
+    /// (`methods/runtime.rs`).
+    pub(crate) fn runtime_sync(&self) -> &RuntimeSync {
+        &self.runtime_sync
     }
     /// MCP server supervision (`aidex-mcp`), or why it could not be opened at startup.
     pub fn mcp(&self) -> Result<&Arc<aidex_mcp::McpSupervisor>, &str> {
@@ -497,6 +528,15 @@ impl fmt::Display for ServicesError {
 }
 
 impl std::error::Error for ServicesError {}
+
+/// Whether external runtimes may start vendor processes now.
+type RuntimeGate = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// The gate `services` gave its runtime manager, for tests.
+#[cfg(test)]
+pub(crate) fn runtime_gate_for(services: &Services) -> RuntimeGate {
+    Arc::clone(&services.runtime_gate)
+}
 
 /// Unit-test fixtures for daemon modules.
 #[cfg(test)]

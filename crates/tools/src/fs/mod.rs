@@ -17,8 +17,8 @@ use std::{
 };
 
 use aidex_core::WorkspacePath;
-use aidex_policy::Action;
-use aidex_workspace::{Access, parse_workspace_path};
+use aidex_policy::{Action, PathClass, PathScope};
+use aidex_workspace::{Access, ConfinedRoot, parse_workspace_path};
 use sha2::{Digest, Sha256};
 
 pub(crate) use delete::FsDelete;
@@ -96,6 +96,40 @@ pub(crate) fn resolve(
     ctx.root
         .resolve(path, access)
         .map_err(|error| ToolError::from_workspace(field, error))
+}
+
+/// The policy scope of the workspace path `raw` (a file tool's `path`
+/// argument) as a plan of it would report it ([`crate::PlanFacts::intent_attributes`]):
+/// resolved like a read (an in-workspace link followed), or like a create
+/// when nothing is there yet, and classed [`PathClass::Sensitive`] when its
+/// name looks credential-bearing ([`crate::looks_sensitive`]); `""` and `"."`
+/// are the workspace root, as for a listing. For a broker that checks policy
+/// on a path whose call could not be planned, before the planning error
+/// (which may depend on the file's content) reaches a model. Malformed paths,
+/// paths outside the workspace, and paths that cannot be resolved either way
+/// are errors.
+pub fn path_scope(root: &ConfinedRoot, raw: &str) -> Result<PathScope, ToolError> {
+    let Some(path) = parse_dir("path", Some(raw))? else {
+        return Ok(PathScope::inside(
+            root.display_root().display().to_string(),
+            "",
+        ));
+    };
+    let absolute = root
+        .resolve(&path, Access::Read)
+        .or_else(|_| root.resolve(&path, Access::Create))
+        .map_err(|error| ToolError::from_workspace("path", error))?;
+    let scope = PathScope::inside(
+        aidex_workspace::display_path(&absolute)
+            .display()
+            .to_string(),
+        path.as_str(),
+    );
+    Ok(if crate::sensitive::looks_sensitive(path.as_str()) {
+        scope.with_class(PathClass::Sensitive)
+    } else {
+        scope
+    })
 }
 
 /// Refuse modifications inside git metadata (hooks there would run code later).

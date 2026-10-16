@@ -13,6 +13,7 @@
     "allow-daemon-start",
     "allow-daemon-stop",
     "allow-rpc-call",
+    "allow-rpc-call-long",
     "allow-rpc-subscribe",
     "allow-rpc-unsubscribe",
     "allow-select-drive"

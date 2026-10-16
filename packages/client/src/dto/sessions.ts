@@ -110,6 +110,10 @@ export type Run = {
   effective_max_tokens: number | null;
   estimated_input_tokens: number | null;
   model_used: string | null;
+  /**
+   * Whether the run saved an external runtime reference `run.resume` can continue (bound to a
+   * native branch and snapshot); never the reference itself.
+   */
   has_runtime_ref: boolean;
   transcript_omitted: boolean;
   pending_call_count: number;
@@ -122,7 +126,15 @@ export type Run = {
   mode?: ConversationMode;
   permission_mode?: PermissionMode;
   workspace_id?: string;
+  /** Inference attempts repeated after a retryable provider failure (each used a step). */
+  inference_retries?: number;
+  /**
+   * The largest number of older messages one request of this run left out to fit the model's
+   * context window; the stored history is unchanged.
+   */
+  context_trimmed_messages?: number;
 };
+export type ApprovalStatus = "pending" | "approved" | "denied" | "expired";
 export type Approval = {
   id: string;
   run_id: string;
@@ -131,7 +143,7 @@ export type Approval = {
   arguments_bytes: number;
   arguments_truncated: boolean;
   fingerprint: string;
-  status: "pending" | "approved" | "denied" | "expired";
+  status: ApprovalStatus;
   preview: unknown;
   preview_truncated: boolean;
   runtime_id: string | null;
@@ -165,6 +177,10 @@ export type SessionDetail = SessionConfig & {
   checkpoints: Checkpoint[];
   total_checkpoints: number;
   checkpoints_truncated: boolean;
+  /** The conversation saved an external runtime reference, which no view returns. */
+  runtime_ref_omitted: boolean;
+  /** Always `true`: command ids (`message.send` idempotency keys) are never returned. */
+  commands_omitted: boolean;
   /** Set on a conversation created by `conversation.fork`: its first `message_count` messages
    * are a copy of `session_id`'s history. */
   forked_from?: ForkOrigin;
@@ -213,3 +229,34 @@ export type HistoryPage = {
   truncated: boolean;
 };
 export type HistoryScope = { session_id?: string; run_id?: string };
+/** Offset paging (`conversation.list`, `approval.list`, `checkpoint.list`); `limit` is 1-100. */
+export type PageParams = { offset?: number; limit?: number };
+/**
+ * Paging facts of a list result: `next_offset` is the next page's offset, `null` on the last page.
+ * When the wire budget cuts items from a page, `truncated` and an `<items>_truncated` flag are set.
+ */
+export type PageInfo = { offset: number; next_offset: number | null; truncated: boolean };
+/** Result of `conversation.list`: from `offset` 0, at most 100 per page by default. */
+export type ConversationList = PageInfo & {
+  sessions: SessionSummary[];
+  total_sessions: number;
+  sessions_truncated?: true;
+};
+/** Result of `checkpoint.list`: in the order they were taken, from `offset` 0 by default. */
+export type CheckpointList = PageInfo & {
+  checkpoints: Checkpoint[];
+  total_checkpoints: number;
+  checkpoints_truncated?: true;
+};
+/** Params of `approval.list`: one run's approvals or all of them, optionally of one status. */
+export type ApprovalListParams = PageParams & { run_id?: string; status?: ApprovalStatus };
+/**
+ * Result of `approval.list`: approvals oldest first by creation time, across conversations (ties
+ * keep conversation and request order). Without `offset` the last page, holding the newest
+ * approvals, is returned, and `truncated` is also true when items exist before `offset`.
+ */
+export type ApprovalList = PageInfo & {
+  approvals: Approval[];
+  total_approvals: number;
+  approvals_truncated?: true;
+};

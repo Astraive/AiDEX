@@ -1,4 +1,6 @@
-use aidex_native_sessions::{RunStatus, SessionConfig, SessionStore};
+use aidex_native_sessions::{
+    NATIVE_RECORD_KEY_SECRET, Run, RunStatus, SessionConfig, SessionStore,
+};
 use aidex_vault::{KdfParams, SecretString, VaultService, VaultServiceConfig};
 use std::sync::Arc;
 
@@ -120,4 +122,85 @@ fn restarting_a_waiting_run_marks_it_interrupted() {
     drop(store);
     let reopened = SessionStore::open(dir.path().join("sessions.sqlite3"), vault).unwrap();
     assert_eq!(reopened.run(&r.id).unwrap().status, RunStatus::Interrupted);
+}
+#[test]
+fn record_key_is_stored_under_the_exported_name() {
+    let (_drive, vault, store) = fixture();
+    assert_eq!(NATIVE_RECORD_KEY_SECRET, "native-record-encryption-key");
+    store.create(config()).unwrap();
+    let name = aidex_vault::SecretName::new(NATIVE_RECORD_KEY_SECRET).unwrap();
+    assert_eq!(vault.list_secrets().unwrap().len(), 1);
+    assert_eq!(vault.secret_meta(&name).unwrap().name, name);
+}
+#[test]
+fn run_counters_are_optional_and_omitted_while_zero() {
+    let (_drive, _vault, store) = fixture();
+    let s = store.create(config()).unwrap();
+    let run = store.begin(&s.id, "hello", "once", None).unwrap();
+    let mut wire = serde_json::to_value(&run).unwrap();
+    assert!(wire.get("inference_retries").is_none(), "{wire}");
+    assert!(wire.get("context_trimmed_messages").is_none(), "{wire}");
+    // A run saved before the counters existed decodes with zeros.
+    let decoded: Run = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(
+        (decoded.inference_retries, decoded.context_trimmed_messages),
+        (0, 0)
+    );
+    wire["inference_retries"] = 2.into();
+    wire["context_trimmed_messages"] = 7.into();
+    let decoded: Run = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(
+        (decoded.inference_retries, decoded.context_trimmed_messages),
+        (2, 7)
+    );
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+}
+#[test]
+fn inference_retries_use_the_run_step_budget() {
+    let (dir, vault, store) = fixture();
+    let s = store.create(config()).unwrap();
+    let run = store.begin(&s.id, "hello", "once", None).unwrap();
+    store
+        .update(&s.id, |s| {
+            s.configuration.max_steps = 3;
+            s.runs[0].status = RunStatus::Running;
+            s.runs[0].steps = 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.reserve_inference_retry(&run.id).unwrap(), 1);
+    assert_eq!(store.reserve_inference_retry(&run.id).unwrap(), 2);
+    let error = store.reserve_inference_retry(&run.id).unwrap_err();
+    assert!(error.contains("step budget"), "{error}");
+    let saved = store.run(&run.id).unwrap();
+    assert_eq!((saved.steps, saved.inference_retries), (3, 2));
+    // A cancelled run takes no further retry, even with budget left.
+    store
+        .update(&s.id, |s| {
+            s.configuration.max_steps = 8;
+            s.runs[0].status = RunStatus::Cancelled;
+            Ok(())
+        })
+        .unwrap();
+    let error = store.reserve_inference_retry(&run.id).unwrap_err();
+    assert!(error.contains("no longer active"), "{error}");
+    assert!(store.reserve_inference_retry("run_missing").is_err());
+    drop(store);
+    let reopened = SessionStore::open(dir.path().join("sessions.sqlite3"), vault).unwrap();
+    let saved = reopened.run(&run.id).unwrap();
+    assert_eq!((saved.steps, saved.inference_retries), (3, 2));
+}
+#[test]
+fn context_trims_keep_the_largest_count() {
+    let (_drive, _vault, store) = fixture();
+    let s = store.create(config()).unwrap();
+    let run = store.begin(&s.id, "hello", "once", None).unwrap();
+    store.record_context_trim(&run.id, 3).unwrap();
+    store.record_context_trim(&run.id, 1).unwrap();
+    assert_eq!(store.run(&run.id).unwrap().context_trimmed_messages, 3);
+    store.record_context_trim(&run.id, 5).unwrap();
+    assert_eq!(store.run(&run.id).unwrap().context_trimmed_messages, 5);
+    // Zero is a no-op that needs no lookup; a real count needs a known run.
+    store.record_context_trim("run_missing", 0).unwrap();
+    assert!(store.record_context_trim("run_missing", 1).is_err());
 }

@@ -137,9 +137,48 @@ handlers without sockets.
   `services/vault_lock.rs` observes every end of the unlocked session (`vault.lock`,
   emergency stop, idle auto-lock, or a session dropped after a `conflict` or an
   uncertain header commit) and runs the lock cleanup once: native runs cancelled,
-  attachment uploads aborted, `vault.locked` recorded. `services/mcp.rs` stops MCP
+  attachment uploads aborted, official runtime logins cancelled, external runtime
+  processes terminated, launches parked for an approval released
+  (`RuntimeManager::release_paused`, so their temporary homes are gone),
+  `vault.locked` recorded. `services/mcp.rs` stops MCP
   servers on the same notice (its polling watchdog stays as a backstop). The next
-  unlock waits until that cleanup ran, so it never reaches the new session. The one
+  unlock waits until that cleanup ran, so it never reaches the new session;
+  `vault.init`/`vault.unlock` then call `NativeEngine::reconcile_after_unlock` (best
+  effort) to settle runs the lock left without a final state as `interrupted`.
+  A lock the user asks for (`methods::vault::lock_vault`: `vault.lock`, and
+  `emergency.stop` with `lock_vault`) first calls
+  `NativeEngine::cancel_all_but_paused` while the record key is still there, so
+  native runs and external runs whose thread drives their vendor process are
+  recorded `cancelled`; an external run paused for an approval only has its
+  parked launch released and is settled `interrupted` by the unlock, as after the
+  idle auto-lock, so `run.resume` continues it (`emergency.stop` has already
+  cancelled it). A paused child whose parent is still executing is cancelled
+  with that parent (`NativeEngine::cancel` cancels its active children).
+  `vault.secret.set|delete` refuse the records AiDEX owns
+  (`methods::vault::managed_secret`) with `policy_denied`/`managed_secret`, and
+  `vault.secret.list` names them in `managed`. A keep-alive thread
+  (`services/keep_alive.rs`) counts executing agent work as vault use: while
+  `NativeEngine::has_executing()` (a run's thread works on it, native or
+  external), it calls `VaultService::keep_alive` at least four times per idle
+  period (at most once a second), so the idle auto-lock follows the end of the
+  work. It reads in-memory engine state only, never the vault file. Work that
+  waits for a person does not count: a run waiting for an approval (native, or
+  an external runtime paused with its vendor process) and a pending official
+  login. Nor do the reads clients poll: methods registered with
+  `Router::register_passive` (`vault.status`, `vault.secret.list`,
+  `conversation.list|get`, `run.get`, `approval.list`, `execution.status`,
+  `checkpoint.list`, `history.list`, `runtime.list|health|account.status|login.status`)
+  run inside `VaultService::passively`, so what they read through the vault
+  leaves the idle period running; every other method that uses the vault counts
+  as use. Once the vault locks they answer as for any locked vault: `vault.status`
+  always answers, `conversation.list` and `execution.status` return their locked
+  views (no titles or configurations), and the views and secrets are
+  `vault_locked`. When the user walks away the idle auto-lock happens as usual, the lock
+  cleanup cancels that work, and the next unlock settles the waiting run as
+  `interrupted`, which `run.resume` continues as before. A native parent
+  waiting for its active children still executes, so a child waiting for an
+  approval keeps the vault awake through it until that wait ends (at most ten
+  minutes). The one
   exception: `vault.unlock` while a session is open whose `vault.json` changed on
   disk replaces that session without a notice or cleanup, because the vault never
   locks. Errors that dropped the session carry `data.session_dropped: true`.
@@ -173,7 +212,7 @@ and `agent.*` services rather than a raw provider-chat RPC.
 | `model.default`         | none                                                                                                         | `{default_model}`                                                                                                                              |
 | `model.preferences.get` | none                                                                                                         | `{favorite_models, hidden_models}`                                                                                                             |
 | `model.preferences.set` | `{favorite_models?, hidden_models?}`                                                                         | the saved record; omitted lists are unchanged                                                                                                  |
-| `network.offline`       | `{enabled}`                                                                                                  | `{offline, network}`                                                                                                                           |
+| `network.offline`       | `{enabled}`                                                                                                  | `{offline, network}`; on also cancels runtime runs and logins and ends vendor processes and official CLI commands                              |
 | `network.status`        | none                                                                                                         | `{offline, network}`                                                                                                                           |
 
 Provider kinds are `openai-compatible`, `openai-responses`, `anthropic`, `gemini`,
@@ -227,18 +266,69 @@ are not wired yet.
 Code, Cursor, Grok, OpenCode, Antigravity, Pi, Oh My Pi, Muse, and ACP drivers) or
 why it failed to open; a failure never stops the daemon, and `runtime.*` then
 reports `unavailable` (`data.reason = "runtime_unavailable"`). `methods/runtime.rs`
-serves `runtime.catalog|list|add|update|config.save|remove|config.get|health|models|install`
-and `runtime.auth.start|status|cancel`. The configuration is sealed with a vault
+serves `runtime.catalog|list|add|update|config.save|remove|config.get|health|models|install`,
+`runtime.auth.start|status|cancel`, and the managed accounts
+`runtime.account.status`, `runtime.profile.import`, and
+`runtime.login.start|status|cancel|logout` (Codex only; errors carry the adapter's
+code as `data.reason`, and results never carry credential bytes, file contents, or
+CLI output). Configuration changes and login start swap the engine's executors
+in one step the engine refuses while an external run is active (`conflict` with
+`data.reason = "runtime_busy"`, or `vault_locked` when the vault is not
+unlocked, never the engine's own text). Import and logout run the official CLI
+outside the engine's operations lock (`change_account`): the runtime, and every
+runtime with the same account profile, leave the engine in that refused-while-busy
+step and stay out (`RuntimeSync`, turns and account commands of them are
+`runtime_busy`) until the CLI ended, so other conversations go on meanwhile.
+`runtime.login.status` of a connected login re-syncs the engine best effort, so
+it never fails because a run is active, and remembers the account as confirmed. The manager's gate (`services/runtime.rs`) admits vendor processes and
+logins only while the drive is online, the vault is unlocked, and no emergency
+stop is in effect; adapters stop running processes and logins within about 25 ms
+once it closes. `emergency.stop` also cancels every run, pending login, and vendor
+process (external runs are cancelled before the broker's stop closes the runtime
+gate, so they settle as cancelled), releases parked launches, and adds the
+runtime registry's termination report to its counts; `network.offline {enabled:
+true}` cancels the active runs of runtime conversations (before the gate closes)
+and pending logins, terminates every vendor process and official CLI command
+still running, and releases parked launches; `run.cancel` releases a cancelled
+run's parked launch; daemon shutdown calls `RuntimeManager::shutdown`.
+While the gate is closed the account methods start no official CLI:
+`runtime.account.status` and the managed-account path of `runtime.health`
+answer from the status the CLI last confirmed for the runtime's profile (kept
+in memory by `methods/runtime.rs` from account status, health, import, logout
+and connected logins, dropped by `runtime.remove`, never credential text; health
+reports it in its documented codes), and import, login start, and logout are
+refused with `offline_refused`, as is `run.resume` of an interrupted or waiting
+run of a runtime conversation (before the engine makes it `pending`; the harness
+would return it to `interrupted` once its runtime refused the launch).
+The configuration is sealed with a vault
 key, so the native engine only learns the configured runtimes through
 `sync_runtimes`, which loads the enabled executors when the vault is unlocked (a
 no-op while it is locked, and on a drive that never saved a runtime
 configuration, so unlocking never creates the runtime encryption key). It runs after `vault.init`/`vault.unlock`, on
-`runtime.list`, and before `conversation.create`, `message.send`, and `agent.start`
-of a runtime conversation whose runtime the engine does not have yet; adding,
-updating, or removing a runtime swaps the engine's executors directly. Runtime
+`runtime.list`, and before `conversation.create`, `message.send`, `agent.start`,
+`run.resume`, and `approval.respond` of a runtime conversation whose runtime the
+engine does not have yet (when an active external run refuses the swap, just that
+runtime is added), or when `RuntimeManager::generation` moved since the engine last
+loaded them (`RuntimeSync`; a login that connected from its worker while a load was
+refused): when an active external run refuses the full load, just that runtime is
+loaded (`NativeEngine::replace_runtime`, refused while a run of it is active), and an
+outdated executor refuses to launch (`account_changed`). Adding, updating, or removing a
+runtime swaps the engine's executors directly. `agent.configuration.set` that changes the runtime, project,
+mode, permission mode, or instructions drops the conversation's and its runs'
+`runtime_ref` and removes the snapshots only those references named
+(`RuntimeManager::forget_snapshot`); `conversation.delete` removes every snapshot
+the conversation's references name and its legacy-named one
+(`forget_legacy_snapshot`); and a run's `has_runtime_ref` reports only a reference
+`run.resume` can continue (`aidex_native_sessions::is_resumable_reference`). Runtime
 conversations record `provider_id: "runtime"`; `model_id: "default"`
 (`aidex_native_sessions::RUNTIME_DEFAULT_MODEL`) makes the harness send no model so
-the runtime uses its own default.
+the runtime uses its own default. A paused vendor process that ended on its own
+(the sandbox's 300 s wall timeout, a crash) cannot take a decision:
+`approval.respond` is then `conflict` (`approval_expired`), records no decision,
+and the harness settles the run `interrupted` with its approval `expired`
+(`RuntimeExecutor::awaits_decision`); `run.resume` continues it. A run being
+stopped meanwhile (`run.cancel`, going offline, `emergency.stop`, a lock) is
+refused the same way but left to that stop, which records it `cancelled` (or the next unlock `interrupted`, after a lock).
 
 ### Standalone desktop conversations
 

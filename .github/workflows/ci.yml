@@ -103,6 +103,9 @@ jobs:
       - name: Build desktop frontend
         run: bun run --cwd apps/desktop build
 
+      - name: Test desktop frontend
+        run: bun run --cwd apps/desktop test
+
       - name: Build installer frontend
         run: bun run --cwd apps/installer build
 

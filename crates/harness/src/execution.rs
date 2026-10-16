@@ -1,6 +1,7 @@
 //! Provider turns and scoped tool exchange; no blind retry of side effects.
 use crate::{
     NativeEngine,
+    broker::PrepareError,
     engine::{PendingPlan, relock},
     inference::Turn,
     native_tools::{AGENT_RESULT, AGENT_SPAWN},
@@ -10,7 +11,7 @@ use aidex_events::{EventKind, Outcome};
 use aidex_native_sessions::*;
 use aidex_providers::{ChatMessage, ChatRequest, ModelId, ToolCallSupport, ToolChoice, ToolSpec};
 use aidex_tools::PermitIssuer;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 /// What an approval shows the user and binds to.
 pub(crate) struct ApprovalRequest {
@@ -23,6 +24,18 @@ pub(crate) struct ApprovalRequest {
 
 impl NativeEngine {
     pub(crate) fn append_result(&self, id: &str, call: &str, result: String) -> Result<(), String> {
+        self.append_output(id, call, result, None)
+    }
+    /// [`append_result`](Self::append_result) of a result stored as its model
+    /// view, with the complete output it was made from (`full`), which goes
+    /// to the run's [`Run::tool_outputs`].
+    fn append_output(
+        &self,
+        id: &str,
+        call: &str,
+        result: String,
+        full: Option<String>,
+    ) -> Result<(), String> {
         let run = self.store.run(id)?;
         self.store.update(&run.session_id, |s| {
             let r = s
@@ -32,6 +45,12 @@ impl NativeEngine {
                 .ok_or("run not found")?;
             if r.status == RunStatus::Cancelled {
                 return Err("run cancelled".into());
+            }
+            if let Some(output) = full {
+                r.tool_outputs.push(ToolOutputRecord {
+                    call_id: call.into(),
+                    output,
+                });
             }
             let message = ChatMessage::tool_result(call, result);
             r.transcript.push(message.clone());
@@ -45,6 +64,16 @@ impl NativeEngine {
         })
     }
     /// Park the run until the user decides on `request`.
+    ///
+    /// The run keeps its live entry until its thread ends, marked no longer
+    /// executing before the pause is saved: reconciliation never finds the
+    /// running run without an entry, and an approval answered as soon as it
+    /// is saved relaunches the run (taking the entry over) instead of finding
+    /// it still executing. The plan is held before the approval can be read,
+    /// and the pause is saved only for a run that is still running and not
+    /// stopped, so a run cancelled or interrupted meanwhile keeps that state
+    /// (or, when its stop could not be saved, settles as stopped) and its
+    /// plan is dropped.
     fn request_approval(
         &self,
         id: &str,
@@ -65,16 +94,33 @@ impl NativeEngine {
             preview: request.preview,
         };
         relock(&self.pending).insert(approval.id.clone(), request.pending);
-        relock(&self.live).remove(id);
-        self.store.update(&run.session_id, |s| {
-            s.approvals.push(approval.clone());
-            s.runs
+        let tokens = relock(&self.live).get_mut(id).map(|live| {
+            live.executing = false;
+            (live.provider.clone(), live.tool.clone())
+        });
+        let saved = self.store.update(&run.session_id, |s| {
+            let r = s
+                .runs
                 .iter_mut()
                 .find(|r| r.id == id)
-                .ok_or("run not found")?
-                .status = RunStatus::WaitingApproval;
+                .ok_or("run not found")?;
+            // A stop whose state could not be saved (the vault locked and
+            // was unlocked again) leaves the run running with its tokens
+            // cancelled; it is not paused either.
+            let stopped = tokens
+                .as_ref()
+                .is_some_and(|(provider, tool)| provider.is_stopped() || tool.is_cancelled());
+            if r.status != RunStatus::Running || stopped {
+                return Err("run stopped before its approval was requested".into());
+            }
+            r.status = RunStatus::WaitingApproval;
+            s.approvals.push(approval.clone());
             Ok(())
-        })?;
+        });
+        if let Err(error) = saved {
+            relock(&self.pending).remove(&approval.id);
+            return Err(error);
+        }
         self.emit(
             &run.session_id,
             EventKind::ApprovalCreated {
@@ -161,7 +207,21 @@ impl NativeEngine {
         if s.configuration.mode != Mode::Agent {
             return Err("tools are unavailable in chat and plan modes".into());
         }
-        let mut prepared = self.broker.prepare(s, call)?;
+        let mut prepared = match self.broker.prepare(s, call) {
+            Ok(prepared) => prepared,
+            // Nothing started: the model reads why and can correct the call.
+            Err(PrepareError::Repairable { code, message }) => {
+                let result = serde_json::json!({
+                    "is_error": true,
+                    "code": code,
+                    "message": aidex_events::redact_text(&message),
+                    "effect": "not_started",
+                });
+                self.append_result(id, &call.id, result.to_string())?;
+                return Ok(false);
+            }
+            Err(PrepareError::Fatal(error)) => return Err(error),
+        };
         prepared.context.cancel = tool_cancel.clone();
         let call_id = prepared.plan.call_id().clone();
         self.emit(
@@ -205,13 +265,22 @@ impl NativeEngine {
         cancel: &CancelToken,
         tool_cancel: &aidex_tools::CancelToken,
     ) -> Result<(), String> {
-        self.transition(id, RunStatus::Running, None)?;
+        // A run cancelled, interrupted, or failed before this thread got to
+        // it (a launch that raced a cancel) is left as it is.
+        if self.transition(id, RunStatus::Running, None)?.status != RunStatus::Running {
+            return Ok(());
+        }
         loop {
             if cancel.is_cancelled() {
                 self.transition(id, RunStatus::Cancelled, None)?;
                 return Ok(());
             }
             let run = self.store.run(id)?;
+            // Stopped since the last step without this thread's token (a
+            // settle that could not reach it): nothing more runs.
+            if run.status != RunStatus::Running {
+                return Ok(());
+            }
             let s = self.store.get(&run.session_id)?;
             if run.steps >= s.configuration.max_steps {
                 return Err("native run step budget exhausted".into());
@@ -237,7 +306,12 @@ impl NativeEngine {
             let native_tools = primary.1.capabilities.tool_calls == ToolCallSupport::Native;
             let offer = self.offer(&s, &run, native_tools, tool_cancel);
             self.remember_offer(id, &offer);
-            let messages = self.assemble(&s, &run, &offer)?;
+            let messages = self.assemble(
+                &s,
+                &run,
+                &offer,
+                crate::context::instruction_budget(&primary.1),
+            )?;
             let start = messages.len().saturating_sub(run.transcript.len());
             let attachments = self.turn_attachments(&s, &run)?;
             let mut request = ChatRequest::new(
@@ -284,6 +358,7 @@ impl NativeEngine {
                 nonce: self.run_nonce(&run),
                 index: message_index,
                 attachments,
+                streamed: Default::default(),
             };
             let response = self.infer(&request, &run, &s.configuration, cancel, primary, &turn)?;
             if cancel.is_cancelled() {
@@ -308,14 +383,28 @@ impl NativeEngine {
                 Ok(())
             })?;
             if calls.is_empty() {
-                self.transition(id, RunStatus::Completed, None)?;
-                self.emit(
-                    &run.session_id,
-                    EventKind::AgentFinished {
-                        agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
-                        outcome: Outcome::Succeeded,
-                    },
-                );
+                // Children still working are waited for, and results the run
+                // has not read are added for one more turn, while a step
+                // remains for it. The stored count includes this turn and any
+                // retries it reserved.
+                if self.store.run(id)?.steps < s.configuration.max_steps
+                    && self.settle_children(id, &run.session_id, cancel)?
+                {
+                    continue;
+                }
+                // Announced only when this transition saved the completion: a
+                // run cancelled, interrupted, or failed meanwhile keeps that
+                // state and is not reported as succeeded.
+                let (_, saved) = self.settle(id, RunStatus::Completed, None)?;
+                if saved {
+                    self.emit(
+                        &run.session_id,
+                        EventKind::AgentFinished {
+                            agent_id: EntityId::new(id).map_err(|e| e.to_string())?,
+                            outcome: Outcome::Succeeded,
+                        },
+                    );
+                }
                 return Ok(());
             }
         }
@@ -331,14 +420,12 @@ impl NativeEngine {
         if run.status == RunStatus::Cancelled {
             return Err("run cancelled".into());
         }
-        self.emit(
-            &run.session_id,
-            EventKind::ToolStarted {
-                call_id: p.plan.call_id().clone(),
-            },
-        );
-        let started = Instant::now();
-        let output = self.broker.execute(p, issuer)?;
+        // The registry publishes `tool.started`, `file.changed`,
+        // `diff.created`, and `tool.completed` or `tool.failed`, and the
+        // launcher `process.*`, all as metadata.
+        let output = self
+            .broker
+            .execute_observed(p, issuer, Arc::clone(&self.events))?;
         let mut checkpoints = vec![];
         for (path, before) in &p.before {
             let relative = WorkspacePath::new(path).map_err(|e| e.to_string())?;
@@ -364,14 +451,15 @@ impl NativeEngine {
             s.checkpoints.extend(checkpoints);
             Ok(())
         })?;
-        self.emit(
-            &run.session_id,
-            EventKind::ToolCompleted {
-                call_id: p.plan.call_id().clone(),
-                duration_ms: started.elapsed().as_millis() as u64,
-                summary: "native tool completed; output in encrypted history".into(),
-            },
-        );
-        self.append_result(id, &call.id, output.content.to_string())
+        // History holds the output as a model reads it, with diff statistics
+        // in place of an applied diff (`crate::tool_view`): any daemon may
+        // send stored results to a model as they are, an older one too. The
+        // complete output (the applied diff with the file's earlier lines)
+        // stays with the run, in encrypted history, for clients.
+        let full = serde_json::to_string(&output).map_err(|e| e.to_string())?;
+        match crate::tool_view::model_tool_result(&full) {
+            Some(view) => self.append_output(id, &call.id, view, Some(full)),
+            None => self.append_result(id, &call.id, full),
+        }
     }
 }

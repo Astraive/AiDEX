@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Notice } from "@aidex/ui/components";
 import { Button, Stack, Text } from "@aidex/ui/primitives";
 import type { HistoryScope } from "@aidex/client/dto/sessions";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 import { ArtifactsDialog } from "../chat/artifacts/ArtifactsDialog";
 import { useArtifactDownload } from "../chat/artifacts/useArtifactDownload";
@@ -12,9 +13,26 @@ import {
   type TranscriptEnvironment,
 } from "../chat/transcript/TranscriptContext";
 import { useOpenLink } from "../chat/transcript/useOpenLink";
+import { pageRangeLabel } from "./pageRange";
 
-/** A session's or run's stored messages, 20 per page, rendered as a transcript. */
-export function HistoryMessages({ scope }: { scope: HistoryScope }) {
+/** How often a live history page is re-read while its run is active. */
+const LIVE_REFRESH_MS = 1000;
+
+/**
+ * A session's or run's stored messages, 20 per page, rendered as a transcript. While `live` (the
+ * run is still active) the page is re-read every second while the user is present (`usePoll`), and
+ * once more when it stops. `executing` (the run is executing, not waiting for a person) keeps a
+ * visible window re-reading without input, since the daemon holds the vault open for it anyway.
+ */
+export function HistoryMessages({
+  scope,
+  live = false,
+  executing = false,
+}: {
+  scope: HistoryScope;
+  live?: boolean;
+  executing?: boolean;
+}) {
   const [offset, setOffset] = useState(0);
   const [artifact, setArtifact] = useState<ArtifactRef | null>(null);
   const history = useRpc("history.list", { ...scope, offset, limit: 20 });
@@ -24,6 +42,14 @@ export function HistoryMessages({ scope }: { scope: HistoryScope }) {
     () => ({ scope, openLink, openArtifact: setArtifact, downloadArtifact }),
     [scope.session_id, scope.run_id, openLink, downloadArtifact],
   );
+  const { refetch } = history;
+  usePoll(refetch, LIVE_REFRESH_MS, { enabled: live, whileAway: executing });
+  // The run stopped: read its final messages once.
+  const wasLive = useRef(live);
+  useEffect(() => {
+    if (wasLive.current && !live) refetch();
+    wasLive.current = live;
+  }, [live, refetch]);
   return (
     <TranscriptProvider value={environment}>
       <Stack gap={4}>
@@ -39,8 +65,11 @@ export function HistoryMessages({ scope }: { scope: HistoryScope }) {
             Previous messages
           </Button>
           <Text>
-            {offset + 1}–{offset + (history.data?.messages.length ?? 0)} of{" "}
-            {history.data?.total_messages ?? 0}
+            {pageRangeLabel(
+              history.data?.offset ?? offset,
+              history.data?.messages.length ?? 0,
+              history.data?.total_messages ?? 0,
+            )}
           </Text>
           <Button
             variant="outline"

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AttachmentTray,
-  CodeBlock,
   Composer,
   Dialog,
   FileDropZone,
@@ -17,11 +16,11 @@ import {
   FolderIcon,
   GitBranchIcon,
   LayersIcon,
+  SlidersIcon,
   StopIcon,
 } from "@aidex/ui/icons";
 import {
   Button,
-  Card,
   IconButton,
   Select,
   Stack,
@@ -37,6 +36,7 @@ import type {
 import { useNavigation } from "../../app/providers/navigation";
 import { usePreferences } from "../../app/providers/preferences";
 import { useToast } from "../../app/providers/toast";
+import { usePoll } from "../../hooks/usePoll";
 import { useRpc } from "../../hooks/useRpc";
 import { useShell } from "../../layouts/shell";
 import { useProviderCatalog } from "../model-manager/catalog/ProviderCatalog";
@@ -48,6 +48,8 @@ import {
 } from "../model-manager/catalog/modelKeys";
 import { LOCAL_PROVIDER_ID } from "../model-manager/catalog/providerAccounts";
 import { LocalInferenceNotice } from "../model-manager/LocalInferenceNotice";
+import { ApprovalRequestCard } from "../approvals/ApprovalRequestCard";
+import { approvalDecision } from "../approvals/approvalDecision";
 import { HistoryMessages } from "../sessions/HistoryMessages";
 import { ArtifactsDialog } from "./artifacts/ArtifactsDialog";
 import { useArtifactDownload } from "./artifacts/useArtifactDownload";
@@ -66,7 +68,10 @@ import {
   type AgentContinuation,
 } from "./continuation/agentContinuation";
 import { ContinueAsAgentDialog } from "./continuation/ContinueAsAgentDialog";
-import { useShellNeedsFullAccess } from "./continuation/engineCapabilities";
+import {
+  useRuntimeDescriptor,
+  useShellNeedsFullAccess,
+} from "./continuation/engineCapabilities";
 import { PERMISSION_LABELS, permissionDescription } from "./continuation/permissions";
 import { transcriptDividers } from "./continuation/transcriptDividers";
 import type { SlashCommandId } from "./composer/slashCommands";
@@ -81,7 +86,9 @@ import {
 } from "./transcript/TranscriptContext";
 import { useOpenLink } from "./transcript/useOpenLink";
 import { useConversationExtensions } from "./useConversationExtensions";
+import { canResume } from "./canResume";
 import { ConversationModelPicker } from "./ConversationModelPicker";
+import { ConversationSettingsDialog } from "./ConversationSettingsDialog";
 import { describeCurrentModel } from "./currentModel";
 import { ModelStateNotice } from "./ModelStateNotice";
 import {
@@ -92,7 +99,9 @@ import {
   buildSessionConfig,
   configurationChanged,
   sessionTargetOf,
+  settingsConfiguration,
 } from "./sessionConfig";
+import { fallbackModelOptions, type SessionSettings } from "./sessionSettings";
 import styles from "./ConversationPage.module.css";
 const permissionOptions = (
   ["supervised", "auto_accept_edits", "auto", "full_access"] as const
@@ -136,7 +145,7 @@ export function ConversationPage({
   // A new chat's own model choice; existing conversations use their configuration.
   const [draftKey, setDraftKey] = useState<string | null>(null);
   const [popup, setPopup] = useState<
-    "mode" | "project" | "attach" | "continue" | null
+    "mode" | "project" | "attach" | "continue" | "settings" | null
   >(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -223,8 +232,18 @@ export function ConversationPage({
   const running =
     !!latestRun &&
     ["pending", "running", "waiting_approval"].includes(latestRun.status);
+  // Executing, not waiting for a person: the daemon holds the vault open for it anyway.
+  const executing =
+    !!latestRun && ["pending", "running"].includes(latestRun.status);
   const lastMessage = session.data?.messages.at(-1);
   const external = target?.kind === "runtime";
+  // "Resume task" needs the engine's word that an external runtime can resume; it is asked only
+  // once such a run is interrupted.
+  const runtimeDescriptor = useRuntimeDescriptor(
+    target?.kind === "runtime" ? target.runtimeId : null,
+    external && latestRun?.status === "interrupted",
+  );
+  const resumable = canResume(latestRun, external, runtimeDescriptor);
   const attachmentBlock = attachmentSendBlock({
     items: attachments.items,
     external,
@@ -350,11 +369,16 @@ export function ConversationPage({
     permissionTouched.current = true;
     setPermission("full_access");
   }, [route.id, resolved.key]);
-  useEffect(() => {
-    if (!route.id) return;
-    const timer = setInterval(session.refetch, running ? 250 : 1500);
-    return () => clearInterval(timer);
-  }, [route.id, running, session.refetch]);
+  // Each read decrypts the conversation (a background read AiDEX Core does not count as vault use):
+  // polls run while the user is present, and without input only while a run executes. A run waiting
+  // for an approval does not hold the vault open, so an unattended window lets the idle auto-lock happen.
+  usePoll(session.refetch, running ? 250 : 1500, {
+    enabled: !!route.id,
+    whileAway: executing,
+  });
+  // A failed project list is read again: until it answers, the page cannot place the conversation's
+  // project, and model, mode, and project changes are refused.
+  usePoll(workspaces.refetch, 5000, { enabled: !!workspaces.error });
   useEffect(() => {
     if (!workspaces.data) return;
     if (session.data) {
@@ -413,10 +437,20 @@ export function ConversationPage({
       workspaceId?: string;
       target?: ModelTarget;
       permission?: PermissionMode;
+      /** New instructions, fallback, or limits (Conversation settings). */
+      settings?: SessionSettings;
     } = {},
   ): SessionConfig => {
     if (route.id && !session.data)
       throw new Error("The conversation is still loading.");
+    // Mode, project, and permission are taken from the conversation once the project list answered;
+    // until then the page holds defaults, and a write would replace the stored values with them.
+    if (route.id && !workspaces.data)
+      throw new Error(
+        workspaces.error
+          ? `Projects could not be read: ${workspaces.error.message}`
+          : "Projects are still loading. Try again in a moment.",
+      );
     const nextTarget = changes.target ?? currentTarget();
     // Every external runtime accepts only agent mode with full access, so no write can carry
     // another combination (the engine would refuse it on the next run).
@@ -434,6 +468,7 @@ export function ConversationPage({
         !!workspaces.data?.workspaces.some((w) => w.id === id),
       target: nextTarget,
       permission: external ? "full_access" : (changes.permission ?? permission),
+      overrides: changes.settings,
     });
   };
   const act = async (operation: () => Promise<unknown>) => {
@@ -717,6 +752,24 @@ export function ConversationPage({
         setWorkspaceId(value);
       });
     else setWorkspaceId(value);
+  };
+  /**
+   * Conversation settings: one `agent.configuration.set` with the new values, built from the stored
+   * conversation (`settingsConfiguration`) rather than page state; throws for the dialog.
+   */
+  const saveSettings = async (settings: SessionSettings) => {
+    const id = route.id;
+    if (!id) return;
+    if (!session.data) throw new Error("The conversation is still loading.");
+    await call("agent.configuration.set", {
+      session_id: id,
+      configuration: settingsConfiguration(
+        session.data,
+        preferences.settings,
+        settings,
+      ),
+    });
+    session.refetch();
   };
   /** The command id of a continuation step: reused while the same request is retried. */
   const continuationCommandId = (request: string) => {
@@ -1067,6 +1120,14 @@ export function ConversationPage({
                 )}
                 <IconButton
                   size="sm"
+                  label="Conversation settings"
+                  icon={<SlidersIcon />}
+                  aria-haspopup="dialog"
+                  disabled={!session.data}
+                  onClick={() => setPopup("settings")}
+                />
+                <IconButton
+                  size="sm"
                   label="Artifacts"
                   icon={<LayersIcon />}
                   aria-haspopup="dialog"
@@ -1081,12 +1142,17 @@ export function ConversationPage({
               </Stack>
             )}
           </header>
-          {(error || session.error || catalog.error || localCatalog.error) && (
+          {(error ||
+            session.error ||
+            catalog.error ||
+            localCatalog.error ||
+            workspaces.error) && (
             <Notice tone="danger" role="alert">
               {error ??
                 session.error?.message ??
                 catalog.error ??
-                localCatalog.error?.message}
+                localCatalog.error?.message ??
+                `Projects could not be read: ${workspaces.error?.message}`}
             </Notice>
           )}
           <LocalInferenceNotice
@@ -1134,66 +1200,31 @@ export function ConversationPage({
           {latestRun?.error && (!session.data?.workspace_id || project) && (
             <Notice tone="danger">{latestRun.error}</Notice>
           )}
-          {latestRun &&
-            ["interrupted", "cancelled"].includes(latestRun.status) && (
-              <Button
-                variant="ghost"
-                disabled={busy}
-                onClick={() =>
-                  void act(() => call("run.resume", { id: latestRun.id }))
-                }
-              >
-                Resume task
-              </Button>
-            )}
+          {latestRun && resumable && (
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() =>
+                void act(() => call("run.resume", { id: latestRun.id }))
+              }
+            >
+              Resume task
+            </Button>
+          )}
           {pendingApprovals.map((approval) => (
-            <Card key={approval.id} padding="md">
-              <Stack gap={3}>
-                <Text>Approval: {approval.tool_name}</Text>
-                <CodeBlock
-                  language="json"
-                  code={JSON.stringify(approval.arguments, null, 2)}
-                />
-                {approval.preview != null && (
-                  <CodeBlock
-                    title="Change preview"
-                    language="json"
-                    code={JSON.stringify(approval.preview, null, 2)}
-                  />
-                )}
-                {(approval.arguments_truncated || approval.preview_truncated) && (
-                  <Notice tone="warning">
-                    Request a smaller action to review it completely.
-                  </Notice>
-                )}
-                <Stack direction="row" gap={2}>
-                  {[true, false].map((approved) => (
-                    <Button
-                      key={String(approved)}
-                      variant={approved ? "primary" : "outline"}
-                      disabled={
-                        busy ||
-                        (approved &&
-                          (approval.arguments_truncated ||
-                            approval.preview_truncated))
-                      }
-                      onClick={() =>
-                        void act(() =>
-                          call("approval.respond", {
-                            id: approval.id,
-                            fingerprint: approval.fingerprint,
-                            approved,
-                            command_id: crypto.randomUUID(),
-                          }),
-                        )
-                      }
-                    >
-                      {approved ? "Approve once" : "Deny"}
-                    </Button>
-                  ))}
-                </Stack>
-              </Stack>
-            </Card>
+            <ApprovalRequestCard
+              key={approval.id}
+              approval={approval}
+              busy={busy}
+              onDecide={(approved) =>
+                void act(() =>
+                  call(
+                    "approval.respond",
+                    approvalDecision(approval, approved, crypto.randomUUID()),
+                  ),
+                )
+              }
+            />
           ))}
           <div ref={endRef} />
         </div>
@@ -1294,6 +1325,33 @@ export function ConversationPage({
           onContinueHere={continueHere}
           onContinueInNewChat={continueInNewChat}
         />
+        {session.data && (
+          <ConversationSettingsDialog
+            open={popup === "settings"}
+            onClose={() => setPopup(null)}
+            settings={{
+              instructions: session.data.instructions ?? "",
+              fallback_model: session.data.fallback_model ?? null,
+              max_steps: session.data.max_steps ?? preferences.settings.max_steps,
+              max_tokens: session.data.max_tokens ?? preferences.settings.max_tokens,
+            }}
+            external={external}
+            fallbackOptions={
+              popup === "settings" && !external
+                ? fallbackModelOptions({
+                    models: catalog.models,
+                    findModel: catalog.findModel,
+                    providerName: (key) => catalog.providerFor(key)?.name,
+                    agent: mode === "agent",
+                    primaryKey: resolved.key,
+                    current: session.data.fallback_model ?? null,
+                  })
+                : []
+            }
+            locked={running}
+            onSave={saveSettings}
+          />
+        )}
         <ProjectFileDialog
           open={popup === "attach"}
           onClose={() => setPopup(null)}
