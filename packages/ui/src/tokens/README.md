@@ -22,16 +22,18 @@ Theme-dependent values are tokens too, overridden for `html[data-theme="light"]`
 | Controls | `control-xs` 24, `control-sm` 28, `control-md` 32, `control-lg` 36, `control-xl` 40; `control-pad-x` 12, `-pad-x-sm` 10, `-pad-x-xs` 8; `control-gap` 8, `-gap-sm` 6, `-gap-xs` 4 |
 | Rows | `row-sm` 28, `row-md` 32, `row-lg` 44 |
 | Icons | `icon-xs` 12, `icon-sm` 14, `icon-md` 16, `icon-lg` 18, `icon-xl` 20 |
-| Small parts | `badge-height` 20, `badge-height-sm` 16, `kbd-height` 20, `switch-width` 32, `switch-height` 18, `switch-thumb` 14, `checkbox-size` 16, `touch-target` 44 (only for `@media (pointer: coarse)` hit areas), `scrollbar-size` 6 |
+| Small parts | `badge-height` 20, `badge-height-sm` 16, `kbd-height` 20, `switch-width` 26, `switch-height` 16, `switch-thumb` 12, `checkbox-size` 16, `touch-target` 44 (only for `@media (pointer: coarse)` hit areas), `scrollbar-size` 6 |
 | Shell | `shell-pad` 8, `shell-gap` 8, `rail-width` 52, `sidebar-width` 256, `sidebar-min-width` 208, `sidebar-max-width` 480, `topbar-height` 48, `main-min-width` 640 |
 | Pages | `page-max-width` 896, `-wide` 1024, `-full` 1152; `page-pad-top` 24, `page-pad-x` 24, `page-pad-x-narrow` 16, `page-pad-bottom` 48, `page-gap` 24 |
-| Chat | `chat-max-width` 736, `chat-lane-pad` 24, `chat-lane-pad-narrow` 12, `composer-editor-max` min(40vh, 208px) |
+| Chat | `chat-max-width` 736, `chat-lane-pad` 48, `chat-lane-pad-narrow` 12, `composer-editor-max` min(40vh, 208px) |
 | Floating surfaces | `popover-offset` 4, `popover-min-width` 160, `tooltip-max-width` 320, `dialog-width-md` 512, `-lg` 720, `-xl` 960, `toast-max-width` 360, `popup-shadow` 0 16px 40px -18px shadow |
 | Motion | `duration-fast` 120ms, `duration-base` 180ms, `duration-panel` 180ms (0ms when motion is reduced), `ease` |
 
 Body text is `text-md` with `line-height: var(--aidex-leading-body)`. Keep that leading unitless: many rules set only a font size and inherit it, and a px value would make larger headings overlap. The px `leading-*` steps are for rules whose own font size is fixed.
 
 The shell frame (`shell-pad`, `shell-gap`) is the same at every density, and so are text, icons, and radii.
+
+`topbar-height` stays 48 where t3code's top bar is 52: the 8px shell pad sits above it, so the bar still ends 56px down the window, and its 12px side padding puts the controls 20px in from the window or sidebar edge, as t3code's 20px padding does.
 
 ## Density
 
@@ -80,6 +82,8 @@ Media and container queries cannot read custom properties, so these constants ar
 - `@container aidex-main (max-width: 640px)`: main content (the shell's `.content`) switches to `page-pad-x-narrow` and `chat-lane-pad-narrow`.
 - Settings rows: a 512px row container; below it the control stacks under the label.
 - Composer: a 520px container; below it the toolbar hides its text labels.
+- `ListRow`: in a `List` 760px wide or less the meta columns wrap under the subtitle; wider, the title column keeps at least 10rem and the meta cells shrink first.
+- Short windows: `@media (max-height: 560px)` gives `FocusLayout` tighter `space-8` / `space-10` gaps and the xl `Brand` a 48px mark and 32px name, so launch screens fit at the 448px floor.
 - Dock threshold: `rail-width` + 4 × 8 (shell padding and gaps) + sidebar width + `main-min-width` = 52 + 32 + 256 + 640 = 980px at the default width. Below it the sidebar becomes an overlay.
 - Interface scale steps: 75 / 80 / 90 / 100 / 110 / 125%. It is native webview zoom, so media and container queries see the zoomed CSS viewport.
 - Hard-floor CSS viewport: 640 × 448 (an 800 × 560 window at 125%).

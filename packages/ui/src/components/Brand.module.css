@@ -68,3 +68,19 @@
   font-weight: 600;
   line-height: 1.125;
 }
+
+/* Short windows (e.g. the 800x560 minimum at 125%) take a smaller hero so the launch cards fit. */
+@media (max-height: 560px) {
+  .xl,
+  .xl.stacked {
+    gap: var(--aidex-space-3);
+  }
+
+  .xl .mark {
+    height: 48px;
+  }
+
+  .xl .wordmark {
+    font-size: 32px;
+  }
+}

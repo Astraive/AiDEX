@@ -247,7 +247,6 @@ export function Dialog({
                   ref={closeRef}
                   className={styles.close}
                   label="Close dialog"
-                  size="sm"
                   icon={<XIcon />}
                   onClick={onClose}
                 />

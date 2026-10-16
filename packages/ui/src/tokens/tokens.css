@@ -131,9 +131,9 @@
   --aidex-badge-height: 20px;
   --aidex-badge-height-sm: 16px;
   --aidex-kbd-height: 20px;
-  --aidex-switch-width: 32px;
-  --aidex-switch-height: 18px;
-  --aidex-switch-thumb: 14px;
+  --aidex-switch-width: 26px;
+  --aidex-switch-height: 16px;
+  --aidex-switch-thumb: 12px;
   --aidex-checkbox-size: 16px;
   /* Minimum hit area, used only by @media (pointer: coarse) ::after extensions. */
   --aidex-touch-target: 44px;
@@ -147,6 +147,9 @@
   --aidex-sidebar-width: 256px;
   --aidex-sidebar-min-width: 208px;
   --aidex-sidebar-max-width: 480px;
+  /* 48 rather than t3code's 52: the shell pad adds 8 above it, so the bar still ends 56px down the
+     window (t3code's has no frame and ends at 52), and the 12px side padding puts its controls 20px
+     in from the window or sidebar edge, as t3code's 20px padding does. */
   --aidex-topbar-height: 48px;
   --aidex-main-min-width: 640px;
 
@@ -160,7 +163,7 @@
   --aidex-page-pad-bottom: 48px;
   --aidex-page-gap: 24px;
   --aidex-chat-max-width: 736px;
-  --aidex-chat-lane-pad: 24px;
+  --aidex-chat-lane-pad: 48px;
   --aidex-chat-lane-pad-narrow: 12px;
   --aidex-composer-editor-max: min(40vh, 208px);
 
