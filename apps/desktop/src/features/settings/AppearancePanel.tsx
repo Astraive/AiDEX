@@ -282,6 +282,7 @@ export function AppearancePanel() {
           reset={resetAppearance("density", "Reset density", densityDisabled)}
           control={
             <SegmentedControl
+              size="sm"
               label="Density"
               disabled={densityDisabled}
               options={unsupported ? DENSITY_OPTIONS.filter((option) => option.value !== "spacious") : DENSITY_OPTIONS}
@@ -335,6 +336,7 @@ export function AppearancePanel() {
           reset={resetAppearance("chat_width", "Reset chat width", newOnlyDisabled)}
           control={
             <SegmentedControl
+              size="sm"
               label="Chat width"
               disabled={newOnlyDisabled}
               options={CHAT_WIDTH_OPTIONS}
@@ -384,6 +386,7 @@ export function AppearancePanel() {
           reset={resetAppearance("message_spacing", "Reset message spacing", newOnlyDisabled)}
           control={
             <SegmentedControl
+              size="sm"
               label="Message spacing"
               disabled={newOnlyDisabled}
               options={MESSAGE_SPACING_OPTIONS}
