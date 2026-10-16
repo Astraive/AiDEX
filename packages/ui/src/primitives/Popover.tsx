@@ -14,8 +14,10 @@ import {
 import { createPortal } from "react-dom";
 import { cx } from "../utils/cx";
 import {
+  isBelowModalLayer,
   isInsideDescendantLayer,
   isTopLayer,
+  onLayerPush,
   PORTAL_ROOT_ATTRIBUTE,
   pushLayer,
   tabbableAfter,
@@ -295,6 +297,16 @@ function PopoverSurface({
     return pushLayer(surface);
   }, [open]);
 
+  // A dialog or the command palette opening over the page closes the popover, which would otherwise
+  // float above the modal and stay in its layer list. Focus is the modal's to place.
+  useEffect(() => {
+    if (!open) return;
+    return onLayerPush(() => {
+      const surface = surfaceRef.current;
+      if (surface && isBelowModalLayer(surface)) close(false);
+    });
+  }, [open, close]);
+
   // Move focus in on open.
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
@@ -341,11 +353,27 @@ function PopoverSurface({
       if (isInsideDescendantLayer(target, surface)) return;
       close(false);
     };
+    // Focus landing anywhere else closes the popover, also when it moves on from the anchor (where
+    // Shift+Tab out of the popover leaves it open, as Radix does). Moves out of the surface and through
+    // the focus guards are handled by `handleBlur` and `handleGuardFocus`.
+    const onFocusIn = (event: globalThis.FocusEvent) => {
+      const target = event.target;
+      const surface = surfaceRef.current;
+      if (!surface || !(target instanceof Node)) return;
+      const ownedByPopover = (node: Node) =>
+        surface.contains(node) || node === beforeGuardRef.current || node === afterGuardRef.current;
+      const from = event.relatedTarget;
+      if ((from instanceof Node && ownedByPopover(from)) || ownedByPopover(target)) return;
+      if (anchorRef.current?.contains(target) || isInsideDescendantLayer(target, surface)) return;
+      close(false);
+    };
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("focusin", onFocusIn, true);
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("focusin", onFocusIn, true);
     };
   }, [open, anchorRef, close]);
 

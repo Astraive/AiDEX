@@ -5,11 +5,13 @@ import {
   NAVIGATION_FOCUS_WINDOW_MS,
   focusFollowsNavigationKey,
   hasModalLayer,
+  isBelowModalLayer,
   isInsideDescendantLayer,
   isNavigationKey,
   isTopLayer,
   layerCount,
   noteKeyPress,
+  onLayerPush,
   popLayer,
   pushLayer,
   topLayer,
@@ -146,6 +148,44 @@ describe("layer stack", () => {
     assert.equal(hasModalLayer(), true);
     removeDialog();
     assert.equal(hasModalLayer(), false);
+  });
+
+  test("a modal layer pushed later is above an earlier layer it does not contain", () => {
+    const body = node();
+    const popover = node(body);
+    push(popover);
+    assert.equal(isBelowModalLayer(popover), false);
+    // A non-modal layer on top (a select opened from the popover) does not count.
+    const select = node(body);
+    const removeSelect = push(select);
+    assert.equal(isBelowModalLayer(popover), false);
+    removeSelect();
+    const dialog = node(body, true);
+    const removeDialog = push(dialog, true);
+    assert.equal(isBelowModalLayer(popover), true);
+    assert.equal(isBelowModalLayer(dialog), false);
+    removeDialog();
+    assert.equal(isBelowModalLayer(popover), false);
+    // A popover opened inside a dialog sits above it, and a later modal that contains it is not over it.
+    const outer = node(body, true);
+    push(outer, true);
+    const inner = node(outer);
+    push(inner);
+    assert.equal(isBelowModalLayer(inner), false);
+    const viewer = node(outer, true);
+    push(viewer, true);
+    assert.equal(isBelowModalLayer(inner), true);
+    assert.equal(isBelowModalLayer(node(body)), false);
+  });
+
+  test("push listeners run after each push until they unsubscribe", () => {
+    const seen: number[] = [];
+    const unsubscribe = onLayerPush(() => seen.push(layerCount()));
+    push(node());
+    push(node(), true);
+    unsubscribe();
+    push(node());
+    assert.deepEqual(seen, [1, 2]);
   });
 });
 

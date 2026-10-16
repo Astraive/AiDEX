@@ -33,12 +33,14 @@ export const LAYER_ATTRIBUTE = "data-aidex-layer";
 export const PORTAL_ROOT_ATTRIBUTE = "data-aidex-portal-root";
 
 const stack: Entry[] = [];
+const pushListeners = new Set<() => void>();
 
 /** Adds a layer on top and returns its removal. Pushing an element again moves it to the top. */
 export function pushLayer(element: LayerElement, options: LayerOptions = {}): () => void {
   popLayer(element);
   const entry: Entry = { element, modal: options.modal ?? false };
   stack.push(entry);
+  for (const listener of [...pushListeners]) listener();
   return () => {
     const index = stack.indexOf(entry);
     if (index >= 0) stack.splice(index, 1);
@@ -69,6 +71,28 @@ export function hasModalLayer(): boolean {
 /** The number of open layers. */
 export function layerCount(): number {
   return stack.length;
+}
+
+/**
+ * Calls `listener` after every push, e.g. so a non-modal popover can close when a dialog opens over it
+ * (see `isBelowModalLayer`). Returns the unsubscribe.
+ */
+export function onLayerPush(listener: () => void): () => void {
+  pushListeners.add(listener);
+  return () => {
+    pushListeners.delete(listener);
+  };
+}
+
+/**
+ * Whether a modal layer that does not contain `element` sits above it in the stack: a dialog or the
+ * command palette opened over a popover elsewhere in the page, which the popover would otherwise float
+ * over. A popover opened inside a dialog (its portal root) is pushed after it and is not below it.
+ */
+export function isBelowModalLayer(element: LayerElement): boolean {
+  const index = stack.findIndex((entry) => entry.element === element);
+  if (index < 0) return false;
+  return stack.slice(index + 1).some((entry) => entry.modal && !entry.element.contains(element));
 }
 
 /**

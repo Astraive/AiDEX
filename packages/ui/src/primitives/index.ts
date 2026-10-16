@@ -24,6 +24,7 @@ export {
   isInsideDescendantLayer,
   isTopLayer,
   LAYER_ATTRIBUTE,
+  layerCount,
   popLayer,
   PORTAL_ROOT_ATTRIBUTE,
   pushLayer,
