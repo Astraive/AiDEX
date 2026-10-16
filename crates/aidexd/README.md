@@ -145,6 +145,15 @@ handlers without sockets.
   unlock waits until that cleanup ran, so it never reaches the new session;
   `vault.init`/`vault.unlock` then call `NativeEngine::reconcile_after_unlock` (best
   effort) to settle runs the lock left without a final state as `interrupted`.
+  A lock the user asks for (`methods::vault::lock_vault`: `vault.lock`, and
+  `emergency.stop` with `lock_vault`) first calls
+  `NativeEngine::cancel_all_but_paused` while the record key is still there, so
+  native runs and external runs whose thread drives their vendor process are
+  recorded `cancelled`; an external run paused for an approval only has its
+  parked launch released and is settled `interrupted` by the unlock, as after the
+  idle auto-lock, so `run.resume` continues it (`emergency.stop` has already
+  cancelled it). A paused child whose parent is still executing is cancelled
+  with that parent (`NativeEngine::cancel` cancels its active children).
   `vault.secret.set|delete` refuse the records AiDEX owns
   (`methods::vault::managed_secret`) with `policy_denied`/`managed_secret`, and
   `vault.secret.list` names them in `managed`. A keep-alive thread
@@ -160,8 +169,11 @@ handlers without sockets.
   `conversation.list|get`, `run.get`, `approval.list`, `execution.status`,
   `checkpoint.list`, `history.list`, `runtime.list|health|account.status|login.status`)
   run inside `VaultService::passively`, so what they read through the vault
-  leaves the idle period running (they still fail closed once it has passed);
-  every other method that uses the vault counts as use. When the user walks away the idle auto-lock happens as usual, the lock
+  leaves the idle period running; every other method that uses the vault counts
+  as use. Once the vault locks they answer as for any locked vault: `vault.status`
+  always answers, `conversation.list` and `execution.status` return their locked
+  views (no titles or configurations), and the views and secrets are
+  `vault_locked`. When the user walks away the idle auto-lock happens as usual, the lock
   cleanup cancels that work, and the next unlock settles the waiting run as
   `interrupted`, which `run.resume` continues as before. A native parent
   waiting for its active children still executes, so a child waiting for an
@@ -310,7 +322,13 @@ the conversation's references name and its legacy-named one
 `run.resume` can continue (`aidex_native_sessions::is_resumable_reference`). Runtime
 conversations record `provider_id: "runtime"`; `model_id: "default"`
 (`aidex_native_sessions::RUNTIME_DEFAULT_MODEL`) makes the harness send no model so
-the runtime uses its own default.
+the runtime uses its own default. A paused vendor process that ended on its own
+(the sandbox's 300 s wall timeout, a crash) cannot take a decision:
+`approval.respond` is then `conflict` (`approval_expired`), records no decision,
+and the harness settles the run `interrupted` with its approval `expired`
+(`RuntimeExecutor::awaits_decision`); `run.resume` continues it. A run being
+stopped meanwhile (`run.cancel`, going offline, `emergency.stop`, a lock) is
+refused the same way but left to that stop, which records it `cancelled` (or the next unlock `interrupted`, after a lock).
 
 ### Standalone desktop conversations
 

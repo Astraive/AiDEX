@@ -61,8 +61,9 @@ let locked = vault.lock();                                   // keys zeroized, h
 It locks itself after 30 minutes without secret operations (configurable; `keep_alive`
 counts as one for work that will need the vault later, and never unlocks; operations a
 thread makes inside `VaultService::passively(|| ...)` do not count, for background
-reads such as a client's status and list polls, and still fail closed once the idle
-period has passed), re-reads the
+reads such as a client's status and list polls; once the vault locks, by the idle
+auto-lock or otherwise, they fail closed like any other operation, while `status`
+always answers), re-reads the
 disk while locked (so damage or an external restore is reported), and drops its session
 on a `Conflict` or an ambiguous post-rename commit to its own header (`ends_session`
 tells which errors did). Every end of an unlocked session (lock, idle auto-lock,
