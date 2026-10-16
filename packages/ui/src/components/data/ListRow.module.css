@@ -48,10 +48,14 @@
   color: var(--aidex-color-text-secondary);
 }
 
+/*
+ * The title column keeps at least 10rem; past that the meta columns give way first (their cells shrink
+ * alike, so rows of one list stay aligned). Whole words wrap; only a word wider than the column breaks.
+ */
 .body {
   display: grid;
   flex: 1;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(min(10rem, 100%), 1fr) minmax(0, auto);
   align-items: center;
   column-gap: var(--aidex-space-4);
   min-width: 0;
@@ -63,7 +67,7 @@
   font-size: var(--aidex-text-sm);
   font-weight: 500;
   line-height: 1.4;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .subtitle {
@@ -72,7 +76,7 @@
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
   line-height: 1.4;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .meta {
@@ -80,6 +84,7 @@
   grid-column: 2;
   grid-row: 1 / span 2;
   gap: var(--aidex-space-3);
+  min-width: 0;
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
   line-height: 1.4;
@@ -105,8 +110,15 @@
   padding-right: var(--aidex-space-2);
 }
 
-/* In narrow lists the meta columns become one wrapped line under the subtitle. */
-@container (max-width: 520px) {
+/*
+ * In lists narrower than about 760px (e.g. main beside a docked sidebar near the dock threshold) the
+ * meta columns become one wrapped line under the subtitle, and the title gets the full width.
+ */
+@container (max-width: 760px) {
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .meta {
     flex-wrap: wrap;
     grid-column: 1;
