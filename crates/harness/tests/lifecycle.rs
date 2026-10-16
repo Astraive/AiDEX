@@ -552,31 +552,35 @@ fn an_approval_answered_during_a_cancel_never_continues_the_runtime() {
     let runtime = f.pausing_runtime();
     let (root, approval) = f.paused("root", None);
     let (child, _) = f.paused("child", Some(&root.id));
-    // Approved once the root's tokens are cancelled, before its run is: the
-    // continuation reuses the cancelled tokens and stops at once.
+    // Approved once the root's cancel is under way, before its run is
+    // cancelled: the decision is refused and left to that cancel.
     let engine = f.engine.clone();
-    let id = root.id.clone();
-    let answered = Arc::new(AtomicBool::new(false));
-    let approved = answered.clone();
+    let answer = Arc::new(Mutex::new(None));
+    let answered = answer.clone();
     f.events.on_cancelled(&child.id, move || {
         let result = engine.respond(&approval.id, &approval.fingerprint, true, "approve");
-        approved.store(result.is_ok(), Ordering::SeqCst);
-        // Let the continuation settle the run before the cancel goes on.
-        let until = Instant::now() + Duration::from_secs(5);
-        while engine.store().run(&id).is_ok_and(|r| r.status.active()) && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        *answered.lock().unwrap() = Some(result.map(|_| ()));
     });
     assert_eq!(
         f.engine.cancel(&root.id).unwrap().status,
         RunStatus::Cancelled
     );
-    assert!(answered.load(Ordering::SeqCst));
+    let answer = answer.lock().unwrap().take().expect("the hook ran");
+    assert!(
+        answer
+            .as_ref()
+            .is_err_and(|e| e.starts_with("approval_expired")),
+        "{answer:?}"
+    );
     f.idle();
     assert_eq!(runtime.continued.load(Ordering::SeqCst), 0);
     assert_eq!(
         f.engine.store().run(&root.id).unwrap().status,
         RunStatus::Cancelled
+    );
+    assert_eq!(
+        f.engine.approvals(Some(&root.id)).unwrap()[0].status,
+        "expired"
     );
     assert_eq!(f.cancellations(&root.id), 1);
 }
