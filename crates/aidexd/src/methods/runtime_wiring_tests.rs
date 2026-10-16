@@ -1321,6 +1321,111 @@ fn a_vendor_process_paused_for_an_approval_is_released_by_a_lock_a_stop_or_going
     f.assert_no_credential_text();
 }
 
+#[test]
+fn the_vault_lock_rpc_leaves_a_run_paused_for_an_approval_resumable() {
+    let f = fixture();
+    f.ok(
+        "runtime.add",
+        peer_runtime("acp-approval", "acp", "approval"),
+    );
+    let session = f.runtime_session("acp-approval");
+    let paused = f.send(&session, "approval-explicit-lock");
+    wait_until("the vendor process pauses for its approval", || {
+        f.run_status(&paused) == RunStatus::WaitingApproval
+    });
+    assert_eq!(f.manager().parked_runs(), 1);
+    assert!(f.manager().temporary_homes() >= 1);
+    // Beside it, a run whose thread drives its runtime.
+    let (runtime, working) = blocking_run(&f);
+
+    // The method `aidex vault lock` and the desktop call, not only the
+    // vault's own lock.
+    let locked = f.ok("vault.lock", Value::Null);
+    assert_eq!(locked["was_unlocked"], true, "{locked}");
+    // The parked launch is released as by the idle lock: its process ended
+    // and its temporary home removed.
+    wait_released(&f, "the explicit lock releases the paused launch");
+    // The working run was cancelled, and recorded so, before the vault
+    // locked; the paused one was not (the run index is readable while
+    // locked).
+    runtime.assert_cancelled_once();
+    let status = |id: &str| {
+        f.services
+            .native()
+            .store()
+            .run_summaries()
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.id == id)
+            .unwrap()
+            .status
+    };
+    assert_eq!(status(&working), RunStatus::Cancelled);
+    assert_eq!(status(&paused), RunStatus::WaitingApproval);
+    // What clients poll while it is locked: the status answers, the lists
+    // give their locked views (no titles), views and secrets are refused.
+    assert_eq!(f.ok("vault.status", Value::Null)["state"], "locked");
+    let listed = f.ok("conversation.list", Value::Null);
+    let sessions = listed["sessions"].as_array().unwrap();
+    assert!(!sessions.is_empty(), "{listed}");
+    assert!(
+        sessions.iter().all(|s| s.get("title").is_none()),
+        "{listed}"
+    );
+    f.ok("execution.status", Value::Null);
+    for (method, params) in [
+        ("run.get", json!({"id": paused})),
+        ("approval.list", json!({"run_id": paused})),
+        ("conversation.get", json!({"id": session})),
+        ("vault.secret.list", Value::Null),
+    ] {
+        assert_eq!(
+            f.refused(method, params).0,
+            Some(ErrorCode::VaultLocked),
+            "{method}"
+        );
+    }
+
+    // The unlock settles the paused run as after any lock: interrupted, its
+    // approval expired, and resumable from its saved reference.
+    f.ok("vault.unlock", json!({"passphrase": PASSPHRASE}));
+    assert_eq!(f.run_status(&working), RunStatus::Cancelled);
+    assert_eq!(f.run_status(&paused), RunStatus::Interrupted);
+    let approvals = f.ok("approval.list", json!({"run_id": paused}));
+    assert_eq!(
+        approvals["approvals"][0]["status"], "expired",
+        "{approvals}"
+    );
+    assert_eq!(
+        f.ok("run.get", json!({"id": paused}))["has_runtime_ref"],
+        true
+    );
+    // `run.resume` continues it: the vendor is reached again.
+    f.ok("run.resume", json!({"id": paused}));
+    wait_until("the resumed run pauses again or ends", || {
+        !matches!(
+            f.run_status(&paused),
+            RunStatus::Running | RunStatus::Pending
+        )
+    });
+    let resumed = f.services.native().store().run(&paused).unwrap();
+    assert!(
+        matches!(
+            resumed.status,
+            RunStatus::WaitingApproval | RunStatus::Completed
+        ),
+        "{:?}: {:?}",
+        resumed.status,
+        resumed.error
+    );
+    if resumed.status.active() {
+        f.ok("run.cancel", json!({"id": paused}));
+        assert_eq!(f.wait_inactive(&paused), RunStatus::Cancelled);
+    }
+    wait_released(&f, "the cancel releases the resumed launch");
+    f.assert_no_credential_text();
+}
+
 /// The in-process runtime that stops only when the runtime gate closes.
 const GATE_BOUND: &str = "gate-bound-fixture";
 

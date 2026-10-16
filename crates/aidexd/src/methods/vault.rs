@@ -197,13 +197,20 @@ fn wire_error(error: &VaultError, session_dropped: bool) -> RpcError {
 }
 
 /// Lock the vault on the user's request (`vault.lock`, `emergency.stop` with
-/// `lock_vault`). Native runs are cancelled first, while the record key is still
-/// available, so they are recorded as cancelled. Ending the session then runs the
-/// daemon's lock cleanup (`services/vault_lock.rs`: uploads aborted, runtime
-/// logins cancelled and vendor processes ended, `vault.locked` recorded once)
-/// before this returns.
+/// `lock_vault`). Active runs are cancelled first, while the record key is still
+/// available, so they are recorded as cancelled: native runs, and external runs
+/// whose thread drives their vendor process. An external run paused for an
+/// approval is not: its parked launch is released (process ended, temporary home
+/// removed) and the unlock settles the run as `interrupted` (its approval
+/// expired), exactly as after the idle auto-lock, so `run.resume` continues it
+/// from its saved reference (a paused child whose parent is executing is
+/// cancelled with that parent). Ending the session then runs the daemon's lock
+/// cleanup (`services/vault_lock.rs`: uploads aborted, runtime logins cancelled
+/// and vendor processes ended, `vault.locked` recorded once) before this
+/// returns. `emergency.stop` has already cancelled every run, paused ones
+/// included, before it locks.
 pub(crate) fn lock_vault(services: &Services) -> LockOutcome {
-    services.native().cancel_all();
+    services.native().cancel_all_but_paused();
     services.vault().lock()
 }
 
