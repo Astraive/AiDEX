@@ -122,14 +122,16 @@ pub struct SecretList {
 const OAUTH_SECRET_PREFIX: &str = "oauth.";
 
 /// Whether `name` is a record AiDEX itself owns: the native record encryption
-/// key, the external runtime state key, the app and model preferences, or an
-/// `oauth.*` account sign-in. Only the owning services write or remove these.
+/// key, the external runtime state key, the app, model and appearance
+/// preferences, or an `oauth.*` account sign-in. Only the owning services write
+/// or remove these.
 pub fn managed_secret(name: &str) -> bool {
     [
         aidex_native_sessions::NATIVE_RECORD_KEY_SECRET,
         aidex_adapters::RUNTIME_STATE_KEY_SECRET,
         aidex_preferences::PREFERENCES_SECRET,
         aidex_preferences::MODEL_PREFERENCES_SECRET,
+        aidex_preferences::APPEARANCE_SECRET,
     ]
     .contains(&name)
         || name.starts_with(OAUTH_SECRET_PREFIX)
@@ -789,10 +791,11 @@ mod tests {
 
     /// The managed records the test seeds as their owners would (besides the
     /// native record key, which a conversation creates).
-    const SEEDED: [&str; 5] = [
+    const SEEDED: [&str; 6] = [
         "external-runtime-encryption-key",
         "aidex-preferences",
         "aidex-model-preferences",
+        "aidex-appearance",
         "oauth.openai.access",
         "oauth.hosts",
     ];
