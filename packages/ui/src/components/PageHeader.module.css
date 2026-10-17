@@ -111,6 +111,10 @@
   line-height: 1.4;
 }
 
+.sectionTitle:focus {
+  outline: none;
+}
+
 .small {
   font-size: var(--aidex-text-label);
 }

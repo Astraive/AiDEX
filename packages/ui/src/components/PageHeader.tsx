@@ -50,15 +50,23 @@ export type SectionHeaderProps = {
   /** Muted detail beside the title, e.g. "3 / 4 complete". */
   meta?: ReactNode;
   actions?: ReactNode;
+  /** Lets a page move focus to the section's title, e.g. once its list is empty; the title is then focusable programmatically. */
+  titleRef?: Ref<HTMLHeadingElement>;
   className?: string;
 };
 
 /** Heading row for a section within a page. */
-export function SectionHeader({ title, level = 2, meta, actions, className }: SectionHeaderProps) {
+export function SectionHeader({ title, level = 2, meta, actions, titleRef, className }: SectionHeaderProps) {
   const Heading = level === 2 ? "h2" : "h3";
   return (
     <div className={cx(styles.section, className)}>
-      <Heading className={cx(styles.sectionTitle, level === 3 && styles.small)}>{title}</Heading>
+      <Heading
+        ref={titleRef}
+        tabIndex={titleRef ? -1 : undefined}
+        className={cx(styles.sectionTitle, level === 3 && styles.small)}
+      >
+        {title}
+      </Heading>
       {meta || actions ? (
         <div className={styles.sectionEnd}>
           {meta ? <span className={styles.sectionMeta}>{meta}</span> : null}

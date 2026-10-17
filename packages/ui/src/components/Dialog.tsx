@@ -37,6 +37,12 @@ export type DialogProps = {
    * scrolls (so the keyboard can scroll it), then the footer, then the Close button.
    */
   initialFocusRef?: RefObject<HTMLElement | null>;
+  /**
+   * Where focus goes once the dialog has closed, in place of the element that opened it: called as
+   * focus would return, e.g. so a confirmed delete that removed its opener can focus the row that
+   * took its place. Returning nothing (or an element that cannot take focus) keeps the default.
+   */
+  returnFocus?: () => HTMLElement | null | undefined;
   /** Whether Escape and a press on the backdrop close the dialog (default true). Close always does. */
   dismissible?: boolean;
   /**
@@ -64,6 +70,7 @@ export function Dialog({
   size = "md",
   footer,
   initialFocusRef,
+  returnFocus,
   dismissible = true,
   keepMounted = false,
   children,
@@ -92,6 +99,8 @@ export function Dialog({
     }
   }
   useEffect(trackFocusHistory, []);
+  const returnFocusRef = useRef(returnFocus);
+  returnFocusRef.current = returnFocus;
 
   // The content mounts in the same commit as `open` turns true (so an owner's effect can focus into
   // it, as with an always-mounted dialog) and unmounts once the exit transition ends. Only the empty,
@@ -167,8 +176,8 @@ export function Dialog({
     });
     return false;
   };
-  // Once the exit transition ends (the focus trap is off by then), focus goes back to the opener,
-  // unless the user or the owner already moved it somewhere else, e.g. into another dialog.
+  // Once the exit transition ends (the focus trap is off by then), focus goes back to the opener (or
+  // where `returnFocus` says), unless the user or the owner already moved it, e.g. into another dialog.
   const wasPresentRef = useRef(present);
   useEffect(() => {
     const closed = wasPresentRef.current && !present;
@@ -178,7 +187,10 @@ export function Dialog({
     const root = popupRef.current;
     const lost = !(active instanceof HTMLElement) || active === document.body || (root?.contains(active) ?? false);
     if (!lost) return;
-    const target = returnTargetsRef.current.find((element) => !root?.contains(element) && canRestoreFocus(element));
+    const chosen = returnFocusRef.current?.();
+    const target = canRestoreFocus(chosen)
+      ? chosen
+      : returnTargetsRef.current.find((element) => !root?.contains(element) && canRestoreFocus(element));
     if (target instanceof HTMLElement) target.focus({ preventScroll: true });
   }, [present]);
   const setPopupElement = (element: HTMLDivElement | null) => {
