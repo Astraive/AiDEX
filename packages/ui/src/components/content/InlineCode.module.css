@@ -1,6 +1,6 @@
 /*
  * 12px beside 14px text (t3code's inline code), set in em so it stays in proportion inside headings
- * and at other chat text sizes.
+ * and at other chat text sizes, but never under the 11px floor (inside 12px text it would be 10.3px).
  */
 .code {
   padding: var(--aidex-space-0-5) var(--aidex-space-1-5);
@@ -8,7 +8,7 @@
   background: var(--aidex-color-surface-strong);
   color: var(--aidex-color-text);
   font-family: var(--aidex-font-mono);
-  font-size: 0.857em;
+  font-size: max(var(--aidex-text-2xs), 0.857em);
   overflow-wrap: anywhere;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;

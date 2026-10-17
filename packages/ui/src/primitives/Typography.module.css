@@ -27,6 +27,8 @@
 
 .text {
   margin: 0;
+  /* A word too long for the line (a path, an id) breaks instead of widening the page. */
+  overflow-wrap: break-word;
 }
 
 .body {
