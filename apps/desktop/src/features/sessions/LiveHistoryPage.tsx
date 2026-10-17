@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Dialog,
   List,
@@ -20,6 +20,7 @@ import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
 import type { SessionSummary } from "@aidex/client/dto/sessions";
 import { useRpc } from "../../hooks/useRpc";
+import { firstControl, useRemovalFocus } from "../../hooks/useRemovalFocus";
 import { useNavigation } from "../../app/providers/navigation";
 import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import { pageRangeLabel } from "./pageRange";
@@ -59,11 +60,20 @@ export function LiveHistoryPage() {
       .toLowerCase()
       .includes(query.toLowerCase()),
   );
+  // After a delete, focus moves to the row that took its place, else to the page title.
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const removalFocus = useRemovalFocus(
+    items.map((session) => session.id),
+    (index) => firstControl(listRef.current?.children[index]),
+    () => titleRef.current,
+  );
   const remove = async (session: SessionSummary) => {
     setDeleteBusy(true);
     setDeleteError(undefined);
     try {
       await call("conversation.delete", { id: session.id });
+      removalFocus.removed(session.id);
       setDeleting(undefined);
       sessions.refetch();
     } catch (caught) {
@@ -81,6 +91,7 @@ export function LiveHistoryPage() {
     <PageFrame width="default">
       <Stack gap={5}>
         <PageHeader
+          titleRef={titleRef}
           title="Session history"
           description="Conversations and task history stored on the portable drive."
         />
@@ -94,7 +105,7 @@ export function LiveHistoryPage() {
           <Notice tone="danger">{error ?? sessions.error?.message}</Notice>
         )}
         {/* Two meta columns, the state and then the date, each wide enough for a date on one line (as in Agents). */}
-        <List metaWidth="160px">
+        <List ref={listRef} metaWidth="160px">
           {items.map((session) => (
             <ListRow
               key={session.id}
@@ -182,6 +193,7 @@ export function LiveHistoryPage() {
         title="Delete this conversation?"
         description={`${deleting?.title || (deleting?.locked ? "This locked conversation" : "This conversation")} and its AiDEX history are deleted. Project files are kept.`}
         onClose={closeDelete}
+        returnFocus={removalFocus.returnFocus}
       >
         <Stack gap={4}>
           {deleteError && (

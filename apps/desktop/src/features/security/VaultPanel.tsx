@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   DataTable,
   Dialog,
@@ -17,6 +17,7 @@ import { toAidexError } from "@aidex/client/errors";
 import type { SecretMeta, VaultState } from "@aidex/client/dto/vault";
 import { useNavigation } from "../../app/providers/navigation";
 import { useToast } from "../../app/providers/toast";
+import { firstControl, useRemovalFocus } from "../../hooks/useRemovalFocus";
 import { useRpc } from "../../hooks/useRpc";
 import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import { AddSecretForm, secretKindLabels } from "./AddSecretForm";
@@ -82,6 +83,16 @@ export function VaultPanel({ status }: Props) {
     status.refresh();
   };
 
+  // After a delete, focus moves to the row that took its place (or the nearest one AiDEX does not
+  // manage), else to the Secrets heading.
+  const secretsTitleRef = useRef<HTMLHeadingElement>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const removalFocus = useRemovalFocus(
+    rows.map((row) => row.secret_ref.secret_id),
+    (index) => firstControl(tableRef.current?.tBodies[0]?.rows[index]),
+    () => secretsTitleRef.current,
+  );
+
   const lock = async () => {
     setBusy("lock");
     setLockError(undefined);
@@ -100,6 +111,7 @@ export function VaultPanel({ status }: Props) {
     setDeleteError(undefined);
     try {
       await call("vault.secret.delete", { name: secret.name });
+      removalFocus.removed(secret.secret_ref.secret_id);
       setDeleting(undefined);
       notify(`Deleted ${secret.name}. Handles issued for it are revoked.`);
       changed();
@@ -214,9 +226,14 @@ export function VaultPanel({ status }: Props) {
         <>
           <section>
             <Stack gap={4}>
-              <SectionHeader title="Secrets" meta={list ? `${rows.length} stored` : undefined} />
+              <SectionHeader
+                titleRef={secretsTitleRef}
+                title="Secrets"
+                meta={list ? `${rows.length} stored` : undefined}
+              />
               {secrets.error ? <Notice tone="danger">Cannot list secrets: {secrets.error.message}</Notice> : null}
               <DataTable
+                ref={tableRef}
                 caption="Vault secrets"
                 hideCaption
                 columns={columns}
@@ -304,6 +321,7 @@ export function VaultPanel({ status }: Props) {
         title={deleting ? `Delete ${deleting.name}?` : "Delete secret?"}
         description="The value is erased and every handle issued for it is revoked. Anything configured to use it will need a new secret."
         onClose={closeDelete}
+        returnFocus={removalFocus.returnFocus}
       >
         <Stack gap={4}>
           {deleteError ? (
@@ -319,6 +337,7 @@ export function VaultPanel({ status }: Props) {
               variant="primary"
               icon={<TrashIcon />}
               disabled={busy !== undefined || !deleting}
+              focusableWhenDisabled={busy === "delete"}
               onClick={() => deleting && void remove(deleting)}
             >
               {busy === "delete" ? "Deleting…" : "Delete secret"}
