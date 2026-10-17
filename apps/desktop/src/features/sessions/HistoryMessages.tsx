@@ -56,7 +56,7 @@ export function HistoryMessages({
         {history.error && <Notice tone="danger">{history.error.message}</Notice>}
         {/* A page may hold a call without its result (or the reverse); those rows show no status. */}
         <Transcript messages={history.data?.messages ?? []} options={{ running: false, complete: false }} />
-        <Stack direction="row" gap={2}>
+        <Stack direction="row" gap={2} align="center" wrap>
           <Button
             variant="outline"
             disabled={offset === 0}

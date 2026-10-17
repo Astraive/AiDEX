@@ -66,7 +66,7 @@ export function MessageContent({
         <Text>{text}</Text>
       )}
       {message.content_truncated && (
-        <Stack direction="row" gap={2}>
+        <Stack direction="row" gap={2} align="center" wrap>
           <Text tone="muted">Showing an excerpt of {message.content_bytes} bytes.</Text>
           <Button variant="ghost" onClick={() => read()}>
             Read full content in pages
