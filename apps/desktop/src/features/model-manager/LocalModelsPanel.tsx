@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { List, ListRow, Notice } from "@aidex/ui/components";
+import { useEffect, useRef, useState } from "react";
+import { Dialog, List, ListRow, Notice } from "@aidex/ui/components";
+import { TrashIcon } from "@aidex/ui/icons";
 import {
   Button,
   Card,
@@ -10,8 +11,9 @@ import {
 } from "@aidex/ui/primitives";
 import { call } from "@aidex/client/rpc";
 import { toAidexError } from "@aidex/client/errors";
-import type { InferenceBackend } from "@aidex/client/dto/inference";
+import type { InferenceBackend, ManagedModel } from "@aidex/client/dto/inference";
 import { useRpc } from "../../hooks/useRpc";
+import { firstControl, useRemovalFocus } from "../../hooks/useRemovalFocus";
 import { ModelInventory } from "./ModelInventory";
 import { LocalInferenceNotice } from "./LocalInferenceNotice";
 import { useInferenceStatus } from "../../hooks/useInferenceStatus";
@@ -27,6 +29,10 @@ export function LocalModelsPanel() {
   const [threads, setThreads] = useState("2");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  // The remove confirmation; a failed remove is reported inside it.
+  const [removing, setRemoving] = useState<ManagedModel>();
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<string>();
   const starting = status.data?.state === "starting";
   const installed = !!catalog.data?.models.length;
   useEffect(() => {
@@ -53,6 +59,35 @@ export function LocalModelsPanel() {
     } finally {
       setBusy(false);
     }
+  };
+  // After a remove, focus moves to the row that took its place, else to the import field shown
+  // once no model is left.
+  const importRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const removalFocus = useRemovalFocus(
+    catalog.data?.models.map((model) => model.id) ?? [],
+    (index) => firstControl(listRef.current?.children[index]),
+    () => importRef.current,
+  );
+  const remove = async (model: ManagedModel) => {
+    setRemoveBusy(true);
+    setRemoveError(undefined);
+    try {
+      await call("inference.model.remove", { id: model.id });
+      removalFocus.removed(model.id);
+      setRemoving(undefined);
+      catalog.refetch();
+      status.refetch();
+    } catch (caught) {
+      setRemoveError(toAidexError(caught).message);
+    } finally {
+      setRemoveBusy(false);
+    }
+  };
+  const closeRemove = () => {
+    if (removeBusy) return;
+    setRemoving(undefined);
+    setRemoveError(undefined);
   };
   return (
     <Stack gap={5}>
@@ -101,6 +136,7 @@ export function LocalModelsPanel() {
           {!!catalog.data && (!installed || showImport) && (
             <>
               <TextField
+                ref={importRef}
                 label="Import GGUF file"
                 value={source}
                 onChange={(event) => setSource(event.target.value)}
@@ -198,7 +234,7 @@ export function LocalModelsPanel() {
           Stop inference
         </Button>
       )}
-      <List>
+      <List ref={listRef}>
         {catalog.data?.models.map((model) => (
           <ListRow
             key={model.id}
@@ -252,15 +288,10 @@ export function LocalModelsPanel() {
                     busy || starting || status.data?.model_id === model.id
                   }
                   variant="ghost"
+                  aria-haspopup="dialog"
                   onClick={() => {
-                    if (
-                      window.confirm(
-                        `Remove the managed copy of ${model.name}? The original import is preserved.`,
-                      )
-                    )
-                      void act(() =>
-                        call("inference.model.remove", { id: model.id }),
-                      );
+                    setRemoveError(undefined);
+                    setRemoving(model);
                   }}
                 >
                   Remove
@@ -274,6 +305,39 @@ export function LocalModelsPanel() {
         <Text tone="muted">Import a GGUF model to use local chat.</Text>
       )}
       <ModelInventory localOnly />
+      <Dialog
+        open={removing !== undefined}
+        title={
+          removing
+            ? `Remove the managed copy of ${removing.name}?`
+            : "Remove this model?"
+        }
+        description="The copy AiDEX keeps on this drive is deleted. The original import is preserved."
+        onClose={closeRemove}
+        returnFocus={removalFocus.returnFocus}
+      >
+        <Stack gap={4}>
+          {removeError && (
+            <Notice tone="danger" role="alert">
+              {removeError}
+            </Notice>
+          )}
+          <Stack direction="row" gap={2} justify="end">
+            <Button variant="ghost" disabled={removeBusy} onClick={closeRemove}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              icon={<TrashIcon />}
+              disabled={removeBusy || !removing}
+              focusableWhenDisabled={removeBusy}
+              onClick={() => removing && void remove(removing)}
+            >
+              {removeBusy ? "Removing…" : "Remove model"}
+            </Button>
+          </Stack>
+        </Stack>
+      </Dialog>
     </Stack>
   );
 }
