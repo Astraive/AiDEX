@@ -31,8 +31,8 @@ function DetailState({ loading, error, failed }: { loading: boolean; error?: str
   return <Text tone="muted">{failed ?? "This result could not be read."}</Text>;
 }
 
-/** The failure text a tool stored as its result. */
-function FailureDetail({ entry }: { entry: ToolEntry }) {
+/** The failure text a tool stored as its result; as a `WorkLogRow`'s detail, a long one is read once the row expands. */
+export function FailureDetail({ entry }: { entry: ToolEntry }) {
   const { scope } = useTranscript();
   const full = useFullContent(entry.result, scope);
   if (!entry.result) return null;
