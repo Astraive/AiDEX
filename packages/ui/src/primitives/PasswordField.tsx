@@ -22,6 +22,7 @@ export function PasswordField({ revealLabel = "Show password", ...props }: Passw
       autoCorrect="off"
       trailing={
         <IconButton
+          size="sm"
           label={revealLabel}
           aria-pressed={revealed}
           icon={revealed ? <EyeOffIcon /> : <EyeIcon />}

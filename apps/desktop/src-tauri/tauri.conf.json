@@ -15,8 +15,8 @@
         "title": "AiDEX",
         "width": 1440,
         "height": 920,
-        "minWidth": 980,
-        "minHeight": 640,
+        "minWidth": 800,
+        "minHeight": 560,
         "resizable": true,
         "dragDropEnabled": false
       }

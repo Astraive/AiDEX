@@ -1,9 +1,10 @@
 .container {
   width: 100%;
   margin-inline: auto;
-  padding-inline: var(--aidex-space-6);
+  padding-inline: var(--aidex-space-5);
 }
 
+/* Widths include the side padding. `md` and `lg` follow the page widths; `prose` the chat lane. */
 .xs {
   max-width: 616px;
 }
@@ -13,15 +14,15 @@
 }
 
 .prose {
-  max-width: 838px;
+  max-width: calc(var(--aidex-chat-max-width) + 2 * var(--aidex-space-5));
 }
 
 .md {
-  max-width: 928px;
+  max-width: var(--aidex-page-max-width);
 }
 
 .lg {
-  max-width: 1168px;
+  max-width: var(--aidex-page-max-width-full);
 }
 
 /* Auto block margins absorb free space in a flex column, centering without clipping on overflow. */

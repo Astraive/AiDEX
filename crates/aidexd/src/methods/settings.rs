@@ -1,6 +1,7 @@
 //! Settings stored in the encrypted portable vault: `settings.*` (the
-//! application preferences) and `model.preferences.*` (model picker favorites
-//! and hidden models, a separate record).
+//! application preferences), `model.preferences.*` (model picker favorites
+//! and hidden models), and `appearance.*` (interface scale, density, text
+//! sizes, and layout). The last two are separate records.
 use crate::{
     errors::{ErrorCode, RpcError},
     router::{Router, RouterError},
@@ -8,7 +9,8 @@ use crate::{
     services::Services,
 };
 use aidex_preferences::{
-    ModelPreferencesPatch, ModelPreferencesService, PreferencesError, PreferencesService,
+    AppearancePatch, AppearanceService, ModelPreferencesPatch, ModelPreferencesService,
+    PreferencesError, PreferencesService,
 };
 use aidex_vault::VaultService;
 use serde::Deserialize;
@@ -18,6 +20,8 @@ pub const SETTINGS_GET: &str = "settings.get";
 pub const SETTINGS_SET: &str = "settings.set";
 pub const MODEL_PREFERENCES_GET: &str = "model.preferences.get";
 pub const MODEL_PREFERENCES_SET: &str = "model.preferences.set";
+pub const APPEARANCE_GET: &str = "appearance.get";
+pub const APPEARANCE_SET: &str = "appearance.set";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +41,9 @@ fn error(vault: &VaultService, error: PreferencesError) -> RpcError {
 pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<(), RouterError> {
     let settings = Arc::new(PreferencesService::new(services.vault().clone()));
     let shared = settings.clone();
+    // Appearance writes the base density through this same service, so its lock
+    // also orders them against `settings.set`.
+    let appearance_settings = settings.clone();
     let vault = Arc::clone(services.vault());
     router.register(SETTINGS_GET, move |_, params| {
         expect_no_params(&params)?;
@@ -62,6 +69,23 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
     router.register(MODEL_PREFERENCES_SET, move |_, params| {
         let patch: ModelPreferencesPatch = parse_params(params)?;
         to_result(&models.set(patch).map_err(|e| error(&vault, e))?)
+    })?;
+    let appearance = Arc::new(AppearanceService::new(services.vault().clone()));
+    let shared = appearance.clone();
+    let prefs = appearance_settings.clone();
+    let vault = Arc::clone(services.vault());
+    router.register(APPEARANCE_GET, move |_, params| {
+        expect_no_params(&params)?;
+        to_result(&shared.get(&prefs).map_err(|e| error(&vault, e))?)
+    })?;
+    let vault = Arc::clone(services.vault());
+    router.register(APPEARANCE_SET, move |_, params| {
+        let patch: AppearancePatch = parse_params(params)?;
+        to_result(
+            &appearance
+                .set(patch, &appearance_settings)
+                .map_err(|e| error(&vault, e))?,
+        )
     })?;
     Ok(())
 }
@@ -171,6 +195,109 @@ mod tests {
     }
 
     #[test]
+    fn appearance_is_its_own_record_and_mirrors_density() {
+        let (_root, services, router, context) = fixture();
+        let passphrase = SecretString::new("fixture passphrase only".into());
+        services.vault().init(&passphrase, false).unwrap();
+        services.vault().lock();
+        for (method, params) in [
+            (APPEARANCE_GET, Value::Null),
+            (APPEARANCE_SET, json!({"ui_scale": 110})),
+        ] {
+            let locked = router.call(&context, method, params).unwrap_err();
+            assert_eq!(locked.kind(), Some(ErrorCode::VaultLocked), "{method}");
+        }
+        services.vault().unlock(&passphrase).unwrap();
+
+        let defaults = json!({
+            "ui_scale": 100, "density": "comfortable", "chat_width": "comfortable",
+            "chat_font_size": 14, "code_font_size": 13, "sidebar_width": null,
+            "sidebar_auto_collapse": true, "message_spacing": "comfortable"
+        });
+        assert_eq!(
+            router.call(&context, APPEARANCE_GET, Value::Null).unwrap(),
+            defaults
+        );
+        let extra = router
+            .call(&context, APPEARANCE_GET, json!({"ui_scale": 100}))
+            .unwrap_err();
+        assert_eq!(extra.kind(), Some(ErrorCode::InvalidParams));
+
+        // The base density is the application preferences' own.
+        router
+            .call(
+                &context,
+                SETTINGS_SET,
+                json!({"patch": {"density": "compact"}}),
+            )
+            .unwrap();
+        assert_eq!(
+            router.call(&context, APPEARANCE_GET, Value::Null).unwrap()["density"],
+            "compact"
+        );
+
+        // Spacious is a refinement an older version never sees.
+        let saved = router
+            .call(
+                &context,
+                APPEARANCE_SET,
+                json!({"density": "spacious", "ui_scale": 110}),
+            )
+            .unwrap();
+        assert_eq!(saved["density"], "spacious");
+        assert_eq!(saved["ui_scale"], 110);
+        let settings = router.call(&context, SETTINGS_GET, Value::Null).unwrap();
+        assert_eq!(settings["density"], "comfortable");
+        assert!(settings.get("ui_scale").is_none());
+        assert_eq!(
+            router.call(&context, APPEARANCE_GET, Value::Null).unwrap(),
+            saved
+        );
+
+        let saved = router
+            .call(
+                &context,
+                APPEARANCE_SET,
+                json!({"sidebar_width": 300, "chat_font_size": 16}),
+            )
+            .unwrap();
+        assert_eq!(saved["sidebar_width"], 300);
+        assert_eq!(saved["chat_font_size"], 16);
+        assert_eq!(saved["density"], "spacious");
+        let saved = router
+            .call(&context, APPEARANCE_SET, json!({"sidebar_width": null}))
+            .unwrap();
+        assert_eq!(saved["sidebar_width"], Value::Null);
+        assert_eq!(saved["chat_font_size"], 16);
+
+        for refused in [
+            json!({"zoom": 1}),
+            json!({"ui_scale": 200}),
+            json!({"ui_scale": "big"}),
+            json!({"density": "dense"}),
+            json!({"code_font_size": 9}),
+            json!({"chat_font_size": 11}),
+            json!({"chat_font_size": 21}),
+            json!({"sidebar_width": 100}),
+            json!({"density": "compact", "ui_scale": 74}),
+            json!("ui_scale"),
+        ] {
+            let error = router
+                .call(&context, APPEARANCE_SET, refused.clone())
+                .unwrap_err();
+            assert_eq!(error.kind(), Some(ErrorCode::InvalidParams), "{refused}");
+        }
+        assert_eq!(
+            router.call(&context, APPEARANCE_GET, Value::Null).unwrap(),
+            saved
+        );
+        assert_eq!(
+            router.call(&context, SETTINGS_GET, Value::Null).unwrap()["density"],
+            "comfortable"
+        );
+    }
+
+    #[test]
     fn writes_that_drop_the_vault_session_report_session_dropped() {
         let (_root, services, router, context) = fixture();
         let passphrase = SecretString::new("fixture passphrase only".into());
@@ -187,6 +314,18 @@ mod tests {
         fail_next_write(services.vault().dir(), WriteFailure::AfterRename);
         let uncertain = router
             .call(&context, MODEL_PREFERENCES_SET, json!({"hidden_models":[]}))
+            .unwrap_err();
+        assert_eq!(
+            uncertain.data,
+            Some(json!({"reason": "io", "session_dropped": true}))
+        );
+        assert_eq!(services.vault().status().state, VaultState::Locked);
+
+        // An appearance write reports the same.
+        services.vault().unlock(&passphrase).unwrap();
+        fail_next_write(services.vault().dir(), WriteFailure::AfterRename);
+        let uncertain = router
+            .call(&context, APPEARANCE_SET, json!({"ui_scale": 110}))
             .unwrap_err();
         assert_eq!(
             uncertain.data,
@@ -218,5 +357,25 @@ mod tests {
             .call(&context, SETTINGS_GET, Value::Null)
             .unwrap_err();
         assert_eq!(locked.data, Some(json!({"reason": "locked"})));
+
+        services.vault().unlock(&passphrase).unwrap();
+        Vault::open(services.vault().dir())
+            .unwrap()
+            .unlock(&passphrase)
+            .unwrap()
+            .put(
+                &SecretName::new("another").unwrap(),
+                SecretKind::Generic,
+                SecretBytes::from(b"value".to_vec()),
+                SecretPolicy::new([ConsumerScope::provider("openai").unwrap()]).unwrap(),
+            )
+            .unwrap();
+        let conflict = router
+            .call(&context, APPEARANCE_SET, json!({"ui_scale": 125}))
+            .unwrap_err();
+        assert_eq!(
+            conflict.data,
+            Some(json!({"reason": "conflict", "session_dropped": true}))
+        );
     }
 }

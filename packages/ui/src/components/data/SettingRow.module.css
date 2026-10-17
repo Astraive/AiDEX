@@ -1,16 +1,26 @@
+/* The row is the size container; the grid lives one level down so the container query can change it. */
 .row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--aidex-space-6);
+  container-type: inline-size;
   min-width: 0;
-  padding: var(--aidex-space-4) var(--aidex-space-1);
+  padding: var(--aidex-space-3) var(--aidex-space-1);
   border-bottom: 1px solid var(--aidex-color-border);
+}
+
+/* A lone row (e.g. one setting in a Card) has no neighbour to rule off; its container closes it. */
+.row:only-child {
+  border-bottom: 0;
+}
+
+/* The control column never drops below 160px, so short controls do not squeeze long text. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, auto);
+  align-items: center;
+  gap: var(--aidex-space-8);
 }
 
 .text {
   display: flex;
-  flex: 1;
   flex-direction: column;
   min-width: 0;
 }
@@ -31,7 +41,31 @@
 
 .control {
   display: inline-flex;
-  flex: none;
   align-items: center;
+  justify-self: end;
   gap: var(--aidex-space-2);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.reset {
+  flex: none;
+}
+
+/* Narrow rows stack: the control goes under the text and fills the width (switches keep their size). */
+@container (max-width: 511.98px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--aidex-space-3);
+  }
+
+  .control {
+    display: flex;
+    justify-self: stretch;
+  }
+
+  .control > :not(.reset):not([role="switch"]) {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
 }

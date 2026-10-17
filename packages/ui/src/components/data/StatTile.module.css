@@ -48,7 +48,7 @@
   content: "";
   flex: none;
   width: 3px;
-  height: 14px;
+  height: var(--aidex-icon-sm);
   border-radius: var(--aidex-radius-full);
   background: var(--tile-tone);
 }
@@ -58,7 +58,8 @@
   margin: 0;
   color: var(--aidex-color-text);
   font-family: var(--aidex-font-sans);
-  font-size: 28px;
+  /* 22px: between text-xl and text-2xl. */
+  font-size: calc(var(--aidex-text-xl) + var(--aidex-space-0-5));
   font-weight: 600;
   line-height: 1.2;
   letter-spacing: -0.01em;
@@ -76,14 +77,14 @@
   display: inline-grid;
   flex: none;
   place-items: center;
-  width: 36px;
-  height: 36px;
-  border-radius: var(--aidex-radius-md);
+  width: var(--aidex-control-sm);
+  height: var(--aidex-control-sm);
+  border-radius: var(--aidex-radius-sm);
   background: color-mix(in srgb, var(--tile-tone) 14%, transparent);
   color: var(--tile-tone);
 }
 
 .icon svg {
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }

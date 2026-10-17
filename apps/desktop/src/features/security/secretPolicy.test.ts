@@ -74,6 +74,7 @@ test("records AiDEX manages cannot be replaced or deleted from the vault screen"
   for (const name of [
     "aidex-preferences",
     "aidex-model-preferences",
+    "aidex-appearance",
     "native-record-encryption-key",
     "external-runtime-encryption-key",
     "oauth.openai.profile",

@@ -1,52 +1,148 @@
-.dialog {
-  width: min(480px, calc(100vw - 32px));
-  max-height: calc(100dvh - 64px);
-  padding: var(--aidex-space-5);
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--aidex-z-dialog);
+  background: #0008;
+  backdrop-filter: blur(4px);
+  transition: opacity 200ms var(--aidex-ease);
+}
+
+.backdrop[data-starting-style],
+.backdrop[data-ending-style] {
+  opacity: 0;
+}
+
+/*
+ * A closed dialog keeps its empty parts in the page (marked `hidden`); they draw nothing. As it opens
+ * (`data-open`), the popup is laid out at once, so the content can take focus in the same commit,
+ * but stays transparent until the enter transition starts.
+ */
+.backdrop[hidden],
+.viewport[hidden]:not([data-open]),
+.popup[hidden]:not([data-open]) {
+  display: none;
+}
+
+.popup[hidden][data-open] {
+  opacity: 0;
+}
+
+/* Centers the popup and keeps 16px to the window edges. */
+.viewport {
+  position: fixed;
+  inset: 0;
+  z-index: var(--aidex-z-dialog);
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  place-items: center;
+  padding: var(--aidex-space-4);
+}
+
+/*
+ * The popup is the portal root for popovers opened inside it, so it has no transform, filter or
+ * containment at rest (those would offset their fixed positioning); scale applies only in transit.
+ */
+.popup {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(var(--aidex-dialog-width-md), 100%);
+  max-height: 100%;
+  overflow: hidden;
   border: 1px solid var(--aidex-color-border-strong);
   border-radius: var(--aidex-radius-xl);
   background: var(--aidex-color-surface-raised);
   color: var(--aidex-color-text);
   box-shadow: 0 20px 80px #0008;
+  outline: none;
+  transition:
+    opacity 200ms var(--aidex-ease),
+    transform 200ms var(--aidex-ease);
 }
+
+.popup[data-starting-style],
+.popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.98);
+}
+
+/* A closing dialog shows its last content but takes no more input. */
+.popup[data-ending-style] {
+  pointer-events: none;
+}
+
 .md {
-  width: min(480px, calc(100vw - 32px));
+  width: min(var(--aidex-dialog-width-md), 100%);
 }
+
 .lg {
-  width: min(720px, calc(100vw - 32px));
+  width: min(var(--aidex-dialog-width-lg), 100%);
 }
+
 .xl {
-  width: min(960px, calc(100vw - 32px));
+  width: min(var(--aidex-dialog-width-xl), 100%);
 }
-.dialog::backdrop {
-  background: #0008;
-  backdrop-filter: blur(4px);
-}
+
+/*
+ * Fixed above the scrolling body. 24px in from the edges (the t3code dialog), and the end padding
+ * clears the 32px Close button 8px in from the corner.
+ */
 .header {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.heading {
-  display: flex;
+  flex: none;
   flex-direction: column;
-  gap: var(--aidex-space-1);
+  gap: var(--aidex-space-2);
   min-width: 0;
-  padding-top: var(--aidex-space-1);
+  padding: var(--aidex-space-6) calc(var(--aidex-control-md) + var(--aidex-space-4)) var(--aidex-space-3)
+    var(--aidex-space-6);
 }
-.header h2 {
+
+.title {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--aidex-text-xl);
   font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
+
 .description {
   color: var(--aidex-color-text-muted);
-  font-size: var(--aidex-text-sm);
+  font-size: var(--aidex-text-label);
   line-height: 1.5;
 }
+
+.scroll {
+  flex: 1 1 auto;
+}
+
+/* 4px at the top keeps the first field's focus ring clear of the scroll edge. */
 .body {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--aidex-space-3);
+  padding: var(--aidex-space-1) var(--aidex-space-6) var(--aidex-space-6);
+}
+
+.footer {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--aidex-space-2);
+  padding: var(--aidex-space-4) var(--aidex-space-6);
+  border-top: 1px solid var(--aidex-color-border-subtle);
+}
+
+.close {
+  position: absolute;
+  top: var(--aidex-space-2);
+  inset-inline-end: var(--aidex-space-2);
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .backdrop,
+  .popup {
+    transition: none;
+  }
 }

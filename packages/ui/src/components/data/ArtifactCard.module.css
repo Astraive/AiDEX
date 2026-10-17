@@ -15,8 +15,8 @@
   display: inline-grid;
   flex: none;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: var(--aidex-control-md);
+  height: var(--aidex-control-md);
   border: 1px solid var(--aidex-color-border);
   border-radius: var(--aidex-radius-md);
   background: var(--aidex-color-surface-raised);
@@ -24,8 +24,8 @@
 }
 
 .media svg {
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .main {
@@ -59,7 +59,7 @@
   margin: 0;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--aidex-radius-xs);
   background: transparent;
   font-weight: inherit;
   line-height: inherit;
@@ -88,6 +88,14 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
   white-space: nowrap;
 }
 

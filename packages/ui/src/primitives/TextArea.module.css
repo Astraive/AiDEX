@@ -1,7 +1,7 @@
 .textarea {
   width: 100%;
-  min-height: 96px;
-  padding: var(--aidex-space-3) var(--aidex-space-4);
+  min-height: calc(var(--aidex-space-12) + var(--aidex-space-6));
+  padding: var(--aidex-space-2) var(--aidex-control-pad-x);
   border: 1px solid var(--aidex-color-border);
   border-radius: var(--aidex-radius-md);
   outline: none;
@@ -9,7 +9,7 @@
   background: var(--aidex-color-surface-raised);
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-md);
-  line-height: 1.6;
+  line-height: var(--aidex-leading-body);
   transition:
     border-color var(--aidex-duration-fast) var(--aidex-ease),
     box-shadow var(--aidex-duration-fast) var(--aidex-ease);
@@ -30,8 +30,8 @@
 
 .monospace {
   font-family: var(--aidex-font-mono);
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: var(--aidex-text-label);
+  line-height: 1.54;
 }
 
 .invalid,

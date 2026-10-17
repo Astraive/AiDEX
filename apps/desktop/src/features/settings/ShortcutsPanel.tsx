@@ -1,5 +1,6 @@
 import { DataTable, SectionHeader, type DataTableColumn } from "@aidex/ui/components";
 import { Kbd, Stack, StatusIndicator, Text } from "@aidex/ui/primitives";
+import { useAppearance } from "../../app/providers/appearance";
 import { usePreferences } from "../../app/providers/preferences";
 import { useModifierKeyLabel } from "../../hooks/useModifierKeyLabel";
 import { keyChordParts } from "../../lib/keyChord";
@@ -10,11 +11,15 @@ import {
 } from "../../lib/shortcuts";
 import { plannedShortcuts, type Shortcut } from "./sample";
 
+/** Default of `AppPreferences.shortcuts.toggle_sidebar`; the shell binds the saved chord. */
+const DEFAULT_TOGGLE_SIDEBAR_SHORTCUT = "Mod+b";
+
 /** Keyboard shortcuts, marking which ones this build already handles. */
 export function ShortcutsPanel() {
   const modifierKey = useModifierKeyLabel();
   const { settings } = usePreferences();
-  const shortcuts: readonly Shortcut[] = [
+  const { unsupported } = useAppearance();
+  const handled: readonly Shortcut[] = [
     {
       id: "new-session",
       action: "New chat",
@@ -28,7 +33,21 @@ export function ShortcutsPanel() {
       chord: settings.shortcuts?.providers || DEFAULT_PROVIDERS_SHORTCUT,
       wired: true,
     },
-    ...plannedShortcuts,
+    {
+      id: "toggle-sidebar",
+      action: "Toggle sidebar",
+      chord: settings.shortcuts?.toggle_sidebar || DEFAULT_TOGGLE_SIDEBAR_SHORTCUT,
+      wired: true,
+    },
+    // The zoom keys are fixed (see app/providers/zoomKeys.ts) and need a Core with `appearance.*`.
+    { id: "zoom-in", action: "Zoom in", chord: "Mod+=", wired: !unsupported },
+    { id: "zoom-out", action: "Zoom out", chord: "Mod+-", wired: !unsupported },
+    { id: "zoom-reset", action: "Reset zoom", chord: "Mod+0", wired: !unsupported },
+  ];
+  // sample.ts may still list a handled shortcut (toggle sidebar) as planned; it is shown once, above.
+  const shortcuts: readonly Shortcut[] = [
+    ...handled,
+    ...plannedShortcuts.filter((planned) => !handled.some((shortcut) => shortcut.id === planned.id)),
   ];
 
   const columns: readonly DataTableColumn<Shortcut>[] = [

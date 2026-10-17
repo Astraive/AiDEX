@@ -70,8 +70,6 @@
   min-height: 0;
   padding: var(--aidex-space-8) var(--aidex-space-12) var(--aidex-space-8);
   overflow-y: auto;
-  scrollbar-color: var(--aidex-color-border) transparent;
-  scrollbar-width: thin;
 }
 
 .column {
@@ -97,7 +95,7 @@
 .note {
   margin: 0;
   color: var(--aidex-color-text-muted);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
 }
 
 .actions {

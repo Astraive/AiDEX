@@ -12,7 +12,8 @@ Reusable React hooks for the desktop app.
 | `useVaultLocks()` | How many times the vault locked while the workspace was open, from `VaultLockProvider` (`../services`); 0 outside it. See below. |
 | `usePoll(poll, intervalMs, { enabled, whileAway })` | Every timer that re-reads through the daemon. It polls only while the user is present (`presence.ts`: the window is visible and had keyboard, pointer, wheel, touch, or focus input in the last minute) and polls once at once when they come back. `whileAway` keeps a visible window polling without input; use it only for reads tied to work AiDEX Core already keeps the vault awake for (an executing run, not one waiting for an approval) or for reads that do not touch the vault. See below. |
 | `useCommandShortcut`, `useModifierKeyLabel` | Ctrl/⌘ shortcuts and the platform's command-key label. |
-| `useKeyChord(chord, handler, { enabled })` | Window-wide chords such as `Mod+Shift+M` (parsed by `lib/keyChord.ts`; `Mod` is ⌘ on Apple platforms, Ctrl elsewhere). |
+| `useKeyChord(chord, handler, { enabled })` | Window-wide chords such as `Mod+Shift+M` (parsed by `lib/keyChord.ts`; `Mod` is ⌘ on Apple platforms, Ctrl elsewhere). While a modal layer (a dialog, the command palette, the image viewer) is open the chord is swallowed and the handler does not run. |
+| `useMediaQuery(query)` | Whether a CSS media query matches, live as the window or its zoom changes (true while prerendering); the shell docks the sidebar with it. |
 
 Errors are `AidexError` (`@aidex/client/errors`): branch on `kind` (`bridge_unavailable`, `no_drive`, `daemon_unavailable`, `method_not_found`, ...), never on message text.
 

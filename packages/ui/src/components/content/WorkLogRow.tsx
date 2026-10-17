@@ -1,7 +1,8 @@
 "use client";
 
-import { Children, isValidElement, useId, useState, type ComponentPropsWithRef, type ReactNode } from "react";
+import { Children, isValidElement, useState, type ComponentPropsWithRef, type ReactNode } from "react";
 import { ChevronRightIcon, LoaderIcon } from "../../icons/interface";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../../primitives/Collapsible";
 import { StatusDot } from "../../primitives/StatusDot";
 import { cx } from "../../utils/cx";
 import a11y from "./a11y.module.css";
@@ -43,18 +44,21 @@ const DEFAULT_STATUS_TEXT: Record<WorkLogStatus, string | null> = {
 function useDisclosure({ expanded, defaultExpanded = false, onExpandedChange }: DisclosureProps) {
   const [internal, setInternal] = useState(defaultExpanded);
   const open = expanded ?? internal;
-  const toggle = () => {
-    const next = !open;
+  const setOpen = (next: boolean) => {
+    if (next === open) return;
     if (expanded === undefined) setInternal(next);
     onExpandedChange?.(next);
   };
-  return [open, toggle] as const;
+  return [open, setOpen] as const;
 }
 
 /**
  * One tool call in a transcript's work log (web search, page fetch, MCP call, skill load): icon,
  * label, muted detail, and status. With `children` the header is a disclosure button
- * (`aria-expanded`) that reveals the detail below it.
+ * (`aria-expanded`) that reveals the detail below it. The detail mounts the first time the row
+ * opens, so detail that loads more (the rest of a truncated tool result) waits until someone asks
+ * for it. After that it stays in the page, hidden until found, so find-in-page reaches it and
+ * reopens the row.
  */
 export function WorkLogRow({
   icon,
@@ -70,8 +74,10 @@ export function WorkLogRow({
   className,
   ...props
 }: WorkLogRowProps) {
-  const [open, toggle] = useDisclosure({ expanded, defaultExpanded, onExpandedChange });
-  const detailId = useId();
+  const [open, setOpen] = useDisclosure({ expanded, defaultExpanded, onExpandedChange });
+  // Set during render, not in an effect, so the first open already has its detail to show.
+  const [visited, setVisited] = useState(open);
+  if (open && !visited) setVisited(true);
   const hasDetail = children !== undefined && children !== null && children !== false;
   const words = statusText ?? DEFAULT_STATUS_TEXT[status];
   const line = (
@@ -91,7 +97,7 @@ export function WorkLogRow({
       ) : null}
       {status === "running" ? (
         <>
-          <LoaderIcon size={14} className={styles.spinner} />
+          <LoaderIcon className={styles.spinner} />
           {words ? <span className={a11y.visuallyHidden}>{`, ${words}`}</span> : null}
         </>
       ) : null}
@@ -103,34 +109,37 @@ export function WorkLogRow({
         </span>
       ) : null}
       {status === "completed" && words ? <span className={a11y.visuallyHidden}>{`, ${words}`}</span> : null}
-      {hasDetail ? <ChevronRightIcon size={14} className={cx(styles.chevron, open && styles.chevronOpen)} /> : null}
+      {hasDetail ? <ChevronRightIcon className={cx(styles.chevron, open && styles.chevronOpen)} /> : null}
     </>
   );
 
-  return (
-    <div className={cx(styles.row, className)} data-status={status} {...props}>
-      <div className={styles.headerRow}>
-        {hasDetail ? (
-          <button
-            type="button"
-            className={cx(styles.header, styles.toggle)}
-            aria-expanded={open}
-            aria-controls={open ? detailId : undefined}
-            onClick={toggle}
-          >
-            {line}
-          </button>
-        ) : (
+  const trailingPart = trailing ? <div className={styles.trailing}>{trailing}</div> : null;
+  if (!hasDetail) {
+    return (
+      <div className={cx(styles.row, className)} data-status={status} {...props}>
+        <div className={styles.headerRow}>
           <div className={styles.header}>{line}</div>
-        )}
-        {trailing ? <div className={styles.trailing}>{trailing}</div> : null}
-      </div>
-      {hasDetail && open ? (
-        <div id={detailId} className={styles.detail}>
-          {children}
+          {trailingPart}
         </div>
-      ) : null}
-    </div>
+      </div>
+    );
+  }
+  return (
+    <Collapsible
+      className={cx(styles.row, className)}
+      data-status={status}
+      {...props}
+      open={open}
+      onOpenChange={(next) => setOpen(next)}
+    >
+      <div className={styles.headerRow}>
+        <CollapsibleTrigger className={cx(styles.header, styles.toggle)}>{line}</CollapsibleTrigger>
+        {trailingPart}
+      </div>
+      <CollapsiblePanel className={styles.panel}>
+        {visited ? <div className={styles.detail}>{children}</div> : null}
+      </CollapsiblePanel>
+    </Collapsible>
   );
 }
 

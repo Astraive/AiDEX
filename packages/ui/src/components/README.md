@@ -2,7 +2,7 @@
 
 Product-level components shared across desktop, installer, and mobile:
 
-- Root: `Brand`, `Composer` (and its attach menu, `ComposerAttachMenu`), `Dialog`, `MediaItem`, `InfoCard`, `PageHeader` and `SectionHeader`, `ToastRegion`.
+- Root: `Brand`, `Composer` (and its attach menu, `ComposerAttachMenu`, on the `Menu` primitive), `Dialog` (Base UI), `MediaItem`, `InfoCard`, `PageHeader` and `SectionHeader`, and the toasts on Base UI Toast (`ToastProvider` with `useToastManager`, and `ToastRegion` for an owner-kept list).
 - `attachments/`: the composer's attachment tray (`AttachmentTray`), sent-message attachments (`MessageAttachments`), the image viewer (`ImageLightbox`), the page-level drop target (`FileDropZone`), the window drop guard (`useFileDropGuard`), and the drag guard for modals (`containFileDrag`, used by `Dialog` and `ImageLightbox`). Paste, drag, size, and data-URL rules live in `model.ts`; the shared drag-over state in `useFileDrop.ts`.
 - `ModelPicker/`: the provider-grouped model picker (`ModelPicker`, `ModelPickerTrigger`). Pure search ranking lives in `search.ts` and view derivation in `view.ts`, so both stay testable without a DOM.
 - `CommandMenu/`: the composer's `$` skills and `/` command popup (`CommandMenu`). Option ids, field ARIA, match highlighting, and the highlight and key logic (`resolveCommandMenuActive`, `commandMenuKeyAction`) live in `model.ts`.

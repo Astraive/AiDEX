@@ -18,6 +18,7 @@ import { ArrowUpIcon, PaperclipIcon } from "../icons/actions";
 import { InfoIcon, UploadIcon } from "../icons/interface";
 import { IconButton } from "../primitives/IconButton";
 import { cx } from "../utils/cx";
+import { useOverflowEdges } from "../utils/useOverflowEdges";
 import { DropOverlay } from "./attachments/DropOverlay";
 import { useInsideFileDropZone } from "./attachments/FileDropZone";
 import { isLargePaste, LARGE_PASTE_BYTES, shouldClaimFilePaste, type FileIntakeSource } from "./attachments/model";
@@ -151,7 +152,7 @@ export function Composer({
 }: ComposerProps) {
   const hintId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const attachButtonRef = useRef<HTMLButtonElement>(null);
+  const toolbarStartRef = useRef<HTMLDivElement>(null);
   const plainPasteUntil = useRef(0);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const insideDropZone = useInsideFileDropZone();
@@ -169,7 +170,16 @@ export function Composer({
   };
   const menuActions: ComposerAttachAction[] = [
     ...(onFiles !== undefined
-      ? [{ id: "upload", label: uploadLabel, icon: <UploadIcon />, disabled: !filesEnabled, onSelect: openFilePicker }]
+      ? [
+          {
+            id: "upload",
+            label: uploadLabel,
+            icon: <UploadIcon />,
+            disabled: !filesEnabled,
+            disabledReason: attachBlocked ? attachDisabledReason : undefined,
+            onSelect: openFilePicker,
+          },
+        ]
       : []),
     ...(attachActions ?? []),
   ];
@@ -234,10 +244,10 @@ export function Composer({
     if (files.length > 0 && !attachBlocked) onFiles?.(files, "picker");
   };
 
+  // With a menu, the menu's trigger opens it; this runs only for a plain attach button.
   const handleAttach = () => {
     if (!attachAvailable) return;
     if (onAttach) onAttach(openFilePicker);
-    else if (hasAttachMenu) setAttachMenuOpen((open) => !open);
     else openFilePicker();
   };
 
@@ -252,7 +262,23 @@ export function Composer({
     event.currentTarget.closest("form")?.querySelector("textarea")?.focus();
   };
 
-  const buttonSize = size === "compact" ? "md" : "lg";
+  useOverflowEdges(toolbarStartRef);
+
+  // Attach is blocked but stays focusable, so its tooltip can say why.
+  const attachFocusableWhileBlocked = attachBlocked && !disabled;
+  const attachButton = (
+    <IconButton
+      label={attachLabel}
+      {...(attachFocusableWhileBlocked ? { title: attachDisabledReason } : null)}
+      icon={<PaperclipIcon />}
+      variant="soft"
+      shape="circle"
+      size="sm"
+      disabled={!attachAvailable && !attachFocusableWhileBlocked}
+      aria-disabled={attachFocusableWhileBlocked ? true : undefined}
+      onClick={hasAttachMenu ? undefined : handleAttach}
+    />
+  );
 
   return (
     <form
@@ -269,7 +295,7 @@ export function Composer({
         value={value}
         placeholder={placeholder}
         aria-label={label}
-        rows={size === "compact" ? 1 : 2}
+        rows={size === "compact" ? 1 : 3}
         disabled={disabled}
         autoFocus={autoFocus}
         onChange={(event) => {
@@ -282,24 +308,22 @@ export function Composer({
         {...(suggestions ? commandMenuFieldProps(suggestions) : null)}
       />
       <div className={styles.toolbar} onMouseDown={focusField}>
-        <div className={styles.group}>
-          <IconButton
-            ref={attachButtonRef}
-            label={attachLabel}
-            {...(attachBlocked && !disabled ? { title: attachDisabledReason } : null)}
-            icon={<PaperclipIcon />}
-            variant="soft"
-            shape="circle"
-            size={buttonSize}
-            disabled={!attachAvailable && !(attachBlocked && !disabled)}
-            aria-disabled={attachBlocked && !disabled ? true : undefined}
-            aria-haspopup={hasAttachMenu ? "menu" : undefined}
-            aria-expanded={hasAttachMenu ? attachMenuOpen : undefined}
-            onClick={handleAttach}
-          />
+        <div ref={toolbarStartRef} className={cx(styles.group, styles.start)} onMouseDown={focusField}>
+          {hasAttachMenu ? (
+            <ComposerAttachMenu
+              open={attachMenuOpen && attachAvailable}
+              // A press while attaching is blocked must not leave the menu set to open later.
+              onOpenChange={(next) => setAttachMenuOpen(next && attachAvailable)}
+              trigger={attachButton}
+              actions={menuActions}
+              label={attachLabel}
+            />
+          ) : (
+            attachButton
+          )}
           {toolbarStart}
         </div>
-        <div className={styles.group}>
+        <div className={cx(styles.group, styles.end)}>
           {toolbarEnd}
           <IconButton
             type="submit"
@@ -308,7 +332,7 @@ export function Composer({
             icon={<ArrowUpIcon />}
             variant={canSubmit ? "primary" : "solid"}
             shape="circle"
-            size={buttonSize}
+            size="md"
             disabled={!canSubmit && !sendFocusableWhileBlocked}
             aria-disabled={sendFocusableWhileBlocked ? true : undefined}
             aria-describedby={blocked ? hintId : undefined}
@@ -317,7 +341,7 @@ export function Composer({
       </div>
       {blocked ? (
         <p id={hintId} className={styles.hint}>
-          <InfoIcon size={14} />
+          <InfoIcon />
           <span>{submitBlockedReason}</span>
         </p>
       ) : null}
@@ -331,15 +355,6 @@ export function Composer({
           tabIndex={-1}
           aria-hidden="true"
           onChange={handleFileInput}
-        />
-      ) : null}
-      {hasAttachMenu ? (
-        <ComposerAttachMenu
-          open={attachMenuOpen && attachAvailable}
-          onOpenChange={setAttachMenuOpen}
-          anchorRef={attachButtonRef}
-          actions={menuActions}
-          label={attachLabel}
         />
       ) : null}
       {drop.active ? (

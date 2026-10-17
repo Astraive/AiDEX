@@ -2,7 +2,7 @@
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--aidex-space-0-5);
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -21,7 +21,7 @@
   padding: var(--aidex-space-4) var(--aidex-space-3);
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-sm);
-  line-height: 1.5;
+  line-height: var(--aidex-leading-sm);
   text-align: center;
 }
 
@@ -29,10 +29,10 @@
   display: flex;
   flex: none;
   align-items: center;
-  gap: var(--aidex-space-2);
+  gap: var(--aidex-control-gap);
   min-width: 0;
-  min-height: 48px;
-  padding: var(--aidex-space-1) var(--aidex-space-1) var(--aidex-space-1) var(--aidex-space-2);
+  min-height: var(--aidex-control-xl);
+  padding: var(--aidex-space-1) var(--aidex-space-1) var(--aidex-space-1) var(--aidex-control-pad-x-xs);
   border-radius: var(--aidex-radius-sm);
   color: var(--aidex-color-text);
   cursor: pointer;
@@ -43,9 +43,15 @@
   background: color-mix(in srgb, var(--aidex-color-text) 5%, transparent);
 }
 
-/* The active option is the keyboard focus target (aria-activedescendant), so it gets a visible ring. */
+/*
+ * The active option is the keyboard focus target (aria-activedescendant). It is tinted like a hovered
+ * row, and gets a ring only while the keyboard drives the list (`data-modality` on the listbox).
+ */
 .active {
   background: var(--aidex-color-surface-hover);
+}
+
+[data-modality="keyboard"] > .active {
   box-shadow: inset 0 0 0 1px var(--aidex-color-accent-subtle-border);
 }
 
@@ -62,23 +68,23 @@
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 2px;
   min-width: 0;
 }
 
 .nameLine {
   display: flex;
   align-items: center;
-  gap: var(--aidex-space-2);
+  gap: var(--aidex-control-gap-sm);
   min-width: 0;
 }
 
+/* Name (13px) and detail (12px) lines of 16px fill the 40px option with its 4px padding. */
 .name {
   min-width: 0;
   overflow: hidden;
-  font-size: var(--aidex-text-sm);
+  font-size: var(--aidex-text-label);
   font-weight: 500;
-  line-height: 1.35;
+  line-height: var(--aidex-leading-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -90,7 +96,7 @@
 .detailLine {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--aidex-control-gap-sm);
   min-width: 0;
   color: var(--aidex-color-text-muted);
 }
@@ -104,7 +110,7 @@
   overflow: hidden;
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
-  line-height: 1.35;
+  line-height: var(--aidex-leading-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -121,17 +127,17 @@
 }
 
 .trailing .jump {
-  min-height: 20px;
-  padding: 0 6px;
-  border-radius: 6px;
-  font-size: 11px;
+  min-height: var(--aidex-kbd-height);
+  padding: 0 var(--aidex-space-1-5);
+  border-radius: var(--aidex-radius-sm);
+  font-size: var(--aidex-text-2xs);
 }
 
 .star {
   display: inline-grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: var(--aidex-control-sm);
+  height: var(--aidex-control-sm);
   padding: 0;
   border: 0;
   border-radius: var(--aidex-radius-sm);
@@ -146,6 +152,16 @@
 .star:hover:not(:disabled) {
   background: var(--aidex-color-surface-stronger);
   color: var(--aidex-color-text);
+}
+
+.star svg {
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
+}
+
+/* The list scrolls, which clips a ring drawn outside the button. */
+.star:focus-visible {
+  outline-offset: -2px;
 }
 
 .star:disabled {
@@ -164,6 +180,8 @@
 
 .chevron {
   flex: none;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
   margin-right: var(--aidex-space-1);
   color: var(--aidex-color-text-muted);
   transition: transform var(--aidex-duration-fast) var(--aidex-ease);

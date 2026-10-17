@@ -5,7 +5,7 @@
     "body body";
   grid-template-columns: 1fr auto;
   align-items: start;
-  gap: var(--aidex-space-5) var(--aidex-space-3);
+  gap: var(--aidex-space-4) var(--aidex-space-3);
 }
 
 .icon {
@@ -15,8 +15,8 @@
 }
 
 .icon svg {
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
 }
 
 .status {
@@ -36,6 +36,7 @@
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-lg);
   font-weight: 600;
+  line-height: 1.35;
 }
 
 .value,
@@ -47,6 +48,7 @@
 .value {
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-lg);
+  line-height: 1.35;
 }
 
 .detail {

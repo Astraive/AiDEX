@@ -24,6 +24,7 @@ pub fn run() {
             commands::rpc_subscribe,
             commands::rpc_unsubscribe,
             commands::select_drive,
+            commands::set_ui_scale,
         ])
         // A (re)loaded page has no listeners for earlier subscriptions.
         .on_page_load(|webview, payload| {

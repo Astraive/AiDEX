@@ -23,17 +23,24 @@ export function SectionSidebar({ title, action, headerExtra, children, brandSize
 
   const header = (
     <>
-      <Stack direction="row" align="center" justify="between">
+      <Stack direction="row" align="center" justify="between" gap={1}>
         <Brand name={title} size={brandSize} />
         <Stack direction="row" gap={1}>
-          <IconButton label="Jump to search" icon={<SearchIcon />} onClick={shell.focusSearch} />
-          <IconButton ref={shell.collapseButtonRef} label="Hide sidebar" icon={<PanelLeftIcon />} onClick={shell.collapseSidebar} />
+          <IconButton size="sm" label="Jump to search" icon={<SearchIcon />} onClick={shell.focusSearch} />
+          <IconButton
+            ref={shell.collapseButtonRef}
+            size="sm"
+            label="Hide sidebar"
+            icon={<PanelLeftIcon />}
+            shortcut={shell.sidebarShortcut}
+            onClick={shell.collapseSidebar}
+          />
         </Stack>
       </Stack>
       {action ? (
         <Button
           variant="raised"
-          size="lg"
+          size="md"
           fullWidth
           icon={action.icon}
           trailing={action.trailing}

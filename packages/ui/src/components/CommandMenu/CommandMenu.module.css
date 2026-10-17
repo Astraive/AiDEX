@@ -30,6 +30,11 @@
   padding: 0;
 }
 
+/* A scrolling list clips anything drawn outside it, so a ring on it is drawn inside. */
+.list:focus-visible {
+  outline-offset: -2px;
+}
+
 .section {
   display: flex;
   flex-direction: column;
@@ -37,11 +42,11 @@
 }
 
 .sectionLabel {
-  padding: var(--aidex-space-2) var(--aidex-space-2) var(--aidex-space-1);
+  padding: var(--aidex-space-1-5) var(--aidex-control-pad-x-xs) var(--aidex-space-1);
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
   font-weight: 500;
-  line-height: 1.3;
+  line-height: var(--aidex-leading-xs);
   user-select: none;
 }
 
@@ -49,19 +54,30 @@
   display: flex;
   flex: none;
   align-items: center;
-  gap: var(--aidex-space-2);
+  gap: var(--aidex-control-gap);
   min-width: 0;
-  min-height: 36px;
-  padding: var(--aidex-space-1) var(--aidex-space-2);
+  min-height: var(--aidex-row-sm);
+  padding: var(--aidex-space-1) var(--aidex-control-pad-x-xs);
   border-radius: var(--aidex-radius-sm);
   color: var(--aidex-color-text);
   cursor: pointer;
   user-select: none;
 }
 
-/* The active row is the keyboard focus target (aria-activedescendant), so it gets a visible ring. */
+/* The palette's taller rows. */
+.optionMd {
+  min-height: var(--aidex-row-md);
+}
+
+/*
+ * The active row is the keyboard focus target (aria-activedescendant). It is tinted like a hovered
+ * row, and gets a ring only while the keyboard drives the list (`data-modality` on the menu).
+ */
 .active {
   background: var(--aidex-color-surface-hover);
+}
+
+[data-modality="keyboard"] .active {
   box-shadow: inset 0 0 0 1px var(--aidex-color-accent-subtle-border);
 }
 
@@ -78,14 +94,14 @@
   display: inline-grid;
   flex: none;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
   color: var(--aidex-color-text-secondary);
 }
 
 .icon svg {
-  width: 16px;
-  height: 16px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .text {
@@ -103,7 +119,7 @@
   overflow: hidden;
   font-size: var(--aidex-text-sm);
   font-weight: 500;
-  line-height: 1.4;
+  line-height: var(--aidex-leading-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -133,7 +149,7 @@
   overflow: hidden;
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
-  line-height: 1.4;
+  line-height: var(--aidex-leading-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -148,24 +164,26 @@
   align-items: center;
   gap: var(--aidex-space-2);
   margin: 0;
-  padding: var(--aidex-space-3) var(--aidex-space-4);
+  padding: var(--aidex-space-3) var(--aidex-space-3);
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
-  line-height: 1.5;
+  line-height: var(--aidex-leading-xs);
 }
 
 .spinner {
   flex: none;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
   animation: spin 900ms linear infinite;
 }
 
 .footer {
   flex: none;
-  padding: var(--aidex-space-2) var(--aidex-space-3);
+  padding: var(--aidex-space-1-5) var(--aidex-space-3);
   border-top: 1px solid var(--aidex-color-border-subtle);
   color: var(--aidex-color-text-muted);
   font-size: var(--aidex-text-xs);
-  line-height: 1.4;
+  line-height: var(--aidex-leading-xs);
 }
 
 /* `html[data-reduce-motion="true"]` is handled globally in styles.css. */

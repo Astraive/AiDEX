@@ -10,6 +10,7 @@ export {
   PanelLeftIcon,
   PaperclipIcon,
   PlusCircleIcon,
+  RotateCcwIcon,
   SearchIcon,
 } from "./actions";
 export { BoxIcon, ChatIcon, ClockIcon, CloudIcon, GridIcon, HomeIcon, SettingsIcon, SmartphoneIcon, UsersIcon } from "./navigation";

@@ -1,24 +1,31 @@
 .conversation {
-  width: min(100%, 838px);
+  width: min(100%, calc(var(--aidex-chat-max-width) + 2 * var(--aidex-chat-lane-pad)));
   margin: 0 auto;
-  padding: 24px;
+  padding: var(--aidex-space-6) var(--aidex-chat-lane-pad);
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: var(--aidex-space-4);
 }
 .header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: var(--aidex-space-4);
 }
+/* A long title takes all the shrinking (it ellipsizes); the header actions keep their size. */
 .header h1 {
+  flex: 0 1 auto;
+  min-width: 0;
   margin: 0;
-  font-size: 18px;
+  font-size: var(--aidex-text-lg);
   font-weight: 600;
+  line-height: 1.3;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.header > :not(h1) {
+  flex: none;
 }
 .empty {
   min-height: 35vh;
@@ -26,18 +33,20 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: var(--aidex-space-3);
   text-align: center;
   color: var(--aidex-color-text-secondary);
 }
 .empty h2 {
   margin: 0;
-  font-size: 24px;
+  font-size: var(--aidex-text-xl);
   font-weight: 500;
+  line-height: 1.3;
   color: var(--aidex-color-text);
 }
-@media (max-width: 900px) {
+@container aidex-main (max-width: 640px) {
   .conversation {
-    padding: 16px;
+    width: min(100%, calc(var(--aidex-chat-max-width) + 2 * var(--aidex-chat-lane-pad-narrow)));
+    padding: var(--aidex-chat-lane-pad-narrow);
   }
 }

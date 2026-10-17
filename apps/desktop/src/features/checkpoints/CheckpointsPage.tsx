@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   CodeBlock,
+  Dialog,
+  InlineCode,
   List,
   ListRow,
   Notice,
@@ -81,6 +83,9 @@ export function CheckpointsPage() {
   const [current, setCurrent] = useState<string>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  // The restore confirmation; a failed restore is reported inside it.
+  const [confirming, setConfirming] = useState(false);
+  const [restoreError, setRestoreError] = useState<string>();
   // Late workspace and checkpoint-content answers must not replace a newer selection.
   const [selection] = useState(createLatestRequest);
   const [contentReads] = useState(createLatestRequest);
@@ -94,6 +99,8 @@ export function CheckpointsPage() {
   const clearSelection = () => {
     selection.invalidate();
     contentReads.invalidate();
+    setConfirming(false);
+    setRestoreError(undefined);
     setSelected(undefined);
     setBefore(undefined);
     setCurrent(undefined);
@@ -186,11 +193,8 @@ export function CheckpointsPage() {
   const restore = async () => {
     if (!selected || !route.id || !compare.data || compare.data.conflict)
       return;
-    if (
-      !window.confirm(`Restore ${selected.path} to its state before this edit?`)
-    )
-      return;
     setBusy(true);
+    setRestoreError(undefined);
     try {
       await call("checkpoint.restore", {
         session_id: route.id,
@@ -201,10 +205,15 @@ export function CheckpointsPage() {
       session.refetch();
       checkpoints.refetch();
     } catch (caught) {
-      setError(toAidexError(caught).message);
+      setRestoreError(toAidexError(caught).message);
     } finally {
       setBusy(false);
     }
+  };
+  const closeRestore = () => {
+    if (busy) return;
+    setConfirming(false);
+    setRestoreError(undefined);
   };
 
   const problem =
@@ -260,7 +269,7 @@ export function CheckpointsPage() {
           </Notice>
         )}
         {checkpoints.data && checkpoints.data.total_checkpoints > 0 && (
-          <Stack direction="row" gap={2}>
+          <Stack direction="row" gap={2} align="center" wrap>
             <Button
               variant="outline"
               disabled={shown.offset === 0}
@@ -320,7 +329,8 @@ export function CheckpointsPage() {
               )}
               <Button
                 disabled={busy || !compare.data || compare.data.conflict}
-                onClick={() => void restore()}
+                aria-haspopup="dialog"
+                onClick={() => setConfirming(true)}
               >
                 Restore checkpoint
               </Button>
@@ -328,6 +338,40 @@ export function CheckpointsPage() {
           </Card>
         )}
       </Stack>
+      <Dialog
+        open={confirming && selected !== undefined}
+        title="Restore this file?"
+        description={
+          selected ? (
+            <>
+              <InlineCode>{selected.path}</InlineCode> goes back to its state
+              before this edit.
+            </>
+          ) : undefined
+        }
+        onClose={closeRestore}
+      >
+        <Stack gap={4}>
+          {restoreError && (
+            <Notice tone="danger" role="alert">
+              {restoreError}
+            </Notice>
+          )}
+          <Stack direction="row" gap={2} justify="end">
+            <Button variant="ghost" disabled={busy} onClick={closeRestore}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              disabled={busy || !compare.data || compare.data.conflict}
+              focusableWhenDisabled={busy}
+              onClick={() => void restore()}
+            >
+              {busy ? "Restoring…" : "Restore checkpoint"}
+            </Button>
+          </Stack>
+        </Stack>
+      </Dialog>
     </PageFrame>
   );
 }

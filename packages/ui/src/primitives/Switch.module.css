@@ -3,9 +3,9 @@
   display: inline-flex;
   flex: none;
   align-items: center;
-  width: 40px;
-  height: 24px;
-  padding: 3px;
+  width: var(--aidex-switch-width);
+  height: var(--aidex-switch-height);
+  padding: calc((var(--aidex-switch-height) - var(--aidex-switch-thumb)) / 2);
   border: 0;
   border-radius: var(--aidex-radius-full);
   background: var(--aidex-color-surface-stronger);
@@ -23,8 +23,8 @@
 }
 
 .thumb {
-  width: 18px;
-  height: 18px;
+  width: var(--aidex-switch-thumb);
+  height: var(--aidex-switch-thumb);
   border-radius: var(--aidex-radius-full);
   background: var(--aidex-color-text);
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.4);
@@ -36,6 +36,7 @@
   background: var(--aidex-color-accent);
 }
 
+/* Travel: the track's inner width minus the thumb. */
 .on .thumb {
-  transform: translateX(16px);
+  transform: translateX(calc(var(--aidex-switch-width) - var(--aidex-switch-height)));
 }

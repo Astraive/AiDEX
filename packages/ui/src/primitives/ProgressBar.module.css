@@ -1,7 +1,7 @@
 .progress {
   display: flex;
   align-items: center;
-  gap: var(--aidex-space-6);
+  gap: var(--aidex-space-4);
 }
 
 .track {
@@ -22,6 +22,6 @@
 .count {
   flex: none;
   color: var(--aidex-color-text);
-  font-size: var(--aidex-text-lg);
+  font-size: var(--aidex-text-sm);
   font-variant-numeric: tabular-nums;
 }

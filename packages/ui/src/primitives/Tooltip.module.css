@@ -1,0 +1,57 @@
+/* Tooltips never take pointer input, so they cannot block what they describe. */
+.positioner {
+  z-index: var(--aidex-z-tooltip);
+  max-width: var(--available-width);
+  pointer-events: none;
+}
+
+.popup {
+  display: flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  max-width: var(--aidex-tooltip-max-width);
+  padding: var(--aidex-space-1) var(--aidex-space-2);
+  border: 1px solid var(--aidex-color-border-subtle);
+  border-radius: var(--aidex-radius-sm);
+  background: var(--aidex-color-surface-raised);
+  box-shadow: var(--aidex-popup-shadow);
+  color: var(--aidex-color-text);
+  font-size: var(--aidex-text-xs);
+  font-weight: 500;
+  line-height: var(--aidex-leading-xs);
+  overflow-wrap: anywhere;
+  transform-origin: var(--transform-origin);
+  transition:
+    opacity 120ms var(--aidex-ease),
+    transform 120ms var(--aidex-ease);
+}
+
+.popup[data-starting-style],
+.popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.98);
+}
+
+/* The next tooltip in a group opens without the transition. */
+.popup[data-instant] {
+  transition: none;
+}
+
+.text {
+  min-width: 0;
+}
+
+.shortcut {
+  min-height: 0;
+  padding: 0 var(--aidex-space-1);
+  border-radius: var(--aidex-radius-xs);
+  font-size: var(--aidex-text-2xs);
+  line-height: var(--aidex-leading-xs);
+}
+
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .popup {
+    transition: none;
+  }
+}

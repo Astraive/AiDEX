@@ -1,9 +1,20 @@
 .layout {
+  position: relative;
   display: flex;
   flex-direction: column;
+  height: 100vh;
   height: 100dvh;
   overflow-y: auto;
   background: var(--aidex-color-bg);
-  scrollbar-color: var(--aidex-color-border) transparent;
-  scrollbar-width: thin;
+}
+
+/*
+ * Short windows (the 800x560 minimum at 125% is 448px tall): the large launch gaps and the vertically
+ * centred container's padding tighten, so the cards and their primary action fit without scrolling.
+ */
+@media (max-height: 560px) {
+  .layout {
+    --aidex-space-8: var(--aidex-space-4);
+    --aidex-space-10: var(--aidex-space-6);
+  }
 }

@@ -13,7 +13,7 @@ export { planLineCount, planPreview, splitPlanMarkdown, type PlanParts } from ".
 export { ProviderRow, type ProviderRowProps, type ProviderRowTone } from "./ProviderRow";
 export { ProviderTile, type ProviderTileProps } from "./ProviderTile";
 export { SegmentedMeter, type MeterSegment, type SegmentedMeterProps } from "./SegmentedMeter";
-export { SettingRow, type SettingRowProps } from "./SettingRow";
+export { SettingRow, type SettingRowProps, type SettingRowReset } from "./SettingRow";
 export { SettingsSection, type SettingsSectionProps } from "./SettingsSection";
 export { StatTile, type StatTileProps, type StatTileTone } from "./StatTile";
 export { formatByteSize, formatDateTime } from "../../utils/format";

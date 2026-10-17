@@ -3,7 +3,7 @@
   display: inline-flex;
   flex: 0 1 auto;
   align-items: center;
-  gap: 6px;
+  gap: var(--aidex-control-gap-sm);
   min-width: 0;
   max-width: 100%;
   margin: 0;
@@ -20,24 +20,46 @@
     color var(--aidex-duration-fast) var(--aidex-ease);
 }
 
+/*
+ * Shrinking only ellipsizes the name: the button never gets narrower than its padding, borders,
+ * provider icon (16), chevron (14) and the two gaps around the name.
+ */
 .sm {
-  min-height: 32px;
-  padding: 0 var(--aidex-space-2);
+  min-width: calc(
+    2 * (var(--aidex-control-pad-x-xs) + 1px) + var(--aidex-icon-md) + var(--aidex-icon-sm) +
+      2 * var(--aidex-control-gap-sm)
+  );
+  min-height: var(--aidex-control-sm);
+  padding: 0 var(--aidex-control-pad-x-xs);
   border-radius: var(--aidex-radius-sm);
-  font-size: var(--aidex-text-sm);
+  font-size: var(--aidex-text-label);
 }
 
 .md {
-  min-height: 40px;
-  padding: 0 var(--aidex-space-3);
+  min-width: calc(
+    2 * (var(--aidex-control-pad-x-sm) + 1px) + var(--aidex-icon-md) + var(--aidex-icon-sm) +
+      2 * var(--aidex-control-gap-sm)
+  );
+  min-height: var(--aidex-control-md);
+  padding: 0 var(--aidex-control-pad-x-sm);
   border-radius: var(--aidex-radius-md);
   font-size: var(--aidex-text-sm);
+}
+
+/* The "Unavailable" badge does not shrink either, so with it the button keeps its full width. */
+.trigger:has(.badge) {
+  flex-shrink: 0;
 }
 
 .trigger:hover:not(:disabled),
 .trigger[aria-expanded="true"] {
   background: var(--aidex-color-surface-hover);
   color: var(--aidex-color-text);
+}
+
+/* A toolbar can scroll, which clips a ring drawn outside the button. */
+.trigger:focus-visible {
+  outline-offset: -2px;
 }
 
 .trigger:disabled {
@@ -50,9 +72,12 @@
   flex: none;
 }
 
+/* Positioned, so its cut-off text also clips the hidden "Model:" and provider words inside it. */
 .label {
+  position: relative;
   min-width: 0;
   max-width: 180px;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -85,4 +110,28 @@
   clip: rect(0 0 0 0);
   white-space: nowrap;
   border: 0;
+}
+
+/*
+ * In a narrow composer the button keeps only its icons; the name is still read out. It no longer
+ * shrinks, so a toolbar that is still too narrow scrolls instead of squashing the icons.
+ */
+@container composer (max-width: 520px) {
+  /* Its width is its icons; the floor above counts the gap after the hidden name too. */
+  .trigger {
+    flex: none;
+    min-width: 0;
+  }
+
+  .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
 }

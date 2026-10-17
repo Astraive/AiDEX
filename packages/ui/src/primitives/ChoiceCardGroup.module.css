@@ -1,4 +1,6 @@
+/* Positioned, so a visually hidden legend stays inside the group's scroll container. */
 .group {
+  position: relative;
   min-width: 0;
   container-type: inline-size;
   margin: 0;
@@ -7,7 +9,7 @@
 }
 
 .legend {
-  margin-bottom: var(--aidex-space-3);
+  margin-bottom: var(--aidex-space-2);
   padding: 0;
 }
 
@@ -32,8 +34,8 @@
   position: relative;
   display: flex;
   align-items: flex-start;
-  gap: var(--aidex-space-4);
-  padding: var(--aidex-space-4) var(--aidex-space-5);
+  gap: var(--aidex-space-3);
+  padding: var(--aidex-space-3) var(--aidex-space-4);
   border: 1px solid var(--aidex-color-border-subtle);
   border-radius: var(--aidex-radius-lg);
   background: var(--aidex-color-surface);
@@ -65,9 +67,10 @@
 
 .radio {
   flex: none;
-  width: 18px;
-  height: 18px;
-  margin: 2px 0 0;
+  width: var(--aidex-checkbox-size);
+  height: var(--aidex-checkbox-size);
+  /* Centres the radio on the first 20px title line. */
+  margin: calc((var(--aidex-leading-sm) - var(--aidex-checkbox-size)) / 2) 0 0;
   appearance: none;
   border: 1.5px solid var(--aidex-color-border-strong);
   border-radius: var(--aidex-radius-full);
@@ -77,7 +80,7 @@
 }
 
 .radio:checked {
-  border: 5px solid var(--aidex-color-accent);
+  border: var(--aidex-space-1) solid var(--aidex-color-accent);
   background: var(--aidex-color-text);
 }
 
@@ -92,8 +95,8 @@
 }
 
 .icon svg {
-  width: 22px;
-  height: 22px;
+  width: var(--aidex-icon-xl);
+  height: var(--aidex-icon-xl);
 }
 
 .text {
@@ -108,18 +111,19 @@
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-md);
   font-weight: 600;
+  line-height: var(--aidex-leading-sm);
 }
 
 .description {
   color: var(--aidex-color-text-secondary);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
   line-height: 1.5;
 }
 
 .meta {
   flex: none;
   color: var(--aidex-color-text-muted);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
 }
 
 /* In narrow multi-column cards the meta moves under the text instead of squeezing it. */
@@ -132,7 +136,7 @@
 .columns3 .meta {
   order: 3;
   flex-basis: 100%;
-  padding-left: calc(18px + var(--aidex-space-4));
+  padding-left: calc(var(--aidex-checkbox-size) + var(--aidex-space-3));
 }
 
 .columns2 .text,
@@ -158,7 +162,7 @@
 .rows .checked,
 .rows .checked:hover {
   align-items: center;
-  padding: var(--aidex-space-4) var(--aidex-space-1);
+  padding: var(--aidex-space-3) var(--aidex-space-1);
   border: 0;
   border-bottom: 1px solid var(--aidex-color-border-subtle);
   border-radius: 0;

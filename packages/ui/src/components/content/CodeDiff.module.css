@@ -11,8 +11,8 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--aidex-space-2) var(--aidex-space-3);
-  min-height: 44px;
-  padding: var(--aidex-space-1) var(--aidex-space-2) var(--aidex-space-1) var(--aidex-space-4);
+  min-height: var(--aidex-row-sm);
+  padding: 0 var(--aidex-space-1) 0 var(--aidex-space-3);
   border-bottom: 1px solid var(--aidex-color-border-subtle);
   background: var(--aidex-color-surface-raised);
 }
@@ -24,8 +24,8 @@
 }
 
 .fileIcon svg {
-  width: 16px;
-  height: 16px;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
 }
 
 /* Grows to push the controls right, and shrinks (with an ellipsis) before the controls wrap. */
@@ -35,7 +35,7 @@
   overflow: hidden;
   color: var(--aidex-color-text);
   font-family: var(--aidex-font-mono);
-  font-size: var(--aidex-text-xs);
+  font-size: var(--aidex-text-code);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -45,7 +45,7 @@
   flex: none;
   gap: var(--aidex-space-2);
   font-family: var(--aidex-font-mono);
-  font-size: var(--aidex-text-xs);
+  font-size: var(--aidex-text-code);
   font-variant-numeric: tabular-nums;
 }
 
@@ -96,8 +96,8 @@
 .surface {
   --diffs-font-family: var(--aidex-font-mono);
   --diffs-header-font-family: var(--aidex-font-sans);
-  --diffs-font-size: var(--aidex-text-xs);
-  --diffs-line-height: 20px;
+  --diffs-font-size: var(--aidex-text-code);
+  --diffs-line-height: var(--aidex-code-line-height);
   --diffs-tab-size: 2;
   /* Show code exactly as written: no ligatures turning `!==` or `=>` into single glyphs. */
   --diffs-font-features: "liga" 0, "calt" 0;

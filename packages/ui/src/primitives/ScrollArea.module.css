@@ -1,0 +1,107 @@
+/* Fills its parent; the parent sets the height or max-height. */
+.root {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  max-height: inherit;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+.viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: inherit;
+  overscroll-behavior: contain;
+  border-radius: inherit;
+  outline: none;
+}
+
+/* Base UI makes an overflowing viewport focusable; the ring sits inside so the edge never clips it. */
+.viewport:focus-visible {
+  outline: 2px solid var(--aidex-color-focus);
+  outline-offset: -2px;
+  mask-image: none;
+}
+
+/* Edge fades: Base UI sets the distance scrolled from each edge; the fade grows to 24px with it. */
+.fadeY {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 min(24px, var(--scroll-area-overflow-y-start, 0px)),
+    #000 calc(100% - min(24px, var(--scroll-area-overflow-y-end, 0px))),
+    transparent
+  );
+}
+
+.fadeX {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 min(24px, var(--scroll-area-overflow-x-start, 0px)),
+    #000 calc(100% - min(24px, var(--scroll-area-overflow-x-end, 0px))),
+    transparent
+  );
+}
+
+.fadeBoth {
+  mask-image:
+    linear-gradient(
+      to bottom,
+      transparent,
+      #000 min(24px, var(--scroll-area-overflow-y-start, 0px)),
+      #000 calc(100% - min(24px, var(--scroll-area-overflow-y-end, 0px))),
+      transparent
+    ),
+    linear-gradient(
+      to right,
+      transparent,
+      #000 min(24px, var(--scroll-area-overflow-x-start, 0px)),
+      #000 calc(100% - min(24px, var(--scroll-area-overflow-x-end, 0px))),
+      transparent
+    );
+  mask-composite: intersect;
+}
+
+/* Overlay bars: no layout width, shown while hovering or scrolling, faded out 300ms after. */
+.scrollbar {
+  display: flex;
+  padding: 1px;
+  opacity: 0;
+  touch-action: none;
+  user-select: none;
+  transition: opacity 150ms var(--aidex-ease) 300ms;
+}
+
+.scrollbar[data-orientation="vertical"] {
+  width: calc(var(--aidex-scrollbar-size) + 2px);
+  margin-block: var(--aidex-space-1);
+}
+
+.scrollbar[data-orientation="horizontal"] {
+  flex-direction: column;
+  height: calc(var(--aidex-scrollbar-size) + 2px);
+  margin-inline: var(--aidex-space-1);
+}
+
+.scrollbar[data-hovering],
+.scrollbar[data-scrolling] {
+  opacity: 1;
+  transition-delay: 0ms;
+  transition-duration: 100ms;
+}
+
+.thumb {
+  flex: 1;
+  border-radius: var(--aidex-radius-full);
+  background: var(--aidex-color-border);
+  transition: background-color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.thumb:hover,
+.thumb:active {
+  background: var(--aidex-color-border-strong);
+}

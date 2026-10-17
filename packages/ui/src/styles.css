@@ -31,13 +31,85 @@ html[data-theme="light"] {
   --aidex-brand-color-strength: 78%;
 }
 
-html[data-density="compact"] {
+/*
+ * Density remaps spacing steps 3-8, control and row heights, control padding, and the page rhythm.
+ * Text, icons, radii and the shell frame stay fixed. Comfortable is the :root default in tokens.css.
+ * `data-ui-density` is written by the appearance settings; until it is present, the legacy
+ * `data-density="compact"` (written from the base preferences) still applies the compact values.
+ */
+html[data-ui-density="compact"],
+html[data-density="compact"]:not([data-ui-density]) {
   --aidex-space-3: 10px;
   --aidex-space-4: 12px;
   --aidex-space-5: 16px;
   --aidex-space-6: 20px;
   --aidex-space-7: 24px;
   --aidex-space-8: 28px;
+  --aidex-control-xs: 20px;
+  --aidex-control-sm: 24px;
+  --aidex-control-md: 28px;
+  --aidex-control-lg: 32px;
+  --aidex-control-xl: 36px;
+  --aidex-row-sm: 24px;
+  --aidex-row-md: 28px;
+  --aidex-row-lg: 40px;
+  --aidex-control-pad-x: 10px;
+  --aidex-control-pad-x-sm: 8px;
+  --aidex-control-pad-x-xs: 6px;
+  --aidex-page-pad-top: 20px;
+  --aidex-page-gap: 20px;
+}
+
+html[data-ui-density="spacious"] {
+  --aidex-space-3: 14px;
+  --aidex-space-4: 20px;
+  --aidex-space-5: 24px;
+  --aidex-space-6: 28px;
+  --aidex-space-7: 32px;
+  --aidex-space-8: 36px;
+  --aidex-control-xs: 28px;
+  --aidex-control-sm: 32px;
+  --aidex-control-md: 36px;
+  --aidex-control-lg: 40px;
+  --aidex-control-xl: 44px;
+  --aidex-row-sm: 32px;
+  --aidex-row-md: 36px;
+  --aidex-row-lg: 52px;
+  --aidex-control-pad-x: 14px;
+  --aidex-control-pad-x-sm: 12px;
+  --aidex-control-pad-x-xs: 10px;
+  --aidex-page-pad-top: 32px;
+  --aidex-page-gap: 32px;
+}
+
+/* Chat lane width. Comfortable (736px) is the :root default. */
+html[data-chat-width="narrow"] {
+  --aidex-chat-max-width: 640px;
+}
+
+html[data-chat-width="wide"] {
+  --aidex-chat-max-width: 1152px;
+}
+
+html[data-chat-width="full"] {
+  --aidex-chat-max-width: 100%;
+}
+
+/* Message spacing. Comfortable is the :root default. */
+html[data-message-spacing="compact"] {
+  --aidex-prose-line-height: 1.5;
+  --aidex-prose-block-gap: 8px;
+  --aidex-transcript-gap: 12px;
+}
+
+html[data-message-spacing="relaxed"] {
+  --aidex-prose-line-height: 1.75;
+  --aidex-prose-block-gap: 16px;
+  --aidex-transcript-gap: 28px;
+}
+
+html[data-reduce-motion="true"] {
+  --aidex-duration-panel: 0ms;
 }
 
 html[data-reduce-motion="true"] *,
@@ -53,13 +125,20 @@ html[data-keyboard-hints="false"] kbd {
   display: none;
 }
 
+/* The app frames scroll inside their own regions; the document itself never scrolls. */
+html,
+body {
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   background: var(--aidex-color-bg);
   color: var(--aidex-color-text);
   font-family: var(--aidex-font-sans);
   font-size: var(--aidex-text-md);
-  line-height: 1.5;
+  /* Unitless, so text that sets only its own font size gets a proportional line height. */
+  line-height: var(--aidex-leading-body);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -78,7 +157,35 @@ select {
   outline-offset: 2px;
 }
 
+/*
+ * Thin scrollbars everywhere. Chromium ignores these rules on any element that sets `scrollbar-width`
+ * or `scrollbar-color` (and scrollbar-color inherits), so components leave both unset unless they
+ * hide the bar on purpose with `scrollbar-width: none`.
+ */
+::-webkit-scrollbar {
+  width: var(--aidex-scrollbar-size);
+  height: var(--aidex-scrollbar-size);
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: var(--aidex-radius-full);
+  background: var(--aidex-color-border);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--aidex-color-border-strong);
+}
+
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    --aidex-duration-panel: 0ms;
+  }
+
   *,
   *::before,
   *::after {

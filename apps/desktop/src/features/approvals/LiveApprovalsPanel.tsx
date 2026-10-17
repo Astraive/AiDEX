@@ -11,6 +11,7 @@ import { CoreStatusNotice } from "../system/CoreStatusNotice";
 import { ApprovalRequestCard } from "./ApprovalRequestCard";
 import { approvalDecision } from "./approvalDecision";
 import { approvalPageView, firstApprovalRange, type ApprovalRange } from "./approvalPage";
+import { useDecisionFocus } from "./useDecisionFocus";
 
 const TABS_ID = "approval-views";
 
@@ -64,13 +65,24 @@ export function LiveApprovalsPanel({ version, onChanged }: Props) {
   const locked = approvals.error?.kind === ErrorKind.vaultLocked;
   const empty = views.find((item) => item.value === view)?.empty;
 
+  // After a decision, focus moves to the next request's first action; with none left, to the empty
+  // state, or the current view's tab when decided requests stay listed (All requests).
+  const panelRef = useRef<HTMLDivElement>(null);
+  const emptyRef = useRef<HTMLDivElement>(null);
+  const pendingIds = (page?.approvals ?? []).filter((item) => item.status === "pending").map((item) => item.id);
+  const decisionFocus = useDecisionFocus(pendingIds, () =>
+    (emptyRef.current ?? panelRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'))?.focus(),
+  );
+
   const decide = async (approval: Approval, approved: boolean) => {
     setDeciding(approval.id);
     setError(undefined);
+    decisionFocus.begin(approval.id);
     try {
       await call("approval.respond", approvalDecision(approval, approved, crypto.randomUUID()));
       notify(approved ? `Approved ${approval.tool_name} once.` : `Denied ${approval.tool_name}.`);
     } catch (caught) {
+      decisionFocus.cancel();
       setError(toAidexError(caught).message);
     } finally {
       setDeciding(undefined);
@@ -80,7 +92,7 @@ export function LiveApprovalsPanel({ version, onChanged }: Props) {
   };
 
   return (
-    <Stack gap={5}>
+    <Stack ref={panelRef} gap={5}>
       <CoreStatusNotice requires="daemon" />
       <Tabs
         id={TABS_ID}
@@ -113,7 +125,9 @@ export function LiveApprovalsPanel({ version, onChanged }: Props) {
       ) : null}
       <TabPanel tabsId={TABS_ID} value={view}>
         <Stack gap={4}>
-          {page && page.total === 0 ? <EmptyState icon={<ClipboardCheckIcon />} title={empty ?? "No requests."} /> : null}
+          {page && page.total === 0 ? (
+            <EmptyState ref={emptyRef} tabIndex={-1} icon={<ClipboardCheckIcon />} title={empty ?? "No requests."} />
+          ) : null}
           {page && page.total > 0 && page.approvals.length === 0 ? (
             <Text tone="secondary">No requests are left on this page. Use Previous to see the rest.</Text>
           ) : null}

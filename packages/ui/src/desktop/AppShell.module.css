@@ -1,26 +1,166 @@
 .shell {
+  /* Left edge of the overlay sidebar and of the scrim: past the rail. */
+  --_overlay-left: calc(var(--aidex-shell-pad) + var(--aidex-rail-width) + var(--aidex-shell-gap));
+
+  position: relative;
   display: flex;
-  gap: var(--aidex-space-3);
+  gap: var(--aidex-shell-gap);
   height: 100vh;
   height: 100dvh;
-  padding: var(--aidex-space-3);
+  padding: var(--aidex-shell-pad);
   overflow: hidden;
   background: var(--aidex-color-bg);
 }
 
+/* The sidebar slot keeps its sidebar at full width and clips it while it collapses. */
+.sidebar {
+  /* Resolved here, so a drag's inline --aidex-sidebar-width on the slot applies. */
+  --_sidebar-width: clamp(var(--aidex-sidebar-min-width), var(--aidex-sidebar-width), var(--aidex-sidebar-max-width));
+
+  display: flex;
+  flex: none;
+  width: var(--_sidebar-width);
+  border-radius: var(--aidex-radius-xl);
+}
+
+.sidebar > * {
+  flex: none;
+}
+
+/* Docked: the slot narrows to nothing (and gives back its gap) as the sidebar closes. */
+.docked .sidebar {
+  overflow: hidden;
+  transition:
+    width var(--aidex-duration-panel) var(--aidex-ease),
+    margin-inline-end var(--aidex-duration-panel) var(--aidex-ease);
+}
+
+.docked[data-sidebar="closed"] .sidebar {
+  width: 0;
+  margin-inline-end: calc(-1 * var(--aidex-shell-gap));
+  visibility: hidden;
+  transition:
+    width var(--aidex-duration-panel) var(--aidex-ease),
+    margin-inline-end var(--aidex-duration-panel) var(--aidex-ease),
+    visibility 0s linear var(--aidex-duration-panel);
+}
+
+.resizing .sidebar {
+  transition: none;
+}
+
+.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/*
+ * Overlay: the sidebar floats over main, past the rail, above a scrim. At rest it has no transform or
+ * filter (fixed-position descendants stay viewport-relative); it slides only while it opens or closes.
+ */
+.overlay .sidebar {
+  position: absolute;
+  top: var(--aidex-shell-pad);
+  bottom: var(--aidex-shell-pad);
+  left: var(--_overlay-left);
+  z-index: var(--aidex-z-sidebar-overlay);
+  max-width: calc(100% - var(--_overlay-left) - var(--aidex-shell-pad));
+  box-shadow: var(--aidex-popup-shadow);
+  transition:
+    translate var(--aidex-duration-panel) var(--aidex-ease),
+    opacity var(--aidex-duration-panel) var(--aidex-ease);
+}
+
+.overlay[data-sidebar="closed"] .sidebar {
+  translate: calc(-1 * var(--aidex-space-4)) 0;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    translate var(--aidex-duration-panel) var(--aidex-ease),
+    opacity var(--aidex-duration-panel) var(--aidex-ease),
+    visibility 0s linear var(--aidex-duration-panel);
+}
+
+.scrim {
+  position: absolute;
+  inset: 0 0 0 calc(var(--aidex-shell-pad) + var(--aidex-rail-width));
+  z-index: calc(var(--aidex-z-sidebar-overlay) - 1);
+  background: color-mix(in srgb, var(--aidex-color-bg) 48%, transparent);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--aidex-duration-panel) var(--aidex-ease),
+    visibility 0s linear var(--aidex-duration-panel);
+}
+
+.scrim[data-open] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity var(--aidex-duration-panel) var(--aidex-ease);
+}
+
 .main {
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
   min-width: 0;
 }
 
+/*
+ * Resize separator: a 16px hit area centred on the gap left of main, drawn as a 2px accent line on
+ * hover, focus or drag.
+ */
+.separator {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(-0.5 * var(--aidex-shell-gap) - var(--aidex-space-2));
+  z-index: 1;
+  width: calc(2 * var(--aidex-space-2));
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.separator::after {
+  content: "";
+  position: absolute;
+  top: var(--aidex-radius-xl);
+  bottom: var(--aidex-radius-xl);
+  left: calc(50% - var(--aidex-space-0-5) / 2);
+  width: var(--aidex-space-0-5);
+  border-radius: var(--aidex-radius-full);
+  background: transparent;
+  transition: background-color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.separator:hover::after,
+.resizing .separator::after {
+  background: var(--aidex-color-accent);
+}
+
+/* The line is the focus indicator, in the focus color. */
+.separator:focus-visible {
+  outline: none;
+}
+
+.separator:focus-visible::after {
+  background: var(--aidex-color-focus);
+}
+
+/*
+ * The scrolling page region: the `aidex-main` size container, the containing block for absolutely
+ * positioned page parts (e.g. visually hidden legends), with a stable gutter for the thin scrollbar.
+ */
 .content {
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
-  scrollbar-color: var(--aidex-color-border) transparent;
-  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  container: aidex-main / inline-size;
 }

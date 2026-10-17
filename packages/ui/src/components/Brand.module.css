@@ -1,7 +1,9 @@
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: var(--aidex-space-3);
+  gap: var(--aidex-space-2);
+  min-width: 0;
+  max-width: 100%;
   color: var(--aidex-color-text);
 }
 
@@ -14,32 +16,40 @@
   flex: none;
 }
 
+/* A long name ellipsizes rather than pushing its row's actions out. */
 .wordmark {
+  min-width: 0;
+  overflow: hidden;
   font-family: var(--aidex-font-display);
   font-weight: 700;
-  line-height: 1;
   letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* The mark is portrait; size it by height and let the width follow its viewBox. */
+/* The mark is portrait; size it by height and let the width follow its viewBox. Like icons, it keeps
+   its size at every density (24 for md, 28 for lg). */
 .md .mark {
   width: auto;
-  height: 32px;
+  height: calc(var(--aidex-icon-md) * 1.5);
 }
 
 .md .wordmark {
-  font-size: var(--aidex-text-xl);
+  font-size: var(--aidex-text-lg);
+  line-height: var(--aidex-leading-sm);
 }
 
 .lg .mark {
   width: auto;
-  height: 40px;
+  height: calc(var(--aidex-icon-md) * 1.75);
 }
 
 .lg .wordmark {
-  font-size: 24px;
+  font-size: calc(var(--aidex-text-lg) * 1.125);
+  line-height: 1.25;
 }
 
+/* The launch hero keeps its size. */
 .xl {
   gap: var(--aidex-space-6);
 }
@@ -56,4 +66,21 @@
 .xl .wordmark {
   font-size: 44px;
   font-weight: 600;
+  line-height: 1.125;
+}
+
+/* Short windows (e.g. the 800x560 minimum at 125%) take a smaller hero so the launch cards fit. */
+@media (max-height: 560px) {
+  .xl,
+  .xl.stacked {
+    gap: var(--aidex-space-3);
+  }
+
+  .xl .mark {
+    height: 48px;
+  }
+
+  .xl .wordmark {
+    font-size: 32px;
+  }
 }

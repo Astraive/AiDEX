@@ -103,8 +103,8 @@ handlers without sockets.
 
 - Methods: `daemon.status|ping|stop`, `events.replay|latest|subscribe`, `workspace.*`,
   `vault.*`, `model.*`, `provider.*`, `network.*`, `runtime.*`, `settings.get|set`,
-  `model.preferences.get|set`, `web.settings.get|set`, `web.providers|test|open`,
-  and `update.status|check|apply|rollback` exist, plus the broker's
+  `model.preferences.get|set`, `appearance.get|set`, `web.settings.get|set`,
+  `web.providers|test|open`, and `update.status|check|apply|rollback` exist, plus the broker's
   `tool.list|invoke|continue`, `broker.approval.list|show|resolve|revoke`,
   `policy.show|profile.set|reload|explain`, and `emergency.stop|resume`; additional
   domains are future work.
@@ -212,6 +212,8 @@ and `agent.*` services rather than a raw provider-chat RPC.
 | `model.default`         | none                                                                                                         | `{default_model}`                                                                                                                              |
 | `model.preferences.get` | none                                                                                                         | `{favorite_models, hidden_models}`                                                                                                             |
 | `model.preferences.set` | `{favorite_models?, hidden_models?}`                                                                         | the saved record; omitted lists are unchanged                                                                                                  |
+| `appearance.get`        | none                                                                                                         | `{ui_scale, density, chat_width, chat_font_size, code_font_size, sidebar_width, sidebar_auto_collapse, message_spacing}`                       |
+| `appearance.set`        | any subset of those fields; `sidebar_width: null` resets it                                                  | the saved record; omitted fields are unchanged; out-of-range values are `invalid_params`                                                       |
 | `network.offline`       | `{enabled}`                                                                                                  | `{offline, network}`; on also cancels runtime runs and logins and ends vendor processes and official CLI commands                              |
 | `network.status`        | none                                                                                                         | `{offline, network}`                                                                                                                           |
 
@@ -241,7 +243,12 @@ browser.
 Model picker favorites and hidden models are a separate vault record
 (`aidex_preferences::ModelPreferencesService`, secret `aidex-model-preferences`),
 registered next to `settings.*` in `methods/settings.rs`; `AppPreferences` is
-unchanged so an older daemon still reads `aidex-preferences`.
+unchanged so an older daemon still reads `aidex-preferences`. Appearance
+(`aidex_preferences::AppearanceService`, secret `aidex-appearance`) is registered
+there too and gets the same `PreferencesService` instance as `settings.*`: its
+density writes the compact/comfortable base through that service, so both share
+one lock (taken after the appearance lock; `settings.*` never takes the
+appearance lock).
 
 ### Web search
 

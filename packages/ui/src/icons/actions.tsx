@@ -74,3 +74,12 @@ export const CheckCircleIcon = createIcon(
     <path d="m8.5 12.25 2.4 2.4 4.6-4.9" />
   </>,
 );
+
+/** Counter-clockwise arrow: undo a change or reset a value to its default. */
+export const RotateCcwIcon = createIcon(
+  "RotateCcwIcon",
+  <>
+    <path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9" />
+    <path d="M4.5 4.5V9H9" />
+  </>,
+);

@@ -1,7 +1,7 @@
 .header {
   display: flex;
   flex-direction: column;
-  gap: var(--aidex-space-4);
+  gap: var(--aidex-space-3);
 }
 
 .back {
@@ -9,12 +9,15 @@
   align-items: center;
   align-self: flex-start;
   gap: var(--aidex-space-2);
-  padding: var(--aidex-space-1) var(--aidex-space-2) var(--aidex-space-1) 0;
+  /* On the control scale at every density (28px comfortable), like a sm Button: the height comes from
+     the token, not from padding plus line height. */
+  min-height: var(--aidex-control-sm);
+  padding: 0 var(--aidex-space-2) 0 0;
   border: 0;
   border-radius: var(--aidex-radius-sm);
   background: transparent;
   color: var(--aidex-color-text-muted);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
   cursor: pointer;
   user-select: none;
 }
@@ -24,8 +27,8 @@
 }
 
 .back svg {
-  width: 16px;
-  height: 16px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .row {
@@ -33,14 +36,14 @@
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--aidex-space-5);
+  gap: var(--aidex-space-3);
 }
 
 .text {
   display: flex;
   flex: 1 1 320px;
   flex-direction: column;
-  gap: var(--aidex-space-2);
+  gap: var(--aidex-space-1);
   min-width: 0;
 }
 
@@ -57,10 +60,10 @@
   margin: 0;
   color: var(--aidex-color-text);
   font-family: var(--aidex-font-display);
-  font-size: 30px;
-  font-weight: 650;
-  line-height: 1.2;
-  letter-spacing: -0.03em;
+  font-size: var(--aidex-text-xl);
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
 }
 
 .title:focus {
@@ -72,7 +75,7 @@
   max-width: 60ch;
   color: var(--aidex-color-text-secondary);
   font-size: var(--aidex-text-md);
-  line-height: 1.55;
+  line-height: var(--aidex-leading-body);
 }
 
 .actions {
@@ -86,9 +89,10 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--aidex-space-5);
+  gap: var(--aidex-space-1) var(--aidex-space-4);
+  min-width: 0;
   color: var(--aidex-color-text-muted);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
 }
 
 .section {
@@ -96,19 +100,19 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--aidex-space-4);
-  min-height: 36px;
+  min-height: var(--aidex-row-sm);
 }
 
 .sectionTitle {
   margin: 0;
   color: var(--aidex-color-text);
-  font-size: 18px;
+  font-size: var(--aidex-text-sm);
   font-weight: 600;
-  letter-spacing: -0.015em;
+  line-height: 1.4;
 }
 
 .small {
-  font-size: var(--aidex-text-lg);
+  font-size: var(--aidex-text-label);
 }
 
 .sectionEnd {
@@ -119,6 +123,6 @@
 
 .sectionMeta {
   color: var(--aidex-color-text-muted);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
   font-variant-numeric: tabular-nums;
 }

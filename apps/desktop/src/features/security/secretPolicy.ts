@@ -14,6 +14,7 @@ const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const MANAGED_NAMES = new Set([
   "aidex-preferences",
   "aidex-model-preferences",
+  "aidex-appearance",
   "native-record-encryption-key",
   "external-runtime-encryption-key",
 ]);

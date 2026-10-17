@@ -5,7 +5,9 @@ import { BrandIcon } from "../../icons/brands/BrandIcon";
 import { CheckIcon, ChevronRightIcon, StarFilledIcon, StarIcon } from "../../icons/interface";
 import { Badge, type BadgeTone } from "../../primitives/Badge";
 import { Kbd } from "../../primitives/Kbd";
+import { Tooltip } from "../../primitives/Tooltip";
 import { cx } from "../../utils/cx";
+import { useTextCut } from "../CommandMenu/useTextCut";
 import type { ModelPickerModel } from "./types";
 import {
   jumpLabel,
@@ -30,6 +32,11 @@ type ModelPickerListProps = {
   rows: readonly PickerRow[];
   /** Row id of the active (highlighted) option. */
   activeId: string | null;
+  /**
+   * The input that last moved the highlight. The active option shows a ring only after keyboard
+   * use; under the pointer it is just tinted, as hover is.
+   */
+  modality: "keyboard" | "pointer";
   /** DOM id of each row's option element. */
   optionId: (rowId: string) => string;
   value: string | null;
@@ -54,6 +61,7 @@ export function ModelPickerList({
   id,
   rows,
   activeId,
+  modality,
   optionId,
   value,
   jumpKeys,
@@ -84,6 +92,7 @@ export function ModelPickerList({
         id={id}
         role="listbox"
         aria-label="Models"
+        data-modality={modality}
         className={cx(styles.list, empty && styles.listEmpty)}
       >
         {rows.map((row) =>
@@ -158,76 +167,91 @@ function ModelOption({
   ]
     .filter(Boolean)
     .join(", ");
+  // Beside the row, on hover: why it is unavailable, or what the row does not show in full (the full
+  // name, the description, a detail line it cuts off). Nothing when it would only repeat the row.
+  const nameCut = useTextCut(domId, [styles.name]);
+  const detailCut = useTextCut(domId, [styles.detail]);
   const tooltip = disabled
     ? (model.disabledReason ?? undefined)
-    : [model.name, model.description].filter(Boolean).join(" — ");
+    : [model.name, model.description, detailCut ? detail : null].filter(Boolean).join(" — ");
+  const showTooltip =
+    Boolean(tooltip) && (disabled || Boolean(model.description) || model.name !== name || nameCut || detailCut);
   const favoriteLabel = favorite ? "Remove from favorites" : "Add to favorites";
 
   return (
-    <div
-      id={domId}
-      role="option"
-      aria-selected={selected}
-      aria-disabled={disabled || undefined}
-      aria-label={accessibleName}
-      aria-keyshortcuts={shortcut}
-      title={tooltip}
-      className={cx(styles.option, active && styles.active, selected && styles.selected, disabled && styles.disabled)}
-      onMouseDown={keepFocus}
-      onMouseMove={(event) => {
-        onHover(event, disabled ? null : row.id);
-      }}
-      onClick={() => {
-        if (!disabled) onSelect(model);
-      }}
+    <Tooltip
+      content={tooltip}
+      disabled={!showTooltip}
+      side="right"
+      sideOffset={8}
+      // The accessible name already holds the name, the detail and the reason.
+      describe={false}
     >
-      <span className={styles.main}>
-        <span className={styles.nameLine}>
-          <span className={styles.name}>{name}</span>
-          {badges.map((badge) => (
-            <Badge key={badge} tone={BADGE_TONE[badge] ?? "neutral"} size="sm" className={styles.badge}>
-              {badge}
-            </Badge>
-          ))}
+      <div
+        id={domId}
+        role="option"
+        aria-selected={selected}
+        aria-disabled={disabled || undefined}
+        aria-label={accessibleName}
+        aria-keyshortcuts={shortcut}
+        className={cx(styles.option, active && styles.active, selected && styles.selected, disabled && styles.disabled)}
+        onMouseDown={keepFocus}
+        onMouseMove={(event) => {
+          onHover(event, disabled ? null : row.id);
+        }}
+        onClick={() => {
+          if (!disabled) onSelect(model);
+        }}
+      >
+        <span className={styles.main}>
+          <span className={styles.nameLine}>
+            <span className={styles.name}>{name}</span>
+            {badges.map((badge) => (
+              <Badge key={badge} tone={BADGE_TONE[badge] ?? "neutral"} size="sm" className={styles.badge}>
+                {badge}
+              </Badge>
+            ))}
+          </span>
+          <span className={styles.detailLine}>
+            {provider ? (
+              <BrandIcon
+                brand={provider.brand}
+                monogramLabel={provider.name}
+                size={12}
+                className={styles.detailIcon}
+                aria-hidden
+              />
+            ) : null}
+            <span className={styles.detail}>{detail}</span>
+          </span>
         </span>
-        <span className={styles.detailLine}>
-          {provider ? (
-            <BrandIcon
-              brand={provider.brand}
-              monogramLabel={provider.name}
-              size={12}
-              className={styles.detailIcon}
-              aria-hidden
-            />
+        <span className={styles.trailing}>
+          {selected ? <CheckIcon size={16} className={styles.check} /> : null}
+          {jump ? (
+            <Kbd aria-hidden="true" className={styles.jump}>
+              {jump}
+            </Kbd>
           ) : null}
-          <span className={styles.detail}>{detail}</span>
+          <Tooltip content={favoriteLabel} disabled={disabled}>
+            <button
+              type="button"
+              className={cx(styles.star, favorite && styles.starred)}
+              aria-label={favoriteLabel}
+              // Only the active row's star is in the tab order: Tab from search reaches it, Shift+Tab returns.
+              tabIndex={active ? 0 : -1}
+              disabled={disabled}
+              onMouseDown={keepFocus}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleFavorite(model.key, favoritesView && favorite);
+              }}
+            >
+              {favorite ? <StarFilledIcon size={16} /> : <StarIcon size={16} />}
+            </button>
+          </Tooltip>
         </span>
-      </span>
-      <span className={styles.trailing}>
-        {selected ? <CheckIcon size={16} className={styles.check} /> : null}
-        {jump ? (
-          <Kbd aria-hidden="true" className={styles.jump}>
-            {jump}
-          </Kbd>
-        ) : null}
-        <button
-          type="button"
-          className={cx(styles.star, favorite && styles.starred)}
-          aria-label={favoriteLabel}
-          title={favoriteLabel}
-          // Only the active row's star is in the tab order: Tab from search reaches it, Shift+Tab returns.
-          tabIndex={active ? 0 : -1}
-          disabled={disabled}
-          onMouseDown={keepFocus}
-          onClick={(event) => {
-            event.stopPropagation();
-            onToggleFavorite(model.key, favoritesView && favorite);
-          }}
-        >
-          {favorite ? <StarFilledIcon size={16} /> : <StarIcon size={16} />}
-        </button>
-      </span>
-    </div>
+      </div>
+    </Tooltip>
   );
 }
 

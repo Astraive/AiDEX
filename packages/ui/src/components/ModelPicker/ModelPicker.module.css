@@ -6,9 +6,9 @@
 .panel {
   display: flex;
   flex-direction: column;
-  width: min(380px, calc(100vw - 16px));
+  width: min(360px, calc(100vw - 2 * var(--aidex-space-2)));
   /* Fits inside the popover border (1px each side). */
-  max-height: min(420px, calc(var(--aidex-popover-available-height, 422px) - 2px));
+  max-height: min(380px, calc(var(--aidex-popover-available-height, 382px) - 2px));
   min-height: 0;
 }
 
@@ -34,9 +34,9 @@
   display: flex;
   flex: none;
   align-items: center;
-  gap: var(--aidex-space-2);
-  margin: var(--aidex-space-2) var(--aidex-space-3) 0;
-  padding-bottom: 6px;
+  gap: var(--aidex-control-gap);
+  margin: var(--aidex-space-1) var(--aidex-space-3) 0;
+  padding-bottom: var(--aidex-space-0-5);
   border-bottom: 1px solid var(--aidex-color-border);
   transition:
     border-color var(--aidex-duration-fast) var(--aidex-ease),
@@ -57,7 +57,7 @@
 .searchInput {
   flex: 1;
   min-width: 0;
-  height: 28px;
+  height: var(--aidex-control-md);
   padding: 0;
   border: 0;
   outline: none;
@@ -72,6 +72,12 @@
 
 .searchInput::placeholder {
   color: var(--aidex-color-text-muted);
+}
+
+.searchIcon,
+.spinner {
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .spinner {
@@ -94,7 +100,7 @@
   overflow: hidden;
   color: var(--aidex-color-text-secondary);
   font-size: var(--aidex-text-xs);
-  line-height: 1.45;
+  line-height: var(--aidex-leading-xs);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   line-clamp: 3;
@@ -102,9 +108,9 @@
 
 .inlineButton {
   margin-top: var(--aidex-space-1);
-  padding: 2px 0;
+  padding: var(--aidex-space-0-5) 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--aidex-radius-xs);
   background: transparent;
   color: var(--aidex-color-accent);
   font-size: var(--aidex-text-xs);
@@ -130,9 +136,9 @@
 .barButton {
   display: inline-flex;
   align-items: center;
-  gap: var(--aidex-space-2);
-  min-height: 30px;
-  padding: 0 var(--aidex-space-2);
+  gap: var(--aidex-control-gap);
+  min-height: var(--aidex-control-sm);
+  padding: 0 var(--aidex-control-pad-x-xs);
   border: 0;
   border-radius: var(--aidex-radius-sm);
   background: transparent;
@@ -143,6 +149,11 @@
   transition:
     background-color var(--aidex-duration-fast) var(--aidex-ease),
     color var(--aidex-duration-fast) var(--aidex-ease);
+}
+
+.barButton svg {
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .barButton:hover {

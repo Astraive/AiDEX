@@ -11,8 +11,8 @@
   display: flex;
   align-items: center;
   gap: var(--aidex-space-3);
-  min-height: 40px;
-  padding: var(--aidex-space-1) var(--aidex-space-2) var(--aidex-space-1) var(--aidex-space-4);
+  min-height: var(--aidex-row-sm);
+  padding: 0 var(--aidex-space-1) 0 var(--aidex-space-3);
   border-bottom: 1px solid var(--aidex-color-border-subtle);
   background: var(--aidex-color-surface-raised);
 }
@@ -22,7 +22,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--aidex-color-text-secondary);
-  font-size: var(--aidex-text-sm);
+  font-size: var(--aidex-text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -44,10 +44,10 @@
 
 .pre {
   margin: 0;
-  padding: var(--aidex-space-4) var(--aidex-space-5);
+  padding: var(--aidex-space-3) var(--aidex-space-3-5);
   overflow-x: auto;
   color: var(--aidex-color-text);
-  font: var(--aidex-text-xs) / 1.85 var(--aidex-font-mono);
+  font: var(--aidex-text-code) / var(--aidex-code-line-height) var(--aidex-font-mono);
   tab-size: 2;
 }
 

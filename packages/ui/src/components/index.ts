@@ -19,9 +19,14 @@ export {
   type SectionHeaderProps,
 } from "./PageHeader";
 export {
+  ToastProvider,
   ToastRegion,
+  useToastManager,
+  type ToastManager,
   type ToastMessage,
+  type ToastProviderProps,
   type ToastRegionProps,
+  type ToastTone,
 } from "./ToastRegion";
 export * from "./data";
 export * from "./content";

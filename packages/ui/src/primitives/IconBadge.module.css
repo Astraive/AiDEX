@@ -6,23 +6,23 @@
 }
 
 .md {
-  width: 44px;
-  height: 44px;
+  width: var(--aidex-control-md);
+  height: var(--aidex-control-md);
 }
 
 .lg {
-  width: 56px;
-  height: 56px;
+  width: var(--aidex-control-xl);
+  height: var(--aidex-control-xl);
 }
 
 .md svg {
-  width: 20px;
-  height: 20px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .lg svg {
-  width: 24px;
-  height: 24px;
+  width: var(--aidex-icon-xl);
+  height: var(--aidex-icon-xl);
 }
 
 .neutral {

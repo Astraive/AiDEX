@@ -6,9 +6,9 @@
 }
 
 .display {
-  font-size: clamp(36px, 3.4vw, var(--aidex-text-display));
-  font-weight: 700;
-  line-height: 1.12;
+  font-size: clamp(var(--aidex-text-2xl), 2.4vw, var(--aidex-text-display));
+  font-weight: 600;
+  line-height: 1.2;
   letter-spacing: -0.025em;
 }
 
@@ -17,26 +17,29 @@
   outline: none;
 }
 
+/* 18px: one step above text-lg. */
 .title {
-  font-size: 22px;
+  font-size: calc(var(--aidex-text-lg) + var(--aidex-space-0-5));
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1.3;
   letter-spacing: -0.01em;
 }
 
 .text {
   margin: 0;
+  /* A word too long for the line (a path, an id) breaks instead of widening the page. */
+  overflow-wrap: break-word;
 }
 
 .body {
   font-size: var(--aidex-text-md);
-  line-height: 1.6;
+  line-height: var(--aidex-leading-body);
 }
 
 /* Introductory copy keeps a readable measure. */
 .lead {
-  font-size: var(--aidex-text-xl);
-  line-height: 1.65;
+  font-size: var(--aidex-text-lg);
+  line-height: 1.5;
   text-wrap: pretty;
 }
 

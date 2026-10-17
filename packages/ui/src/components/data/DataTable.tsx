@@ -1,4 +1,4 @@
-import type { ComponentPropsWithRef, Key, ReactNode } from "react";
+import { useId, type ComponentPropsWithRef, type Key, type ReactNode } from "react";
 import { cx } from "../../utils/cx";
 import styles from "./DataTable.module.css";
 
@@ -32,7 +32,11 @@ function defaultCell<Row>(row: Row, key: string): ReactNode {
   return value == null ? "" : String(value);
 }
 
-/** Semantic data table with muted headers, ruled rows, and an empty state. */
+/**
+ * Semantic data table with muted headers, ruled rows, and an empty state. A table wider than its
+ * container scrolls sideways inside its own wrapper instead of widening the page. With a caption,
+ * the wrapper is a region named by it, so a keyboard-focusable scroller is announced by name.
+ */
 export function DataTable<Row>({
   columns,
   rows,
@@ -43,49 +47,60 @@ export function DataTable<Row>({
   className,
   ...props
 }: DataTableProps<Row>) {
+  const captionId = useId();
   return (
-    <table className={cx(styles.table, className)} {...props}>
-      {caption ? <caption className={hideCaption ? styles.visuallyHidden : styles.caption}>{caption}</caption> : null}
-      <colgroup>
-        {columns.map((column) => (
-          <col key={column.key} style={column.width ? { width: column.width } : undefined} />
-        ))}
-      </colgroup>
-      <thead>
-        <tr>
+    <div
+      className={styles.wrapper}
+      role={caption ? "region" : undefined}
+      aria-labelledby={caption ? captionId : undefined}
+    >
+      <table className={cx(styles.table, className)} {...props}>
+        {caption ? (
+          <caption id={captionId} className={hideCaption ? styles.visuallyHidden : styles.caption}>
+            {caption}
+          </caption>
+        ) : null}
+        <colgroup>
           {columns.map((column) => (
-            <th key={column.key} scope="col" className={cx(styles.header, column.align === "end" && styles.end)}>
-              {column.header}
-            </th>
+            <col key={column.key} style={column.width ? { width: column.width } : undefined} />
           ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.length === 0 ? (
+        </colgroup>
+        <thead>
           <tr>
-            <td colSpan={columns.length} className={styles.empty}>
-              {emptyText}
-            </td>
+            {columns.map((column) => (
+              <th key={column.key} scope="col" className={cx(styles.header, column.align === "end" && styles.end)}>
+                {column.header}
+              </th>
+            ))}
           </tr>
-        ) : (
-          rows.map((row, index) => (
-            <tr key={rowKey(row, index)} className={styles.row}>
-              {columns.map((column) => {
-                const Cell = column.rowHeader ? "th" : "td";
-                return (
-                  <Cell
-                    key={column.key}
-                    scope={column.rowHeader ? "row" : undefined}
-                    className={cx(styles.cell, column.rowHeader && styles.rowHeader, column.align === "end" && styles.end)}
-                  >
-                    {column.render ? column.render(row, index) : defaultCell(row, column.key)}
-                  </Cell>
-                );
-              })}
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={columns.length} className={styles.empty}>
+                {emptyText}
+              </td>
             </tr>
-          ))
-        )}
-      </tbody>
-    </table>
+          ) : (
+            rows.map((row, index) => (
+              <tr key={rowKey(row, index)} className={styles.row}>
+                {columns.map((column) => {
+                  const Cell = column.rowHeader ? "th" : "td";
+                  return (
+                    <Cell
+                      key={column.key}
+                      scope={column.rowHeader ? "row" : undefined}
+                      className={cx(styles.cell, column.rowHeader && styles.rowHeader, column.align === "end" && styles.end)}
+                    >
+                      {column.render ? column.render(row, index) : defaultCell(row, column.key)}
+                    </Cell>
+                  );
+                })}
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }

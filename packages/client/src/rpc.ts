@@ -115,7 +115,7 @@ import type {
   AttachmentUploadTicket,
 } from "./dto/attachments";
 import type { ExecutionStatus } from "./dto/execution";
-import type { AppPreferences, ModelPreferences } from "./dto/preferences";
+import type { AppPreferences, Appearance, AppearancePatch, ModelPreferences } from "./dto/preferences";
 import type { AuthFlowStart, AuthFlowStatus } from "./dto/auth";
 import type {
   ApplyReport,
@@ -177,6 +177,8 @@ export type RpcMethods = {
     params: { patch: Partial<AppPreferences> };
     result: AppPreferences;
   };
+  "appearance.get": { params: undefined; result: Appearance };
+  "appearance.set": { params: AppearancePatch; result: Appearance };
   "workspace.add": {
     params: { path: string; name?: string };
     result: Workspace;

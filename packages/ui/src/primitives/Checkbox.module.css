@@ -1,7 +1,7 @@
 .checkbox {
   display: flex;
   align-items: flex-start;
-  gap: var(--aidex-space-3);
+  gap: var(--aidex-control-gap);
   cursor: pointer;
 }
 
@@ -15,16 +15,17 @@
   display: inline-grid;
   flex: none;
   place-items: center;
-  margin-top: 1px;
+  /* Centres the box on the first 20px label line. */
+  margin-top: calc((var(--aidex-leading-sm) - var(--aidex-checkbox-size)) / 2);
 }
 
 .input {
-  width: 18px;
-  height: 18px;
+  width: var(--aidex-checkbox-size);
+  height: var(--aidex-checkbox-size);
   margin: 0;
   appearance: none;
   border: 1.5px solid var(--aidex-color-border-strong);
-  border-radius: 5px;
+  border-radius: var(--aidex-radius-xs);
   background: var(--aidex-color-surface-raised);
   cursor: inherit;
   transition:
@@ -39,8 +40,8 @@
 
 .mark {
   position: absolute;
-  width: 12px;
-  height: 12px;
+  width: var(--aidex-icon-xs);
+  height: var(--aidex-icon-xs);
   color: var(--aidex-color-on-accent);
   opacity: 0;
   pointer-events: none;
@@ -53,18 +54,18 @@
 .text {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--aidex-space-0-5);
   min-width: 0;
 }
 
 .label {
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-md);
-  line-height: 1.35;
+  line-height: var(--aidex-leading-sm);
 }
 
 .description {
   color: var(--aidex-color-text-muted);
-  font-size: 13px;
+  font-size: var(--aidex-text-label);
   line-height: 1.45;
 }

@@ -2,9 +2,11 @@
   display: inline-flex;
   align-items: center;
   gap: var(--aidex-space-1);
-  min-height: 26px;
-  padding: 0 var(--aidex-space-2);
-  border-radius: 7px;
+  justify-content: center;
+  min-width: var(--aidex-kbd-height);
+  min-height: var(--aidex-kbd-height);
+  padding: 0 var(--aidex-space-1-5);
+  border-radius: var(--aidex-radius-sm);
   background: var(--aidex-color-surface-strong);
   color: var(--aidex-color-text-secondary);
   font-family: var(--aidex-font-sans);

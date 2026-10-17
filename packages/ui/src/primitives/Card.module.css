@@ -6,9 +6,9 @@
 }
 
 .md {
-  padding: var(--aidex-space-4) var(--aidex-space-5);
+  padding: var(--aidex-space-3) var(--aidex-space-4);
 }
 
 .lg {
-  padding: var(--aidex-space-6) var(--aidex-space-7);
+  padding: var(--aidex-space-5) var(--aidex-space-6);
 }

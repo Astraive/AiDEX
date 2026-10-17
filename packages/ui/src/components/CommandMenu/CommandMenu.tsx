@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { LoaderIcon } from "../../icons/interface";
 import { Badge, type BadgeTone } from "../../primitives/Badge";
 import { Popover, type PopoverPlacement } from "../../primitives/Popover";
+import { Tooltip } from "../../primitives/Tooltip";
 import { cx } from "../../utils/cx";
 import {
   commandMenuKeyAction,
@@ -14,6 +15,7 @@ import {
 } from "./model";
 import a11y from "../content/a11y.module.css";
 import styles from "./CommandMenu.module.css";
+import { useTextCut } from "./useTextCut";
 
 export type CommandMenuBadge = { label: string; tone?: BadgeTone; icon?: ReactNode };
 
@@ -23,7 +25,7 @@ export type CommandMenuItem = {
   title: string;
   /** Muted text before the title, e.g. `/skill:`. */
   prefix?: string;
-  /** One line; the full text is in the row's tooltip. */
+  /** One line; while it is cut off, the row's tooltip (beside the row, on hover) shows it in full. */
   description?: string;
   /** Decorative leading icon. */
   icon?: ReactNode;
@@ -34,7 +36,10 @@ export type CommandMenuItem = {
    * but Enter, Tab, and clicks do nothing on it.
    */
   disabled?: boolean;
-  /** Native tooltip; defaults to the title and description. */
+  /**
+   * Text shown beside the row on hover, always. Without it, the row shows its title and description
+   * there only while one of them is cut off.
+   */
   tooltip?: string;
 };
 
@@ -86,6 +91,12 @@ export type CommandMenuProps = {
 const keepFocus = (event: MouseEvent) => event.preventDefault();
 
 /**
+ * The input that last moved the highlight. The active row shows a focus ring only after keyboard
+ * use; under the pointer it is just tinted, as hover is.
+ */
+export type CommandMenuModality = "keyboard" | "pointer";
+
+/**
  * Anchored suggestion list for a text field, such as the composer's `$` skills menu and `/` command
  * menu. Focus stays in the field: ArrowUp/ArrowDown move the active row, Enter or Tab selects it (or
  * does nothing on a disabled row), and Escape closes. Fully controlled; the app filters and ranks
@@ -113,6 +124,8 @@ export function CommandMenu({
   className,
 }: CommandMenuProps) {
   const items = useMemo(() => flattenCommandMenu(sections), [sections]);
+  // Typing opens the menu or changes the query, so either starts keyboard modality (see below).
+  const [modality, setModality] = useState<CommandMenuModality>("keyboard");
 
   // Latest values for the document listeners, which stay bound for the whole time the menu is open.
   const latest = useRef({ items, activeId, onActiveChange, onSelect, onClose });
@@ -129,7 +142,9 @@ export function CommandMenu({
     const previous = previousRef.current;
     previousRef.current = { open, query };
     if (!open) return;
-    const next = resolveCommandMenuActive(items, activeId, !previous.open || previous.query !== query);
+    const restart = !previous.open || previous.query !== query;
+    if (restart) setModality("keyboard");
+    const next = resolveCommandMenuActive(items, activeId, restart);
     if (next !== activeId) onActiveChange(next);
   }, [open, query, items, activeId, onActiveChange]);
 
@@ -148,8 +163,10 @@ export function CommandMenu({
       // see these keys, so Enter or Tab on a disabled row does nothing and the menu stays open.
       event.preventDefault();
       event.stopPropagation();
-      if (action.type === "move") latest.current.onActiveChange(action.id);
-      else if (action.type === "select") latest.current.onSelect(action.item);
+      if (action.type === "move") {
+        setModality("keyboard");
+        latest.current.onActiveChange(action.id);
+      } else if (action.type === "select") latest.current.onSelect(action.item);
     };
     // Close when focus leaves the field for somewhere else in the page (switching windows keeps it).
     let frame = 0;
@@ -196,6 +213,7 @@ export function CommandMenu({
     const last = pointerRef.current;
     if (last && last.x === event.clientX && last.y === event.clientY) return;
     pointerRef.current = { x: event.clientX, y: event.clientY };
+    setModality("pointer");
     // Disabled rows highlight too, as with the arrow keys; clicking one still does nothing.
     if (item.id !== activeId) onActiveChange(item.id);
   };
@@ -217,6 +235,7 @@ export function CommandMenu({
       }}
       anchorRef={anchorRef}
       placement={placement}
+      // Clears the composer's 3px focus ring.
       offset={8}
       role="group"
       autoFocus={false}
@@ -224,11 +243,13 @@ export function CommandMenu({
       container={container}
       className={cx(styles.popover, className)}
     >
-      <div className={styles.menu} onMouseDown={keepFocus}>
+      <div className={styles.menu} data-modality={modality} onMouseDown={keepFocus}>
         <div
           ref={listRef}
           id={id}
           role="listbox"
+          // Focus stays in the field, so the scrolling list is not a Tab stop of its own.
+          tabIndex={-1}
           aria-label={label}
           aria-busy={loading || undefined}
           className={cx(styles.list, empty && styles.listEmpty)}
@@ -273,11 +294,16 @@ export function CommandMenu({
   );
 }
 
-function CommandMenuOption({
+/**
+ * One row of a CommandMenu or CommandPalette listbox. Focus stays in the field, so the row is an
+ * `aria-activedescendant` target, never focused itself. Shared within this folder only.
+ */
+export function CommandMenuOption({
   item,
   domId,
   active,
   highlight,
+  size = "sm",
   onHover,
   onSelect,
 }: {
@@ -285,6 +311,8 @@ function CommandMenuOption({
   domId: string;
   active: boolean;
   highlight: string;
+  /** `sm` (--aidex-row-sm) in the anchored menu, `md` (--aidex-row-md) in the palette. */
+  size?: "sm" | "md";
   onHover: (event: MouseEvent, item: CommandMenuItem) => void;
   onSelect: (item: CommandMenuItem) => void;
 }) {
@@ -292,42 +320,52 @@ function CommandMenuOption({
   const [before, match, after] = highlightMatch(item.title, highlight);
   const name = `${item.prefix ?? ""}${item.title}`;
   const tooltip = item.tooltip ?? [name, item.description].filter(Boolean).join(" — ");
+  // The default tooltip only repeats the row's text, so it shows only while that text is cut off.
+  const cut = useTextCut(domId, [styles.title, styles.description]);
   // One spoken string in reading order, so the name does not depend on how a browser joins the parts.
   const accessibleName = [name, item.description, badge?.label].filter(Boolean).join(", ");
   return (
-    <div
-      id={domId}
-      role="option"
-      aria-selected={active}
-      aria-disabled={item.disabled || undefined}
-      aria-label={accessibleName}
-      title={tooltip}
-      className={cx(styles.option, active && styles.active, item.disabled && styles.disabled)}
-      onMouseDown={keepFocus}
-      onMouseMove={(event) => onHover(event, item)}
-      onClick={() => {
-        if (!item.disabled) onSelect(item);
-      }}
+    <Tooltip
+      content={tooltip}
+      disabled={item.tooltip === undefined && !cut}
+      side="right"
+      sideOffset={8}
+      // The row's accessible name already holds its full text.
+      describe={false}
     >
-      {item.icon ? (
-        <span className={styles.icon} aria-hidden="true">
-          {item.icon}
+      <div
+        id={domId}
+        role="option"
+        aria-selected={active}
+        aria-disabled={item.disabled || undefined}
+        aria-label={accessibleName}
+        className={cx(styles.option, size === "md" && styles.optionMd, active && styles.active, item.disabled && styles.disabled)}
+        onMouseDown={keepFocus}
+        onMouseMove={(event) => onHover(event, item)}
+        onClick={() => {
+          if (!item.disabled) onSelect(item);
+        }}
+      >
+        {item.icon ? (
+          <span className={styles.icon} aria-hidden="true">
+            {item.icon}
+          </span>
+        ) : null}
+        <span className={styles.text}>
+          <span className={styles.title}>
+            {item.prefix ? <span className={styles.prefix}>{item.prefix}</span> : null}
+            {before}
+            {match ? <mark className={styles.match}>{match}</mark> : null}
+            {after}
+          </span>
+          {item.description ? <span className={styles.description}>{item.description}</span> : null}
         </span>
-      ) : null}
-      <span className={styles.text}>
-        <span className={styles.title}>
-          {item.prefix ? <span className={styles.prefix}>{item.prefix}</span> : null}
-          {before}
-          {match ? <mark className={styles.match}>{match}</mark> : null}
-          {after}
-        </span>
-        {item.description ? <span className={styles.description}>{item.description}</span> : null}
-      </span>
-      {badge ? (
-        <Badge tone={badge.tone ?? "neutral"} size="sm" icon={badge.icon} className={styles.badge}>
-          {badge.label}
-        </Badge>
-      ) : null}
-    </div>
+        {badge ? (
+          <Badge tone={badge.tone ?? "neutral"} size="sm" icon={badge.icon} className={styles.badge}>
+            {badge.label}
+          </Badge>
+        ) : null}
+      </div>
+    </Tooltip>
   );
 }

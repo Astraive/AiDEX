@@ -13,6 +13,16 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { cx } from "../utils/cx";
+import {
+  isBelowModalLayer,
+  isInsideDescendantLayer,
+  isTopLayer,
+  onLayerPush,
+  PORTAL_ROOT_ATTRIBUTE,
+  pushLayer,
+  tabbableAfter,
+  tabbablesIn,
+} from "./layers";
 import styles from "./Popover.module.css";
 
 export type PopoverPlacement = "bottom-start" | "bottom-end" | "top-start" | "top-end";
@@ -25,7 +35,7 @@ export type PopoverProps = {
   anchorRef: RefObject<HTMLElement | null>;
   /** Preferred side and alignment; the popover flips vertically when it would overflow the viewport. */
   placement?: PopoverPlacement;
-  /** Gap between the anchor and the popover in pixels (default 6). */
+  /** Gap between the anchor and the popover in pixels (default 4). */
   offset?: number;
   /** Accessible name; use `labelledBy` instead when a visible heading names the popover. */
   label?: string;
@@ -42,8 +52,8 @@ export type PopoverProps = {
   /** Sizes the popover to the anchor's width, e.g. a suggestion list under a composer. */
   matchAnchorWidth?: boolean;
   /**
-   * Portal target (default `document.body`). Pass the open `<dialog>` element when the popover is
-   * opened from inside a native modal, so it renders in the same top layer.
+   * Portal target. Defaults to the nearest `[data-aidex-portal-root]` around the anchor (a Dialog
+   * popup), so a popover opened inside a dialog stays inside its focus trap, else `document.body`.
    */
   container?: HTMLElement | null;
   /** Id of the popover surface, e.g. for the trigger's `aria-controls`. */
@@ -52,12 +62,24 @@ export type PopoverProps = {
   children: ReactNode;
 };
 
+/** Keeps the surface this far from the viewport edges (collision padding). */
 const VIEWPORT_MARGIN = 8;
+/** Exit transition length; the surface unmounts after it (or at once when motion is reduced). */
+const EXIT_MS = 150;
 const FOCUSABLE =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 type Side = "top" | "bottom";
-type Position = { top: number; left: number; side: Side; availableHeight: number; width?: number };
+type Position = {
+  top: number;
+  left: number;
+  side: Side;
+  availableHeight: number;
+  availableWidth: number;
+  anchorWidth: number;
+  originX: number;
+  width?: number;
+};
 
 function computePosition(
   anchor: DOMRect,
@@ -76,10 +98,22 @@ function computePosition(
   else if (side === "top" && height > spaceAbove && spaceBelow > spaceAbove) side = "bottom";
   const availableHeight = Math.max(0, Math.floor(side === "bottom" ? spaceBelow : spaceAbove));
   const renderedHeight = Math.min(height, availableHeight);
-  const top = side === "bottom" ? anchor.bottom + offset : anchor.top - offset - renderedHeight;
+  const preferredTop = side === "bottom" ? anchor.bottom + offset : anchor.top - offset - renderedHeight;
+  // Clamp vertically too: an anchor scrolled partly off screen must not push the surface past an edge.
+  const maxTop = Math.max(VIEWPORT_MARGIN, viewportHeight - VIEWPORT_MARGIN - renderedHeight);
+  const top = Math.min(Math.max(preferredTop, VIEWPORT_MARGIN), maxTop);
   const preferredLeft = align === "start" ? anchor.left : anchor.right - width;
   const left = Math.max(VIEWPORT_MARGIN, Math.min(preferredLeft, viewportWidth - width - VIEWPORT_MARGIN));
-  return { top: Math.round(top), left: Math.round(left), side, availableHeight };
+  const originX = Math.min(Math.max(anchor.left + anchor.width / 2 - left, 0), width);
+  return {
+    top: Math.round(top),
+    left: Math.round(left),
+    side,
+    availableHeight,
+    availableWidth: Math.max(0, viewportWidth - VIEWPORT_MARGIN * 2),
+    anchorWidth: Math.round(anchor.width),
+    originX: Math.round(originX),
+  };
 }
 
 function samePosition(a: Position | null, b: Position): boolean {
@@ -89,28 +123,56 @@ function samePosition(a: Position | null, b: Position): boolean {
     a.left === b.left &&
     a.side === b.side &&
     a.availableHeight === b.availableHeight &&
+    a.availableWidth === b.availableWidth &&
+    a.anchorWidth === b.anchorWidth &&
+    a.originX === b.originX &&
     a.width === b.width
   );
 }
 
+function prefersReducedMotion(): boolean {
+  if (document.documentElement.dataset.reduceMotion === "true") return true;
+  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 /**
- * Non-modal floating surface anchored to an element. It portals out of clipping ancestors, flips
- * vertically to stay on screen, moves focus inside on open, and closes on Escape (returning focus to
- * the anchor), on a pointer press outside, or when focus leaves it.
+ * Non-modal floating surface anchored to an element. It portals out of clipping ancestors (into the
+ * enclosing dialog, if any), flips vertically and clamps to stay on screen, follows the anchor as it
+ * moves, moves focus inside on open, and closes on Escape (returning focus to the anchor), on a
+ * pointer press outside, or when focus leaves it. Tab past either end leaves the popover as if it
+ * sat right after its anchor. Nested layers answer Escape and outside presses top-first.
  */
-export function Popover({ open, container, ...props }: PopoverProps) {
+export function Popover({ open, container, anchorRef, ...props }: PopoverProps) {
   // Portals need the DOM; skip the first (prerendered) pass so static export and hydration agree.
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
-  if (!mounted || !open) return null;
-  return createPortal(<PopoverSurface {...props} />, container ?? document.body);
+  // Each opening gets its own surface; a closing one stays until its exit transition ends.
+  const [session, setSession] = useState(open ? 1 : 0);
+  const [present, setPresent] = useState(open);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setPresent(true);
+      setSession((current) => current + 1);
+    }
+  }
+  if (!mounted || !present) return null;
+  const target =
+    container ?? anchorRef.current?.closest<HTMLElement>(`[${PORTAL_ROOT_ATTRIBUTE}]`) ?? document.body;
+  return createPortal(
+    <PopoverSurface key={session} {...props} anchorRef={anchorRef} open={open} onExited={() => setPresent(false)} />,
+    target,
+  );
 }
 
 function PopoverSurface({
+  open,
+  onExited,
   onOpenChange,
   anchorRef,
   placement = "bottom-start",
-  offset = 6,
+  offset = 4,
   label,
   labelledBy,
   role = "dialog",
@@ -120,13 +182,19 @@ function PopoverSurface({
   id,
   className,
   children,
-}: Omit<PopoverProps, "open" | "container">) {
+}: Omit<PopoverProps, "container"> & { onExited: () => void }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const beforeGuardRef = useRef<HTMLSpanElement>(null);
+  const afterGuardRef = useRef<HTMLSpanElement>(null);
   const [position, setPosition] = useState<Position | null>(null);
+  const [starting, setStarting] = useState(true);
+  const [anchorHidden, setAnchorHidden] = useState(false);
   const restoreFocusRef = useRef(true);
   const onOpenChangeRef = useRef(onOpenChange);
+  const onExitedRef = useRef(onExited);
   useLayoutEffect(() => {
     onOpenChangeRef.current = onOpenChange;
+    onExitedRef.current = onExited;
   });
 
   const close = useCallback((restoreFocus: boolean) => {
@@ -150,35 +218,99 @@ function PopoverSurface({
     setPosition((previous) => (samePosition(previous, next) ? previous : next));
   }, [anchorRef, placement, offset, matchAnchorWidth]);
 
-  // Position before the first paint, then follow layout changes.
+  // Position before the first paint, then follow the anchor while open: size changes, scrolling,
+  // and layout shifts that move the anchor without resizing it (checked once per frame).
   useLayoutEffect(updatePosition, [updatePosition]);
   useEffect(() => {
+    if (!open) return;
     let frame = 0;
-    const schedule = (event?: Event) => {
-      // Scrolling inside the popover does not move the anchor.
-      if (event?.target instanceof Node && surfaceRef.current?.contains(event.target)) return;
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(updatePosition);
+    let last = "";
+    const track = () => {
+      const anchor = anchorRef.current;
+      if (anchor) {
+        const rect = anchor.getBoundingClientRect();
+        const key = `${rect.top},${rect.left},${rect.width},${rect.height},${window.innerWidth},${window.innerHeight}`;
+        if (key !== last) {
+          last = key;
+          updatePosition();
+        }
+      }
+      frame = requestAnimationFrame(track);
     };
-    const onResize = () => schedule();
-    window.addEventListener("resize", onResize);
-    window.addEventListener("scroll", schedule, true);
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
+    frame = requestAnimationFrame(track);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => updatePosition());
     if (surfaceRef.current) observer?.observe(surfaceRef.current);
-    if (anchorRef.current) observer?.observe(anchorRef.current);
     return () => {
       cancelAnimationFrame(frame);
-      window.removeEventListener("resize", onResize);
-      window.removeEventListener("scroll", schedule, true);
       observer?.disconnect();
     };
-  }, [anchorRef, updatePosition]);
+  }, [open, anchorRef, updatePosition]);
 
-  // Move focus in on open; on close, return it to the anchor unless the user moved it elsewhere.
+  // Hide the surface while its anchor is scrolled out of view or clipped away.
+  useEffect(() => {
+    const anchor = anchorRef.current;
+    if (!open || !anchor || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => setAnchorHidden(entry ? !entry.isIntersecting : false));
+    observer.observe(anchor);
+    return () => observer.disconnect();
+  }, [open, anchorRef]);
+
+  // Enter transition: paint the starting style once (two frames, since a click can flush effects
+  // before the first paint), then let it transition to the resting style.
+  useEffect(() => {
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => setStarting(false));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  // Exit: wait for the transition (or skip it when motion is reduced), then unmount.
+  useEffect(() => {
+    if (open) return;
+    const surface = surfaceRef.current;
+    if (!surface || prefersReducedMotion()) {
+      onExitedRef.current();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      onExitedRef.current();
+    };
+    const onTransitionEnd = (event: TransitionEvent) => {
+      if (event.target === surface) finish();
+    };
+    surface.addEventListener("transitionend", onTransitionEnd);
+    // Fallback for a transition that never runs (e.g. the surface was already transparent).
+    const timer = window.setTimeout(finish, EXIT_MS + 50);
+    return () => {
+      surface.removeEventListener("transitionend", onTransitionEnd);
+      window.clearTimeout(timer);
+    };
+  }, [open]);
+
+  // Register as a layer while open, so nested layers answer Escape and outside presses top-first.
+  useLayoutEffect(() => {
+    const surface = surfaceRef.current;
+    if (!open || !surface) return;
+    return pushLayer(surface);
+  }, [open]);
+
+  // A dialog or the command palette opening over the page closes the popover, which would otherwise
+  // float above the modal and stay in its layer list. Focus is the modal's to place.
+  useEffect(() => {
+    if (!open) return;
+    return onLayerPush(() => {
+      const surface = surfaceRef.current;
+      if (surface && isBelowModalLayer(surface)) close(false);
+    });
+  }, [open, close]);
+
+  // Move focus in on open.
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
     if (!surface || !autoFocus) return;
-    const anchor = anchorRef.current;
     const focusInitial = () => {
       const target = initialFocusRef?.current ?? surface.querySelector<HTMLElement>(FOCUSABLE) ?? surface;
       target.focus({ preventScroll: true });
@@ -187,20 +319,28 @@ function PopoverSurface({
     const frame = requestAnimationFrame(() => {
       if (!surface.contains(document.activeElement)) focusInitial();
     });
-    return () => {
-      cancelAnimationFrame(frame);
-      if (!restoreFocusRef.current) return;
-      const active = document.activeElement;
-      if (!active || active === document.body || surface.contains(active)) anchor?.focus({ preventScroll: true });
-    };
+    return () => cancelAnimationFrame(frame);
     // Runs once per opening; the refs are stable for the popover's lifetime.
   }, []);
 
+  // On close, return focus to the anchor unless the user moved it elsewhere.
+  useLayoutEffect(() => {
+    const surface = surfaceRef.current;
+    if (open || !surface || !autoFocus || !restoreFocusRef.current) return;
+    const active = document.activeElement;
+    if (!active || active === document.body || surface.contains(active)) {
+      anchorRef.current?.focus({ preventScroll: true });
+    }
+  }, [open, autoFocus, anchorRef]);
+
   useEffect(() => {
+    if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.isComposing) return;
-      // Capture phase: the popover is the top-most layer, so Escape closes it before anything below
-      // (including a native dialog it sits in) reacts.
+      const surface = surfaceRef.current;
+      // A layer opened on top (a menu or select inside this popover) closes first.
+      if (!surface || !isTopLayer(surface)) return;
+      // Capture phase: the popover closes before anything below it (including a dialog) reacts.
       event.preventDefault();
       event.stopPropagation();
       close(true);
@@ -208,45 +348,115 @@ function PopoverSurface({
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
-      if (surfaceRef.current?.contains(target) || anchorRef.current?.contains(target)) return;
+      const surface = surfaceRef.current;
+      if (!surface || surface.contains(target) || anchorRef.current?.contains(target)) return;
+      if (isInsideDescendantLayer(target, surface)) return;
+      close(false);
+    };
+    // Focus landing anywhere else closes the popover, also when it moves on from the anchor (where
+    // Shift+Tab out of the popover leaves it open, as Radix does). Moves out of the surface and through
+    // the focus guards are handled by `handleBlur` and `handleGuardFocus`.
+    const onFocusIn = (event: globalThis.FocusEvent) => {
+      const target = event.target;
+      const surface = surfaceRef.current;
+      if (!surface || !(target instanceof Node)) return;
+      const ownedByPopover = (node: Node) =>
+        surface.contains(node) || node === beforeGuardRef.current || node === afterGuardRef.current;
+      const from = event.relatedTarget;
+      if ((from instanceof Node && ownedByPopover(from)) || ownedByPopover(target)) return;
+      if (anchorRef.current?.contains(target) || isInsideDescendantLayer(target, surface)) return;
       close(false);
     };
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("focusin", onFocusIn, true);
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("focusin", onFocusIn, true);
     };
-  }, [anchorRef, close]);
+  }, [open, anchorRef, close]);
+
+  const isGuard = (node: unknown) => node === beforeGuardRef.current || node === afterGuardRef.current;
 
   const handleBlur = (event: FocusEvent<HTMLDivElement>) => {
     const next = event.relatedTarget;
-    if (!(next instanceof Node)) return;
-    if (surfaceRef.current?.contains(next) || anchorRef.current?.contains(next)) return;
+    if (!open || !(next instanceof Node) || isGuard(next)) return;
+    const surface = surfaceRef.current;
+    if (!surface || surface.contains(next) || anchorRef.current?.contains(next)) return;
+    if (isInsideDescendantLayer(next, surface)) return;
     close(false);
   };
 
+  // Focus guards: Tab past the last item goes to whatever follows the anchor (and closes); Shift+Tab
+  // past the first returns to the anchor. Focus arriving from outside goes to the nearest end.
+  const handleGuardFocus = (edge: "before" | "after") => (event: FocusEvent<HTMLSpanElement>) => {
+    const surface = surfaceRef.current;
+    const anchor = anchorRef.current;
+    if (!surface) return;
+    const fromInside = event.relatedTarget instanceof Node && surface.contains(event.relatedTarget);
+    if (!fromInside) {
+      const items = tabbablesIn(surface);
+      const target = (edge === "before" ? items[0] : items.at(-1)) ?? surface;
+      target.focus({ preventScroll: true });
+      return;
+    }
+    if (edge === "before") {
+      anchor?.focus({ preventScroll: true });
+      return;
+    }
+    const next = anchor ? tabbableAfter(anchor, surface) : null;
+    (next ?? anchor)?.focus({ preventScroll: true });
+    close(false);
+  };
+
+  const side = position?.side ?? (placement.split("-")[0] as Side);
   const style = {
     top: position?.top ?? 0,
     left: position?.left ?? 0,
     width: position?.width,
+    transformOrigin: position ? `${position.originX}px ${side === "bottom" ? "top" : "bottom"}` : undefined,
     "--aidex-popover-available-height": position ? `${position.availableHeight}px` : undefined,
+    "--aidex-popover-available-width": position ? `${position.availableWidth}px` : undefined,
+    "--aidex-popover-anchor-width": position ? `${position.anchorWidth}px` : undefined,
   } as CSSProperties;
 
   return (
-    <div
-      ref={surfaceRef}
-      id={id}
-      role={role}
-      aria-label={label}
-      aria-labelledby={labelledBy}
-      tabIndex={-1}
-      data-side={position?.side ?? placement.split("-")[0]}
-      className={cx(styles.popover, (position?.side ?? placement.split("-")[0]) === "top" && styles.top, className)}
-      style={style}
-      onBlur={handleBlur}
-    >
-      {children}
-    </div>
+    <>
+      <span
+        ref={beforeGuardRef}
+        tabIndex={open ? 0 : -1}
+        aria-hidden="true"
+        data-focus-guard=""
+        className={styles.guard}
+        onFocus={handleGuardFocus("before")}
+      />
+      <div
+        ref={surfaceRef}
+        id={id}
+        role={role}
+        aria-label={label}
+        aria-labelledby={labelledBy}
+        tabIndex={-1}
+        data-side={side}
+        data-starting-style={open && starting ? "" : undefined}
+        data-ending-style={open ? undefined : ""}
+        data-anchor-hidden={anchorHidden ? "" : undefined}
+        inert={!open}
+        className={cx(styles.popover, className)}
+        style={style}
+        onBlur={handleBlur}
+      >
+        {children}
+      </div>
+      <span
+        ref={afterGuardRef}
+        tabIndex={open ? 0 : -1}
+        aria-hidden="true"
+        data-focus-guard=""
+        className={styles.guard}
+        onFocus={handleGuardFocus("after")}
+      />
+    </>
   );
 }

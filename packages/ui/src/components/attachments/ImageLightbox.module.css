@@ -1,24 +1,28 @@
-/* Fills the window; the frame lays out the toolbar, the image stage, and the caption. */
-.dialog {
-  width: 100vw;
-  max-width: 100vw;
-  height: 100dvh;
-  max-height: 100dvh;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  border: 0;
-  background: transparent;
-  color: var(--aidex-color-text);
-}
-
-.dialog::backdrop {
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--aidex-z-dialog-media);
   background: color-mix(in srgb, var(--aidex-color-bg) 90%, transparent);
   backdrop-filter: blur(6px);
+  transition: opacity var(--aidex-duration-base) var(--aidex-ease);
 }
 
-.dialog[open] {
-  animation: lightbox-in var(--aidex-duration-base) var(--aidex-ease);
+/* Fills the window above other dialogs; the frame lays out the toolbar, the image stage, and the caption. */
+.dialog {
+  position: fixed;
+  inset: 0;
+  z-index: var(--aidex-z-dialog-media);
+  overflow: hidden;
+  color: var(--aidex-color-text);
+  outline: none;
+  transition: opacity var(--aidex-duration-base) var(--aidex-ease);
+}
+
+.backdrop[data-starting-style],
+.backdrop[data-ending-style],
+.dialog[data-starting-style],
+.dialog[data-ending-style] {
+  opacity: 0;
 }
 
 .frame {
@@ -54,7 +58,16 @@
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  scrollbar-color: var(--aidex-color-border) transparent;
+}
+
+/* Zoomed: drag to pan. */
+.viewport[data-zoomed="true"] {
+  cursor: grab;
+}
+
+.viewport[data-dragging="true"] {
+  cursor: grabbing;
+  user-select: none;
 }
 
 .image {
@@ -74,7 +87,7 @@
   max-width: none;
   max-height: none;
   border-radius: 0;
-  cursor: zoom-out;
+  cursor: inherit;
 }
 
 .state {
@@ -118,15 +131,13 @@
 
 /* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
 @media (prefers-reduced-motion: reduce) {
-  .dialog[open],
+  .backdrop,
+  .dialog {
+    transition: none;
+  }
+
   .spinner {
     animation: none;
-  }
-}
-
-@keyframes lightbox-in {
-  from {
-    opacity: 0;
   }
 }
 

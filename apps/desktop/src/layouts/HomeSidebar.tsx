@@ -6,6 +6,7 @@ import { usePreferences } from "../app/providers/preferences";
 import { useRpc } from "../hooks/useRpc";
 import { SectionSidebar } from "./SectionSidebar";
 import { useShell } from "./shell";
+
 export function HomeSidebar() {
   const { navigate } = useNavigation();
   const preferences = usePreferences();
@@ -15,7 +16,6 @@ export function HomeSidebar() {
   return (
     <SectionSidebar
       title="AiDEX"
-      brandSize="lg"
       action={{
         label: "New chat",
         icon: <PlusCircleIcon />,

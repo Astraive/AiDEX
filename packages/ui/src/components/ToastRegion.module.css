@@ -1,20 +1,22 @@
+/* Bottom-right stack, newest nearest the corner; it sizes to its toasts, so it blocks nothing else. */
 .region {
   position: fixed;
-  right: var(--aidex-space-6);
-  bottom: var(--aidex-space-6);
-  z-index: 50;
+  right: var(--aidex-space-4);
+  bottom: var(--aidex-space-4);
+  z-index: var(--aidex-z-toast);
   display: flex;
-  flex-direction: column;
+  flex-direction: column-reverse;
   align-items: flex-end;
   gap: var(--aidex-space-2);
-  pointer-events: none;
+  max-width: min(var(--aidex-toast-max-width), calc(100vw - 2 * var(--aidex-space-4)));
+  outline: none;
 }
 
 .toast {
   display: flex;
   align-items: center;
   gap: var(--aidex-space-3);
-  max-width: 420px;
+  max-width: 100%;
   padding: var(--aidex-space-2) var(--aidex-space-2) var(--aidex-space-2) var(--aidex-space-4);
   border: 1px solid var(--aidex-color-border-strong);
   border-radius: var(--aidex-radius-md);
@@ -22,14 +24,40 @@
   box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
   color: var(--aidex-color-text);
   font-size: var(--aidex-text-sm);
-  pointer-events: auto;
-  animation: enter var(--aidex-duration-base) var(--aidex-ease);
+  outline-offset: 2px;
+  transform: translate(var(--toast-swipe-movement-x, 0px), var(--toast-swipe-movement-y, 0px));
+  transition:
+    opacity 200ms var(--aidex-ease),
+    transform 200ms var(--aidex-ease);
+}
+
+.toast[data-starting-style] {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.toast[data-ending-style] {
+  opacity: 0;
+}
+
+/* A swipe carries the toast off the way it was thrown. */
+.toast[data-ending-style][data-swipe-direction="right"] {
+  transform: translateX(calc(100% + var(--aidex-space-4)));
+}
+
+.toast[data-ending-style][data-swipe-direction="down"] {
+  transform: translateY(calc(100% + var(--aidex-space-4)));
+}
+
+/* Past the limit: kept for its exit, but out of the stack. */
+.toast[data-limited] {
+  display: none;
 }
 
 .icon {
   flex: none;
-  width: 18px;
-  height: 18px;
+  width: var(--aidex-icon-lg);
+  height: var(--aidex-icon-lg);
 }
 
 .info .icon {
@@ -46,12 +74,15 @@
 
 .message {
   flex: 1;
+  min-width: 0;
+  margin: 0;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
-@keyframes enter {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
+/* `html[data-reduce-motion="true"]` is handled globally in styles.css. */
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    transition: none;
   }
 }

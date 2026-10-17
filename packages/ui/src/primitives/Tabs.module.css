@@ -6,15 +6,34 @@
   user-select: none;
 }
 
+/* Fades mark the edges that hide tabs (attributes from useOverflowEdges). */
+.list[data-overflow-start] {
+  mask-image: linear-gradient(to right, transparent, black var(--aidex-space-6));
+}
+
+.list[data-overflow-end] {
+  mask-image: linear-gradient(to left, transparent, black var(--aidex-space-6));
+}
+
+.list[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    black var(--aidex-space-6),
+    black calc(100% - var(--aidex-space-6)),
+    transparent
+  );
+}
+
 .tab {
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: var(--aidex-space-2);
+  gap: var(--aidex-control-gap-sm);
   border: 0;
   background: transparent;
   color: var(--aidex-color-text-muted);
-  font-size: var(--aidex-text-md);
+  font-size: var(--aidex-text-sm);
   white-space: nowrap;
   cursor: pointer;
   transition:
@@ -22,8 +41,18 @@
     color var(--aidex-duration-fast) var(--aidex-ease);
 }
 
-.tab:hover {
+/* The list scrolls, which clips anything outside it, so the ring is drawn inside the tab. */
+.tab:focus-visible {
+  outline-offset: -2px;
+}
+
+.tab:hover:not([aria-disabled="true"]) {
   color: var(--aidex-color-text);
+}
+
+.tab[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .icon {
@@ -31,17 +60,19 @@
 }
 
 .icon svg {
-  width: 16px;
-  height: 16px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .count {
-  min-width: 20px;
-  padding: 1px 6px;
+  min-width: var(--aidex-badge-height-sm);
+  height: var(--aidex-badge-height-sm);
+  padding: 0 var(--aidex-space-1);
   border-radius: var(--aidex-radius-full);
   background: var(--aidex-color-surface-strong);
   color: var(--aidex-color-text-secondary);
-  font-size: var(--aidex-text-xs);
+  font-size: var(--aidex-text-2xs);
+  line-height: var(--aidex-badge-height-sm);
   text-align: center;
 }
 
@@ -51,12 +82,12 @@
 }
 
 .pill .tab {
-  min-height: 36px;
-  padding: 0 var(--aidex-space-3);
+  height: var(--aidex-control-sm);
+  padding: 0 var(--aidex-control-pad-x-sm);
   border-radius: var(--aidex-radius-sm);
 }
 
-.pill .tab:hover {
+.pill .tab:hover:not([aria-disabled="true"]) {
   background: var(--aidex-color-surface-hover);
 }
 
@@ -66,16 +97,21 @@
   color: var(--aidex-color-text);
 }
 
-/* Underline: page sections, with the accent marking the current one. */
+/*
+ * Underline: page sections, with the accent marking the current one. Tabs carry 4px of side padding
+ * so the inset focus ring clears the label; the list's negative margin keeps labels on the page edge,
+ * and the 8px gap keeps labels 16px apart.
+ */
 .underline {
-  gap: var(--aidex-space-6);
+  gap: var(--aidex-space-2);
+  margin-inline: calc(var(--aidex-space-1) * -1);
   border-bottom: 1px solid var(--aidex-color-border-subtle);
 }
 
 .underline .tab {
   position: relative;
-  min-height: 46px;
-  padding: 0 1px;
+  height: var(--aidex-control-lg);
+  padding: 0 var(--aidex-space-1);
 }
 
 .underline .selected {
@@ -85,9 +121,9 @@
 .underline .selected::after {
   content: "";
   position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
+  right: var(--aidex-space-1);
+  bottom: 0;
+  left: var(--aidex-space-1);
   height: 2px;
   border-radius: 2px;
   background: var(--aidex-color-accent);

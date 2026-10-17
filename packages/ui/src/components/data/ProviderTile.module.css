@@ -5,7 +5,7 @@
   gap: var(--aidex-space-2);
   width: 100%;
   min-width: 0;
-  min-height: 76px;
+  min-height: calc(2 * var(--aidex-control-md));
   height: 100%;
   margin: 0;
   padding: var(--aidex-space-3);

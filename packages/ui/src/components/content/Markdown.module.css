@@ -3,13 +3,13 @@
   min-width: 0;
   color: inherit;
   font-size: inherit;
-  line-height: 1.7;
+  line-height: var(--aidex-prose-line-height);
   overflow-wrap: break-word;
 }
 
 /* Two classes so the spacing wins over a nested component's own reset (e.g. `CodeBlock`). */
 .markdown .block {
-  margin: 0 0 var(--aidex-space-4);
+  margin: 0 0 var(--aidex-prose-block-gap);
 }
 
 .markdown .block:last-child {
@@ -19,7 +19,7 @@
 /* Headings */
 
 .markdown .heading {
-  margin: var(--aidex-space-6) 0 var(--aidex-space-2);
+  margin: var(--aidex-space-5) 0 var(--aidex-space-2);
   color: var(--aidex-color-text);
   font-family: var(--aidex-font-display);
   font-weight: 600;
@@ -44,7 +44,7 @@
 }
 
 .h4 {
-  font-size: var(--aidex-text-md);
+  font-size: var(--aidex-text-sm);
 }
 
 .h5 {
@@ -59,7 +59,7 @@
 /* Lists */
 
 .list {
-  padding-left: var(--aidex-space-6);
+  padding-left: var(--aidex-space-5);
 }
 
 .item::marker {
@@ -99,14 +99,14 @@
 /* The checkbox sits where the bullet would be; the state is also spoken ("Completed"). */
 .checkbox {
   position: absolute;
-  top: calc((1.7em - 14px) / 2);
+  top: calc((var(--aidex-prose-line-height) * 1em - var(--aidex-icon-sm)) / 2);
   left: calc(-1 * var(--aidex-space-5));
   display: inline-grid;
   place-items: center;
-  width: 14px;
-  height: 14px;
+  width: var(--aidex-icon-sm);
+  height: var(--aidex-icon-sm);
   border: 1px solid var(--aidex-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--aidex-radius-xs);
   background: var(--aidex-color-surface);
   color: var(--aidex-color-on-accent);
 }
@@ -148,7 +148,7 @@
   width: 100%;
   border-collapse: collapse;
   font-size: var(--aidex-text-sm);
-  line-height: 1.5;
+  line-height: var(--aidex-leading-sm);
 }
 
 .table th,
@@ -184,7 +184,7 @@
 /* Links and image chips. Links have no href, so the pointer cursor is set explicitly. */
 
 .link {
-  border-radius: 2px;
+  border-radius: calc(var(--aidex-radius-xs) / 2);
   color: var(--aidex-color-link);
   text-decoration: underline;
   text-decoration-thickness: from-font;

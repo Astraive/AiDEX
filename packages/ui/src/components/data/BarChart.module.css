@@ -69,7 +69,7 @@
 }
 
 .bar {
-  border-radius: 0 4px 4px 0;
+  border-radius: 0 var(--aidex-radius-xs) var(--aidex-radius-xs) 0;
   background: var(--aidex-chart-1);
   transition:
     width var(--aidex-duration-base) var(--aidex-ease),

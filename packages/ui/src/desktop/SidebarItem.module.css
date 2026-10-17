@@ -6,13 +6,13 @@
 .button {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: var(--aidex-control-gap);
   width: 100%;
   border: 1px solid transparent;
   border-radius: inherit;
   background: transparent;
   color: var(--aidex-color-text);
-  text-align: left;
+  text-align: start;
   cursor: pointer;
   transition:
     background-color var(--aidex-duration-fast) var(--aidex-ease),
@@ -23,16 +23,23 @@
   background: var(--aidex-color-surface-hover);
 }
 
+/* Rows sit flush in the sidebar body, so the ring is drawn inside the row. */
+.button:focus-visible {
+  outline-offset: -2px;
+}
+
 .md .button {
-  min-height: 44px;
-  padding: 0 var(--aidex-space-3);
-  font-size: var(--aidex-text-lg);
+  min-height: var(--aidex-row-md);
+  padding: 0 var(--aidex-control-pad-x-sm);
+  font-size: var(--aidex-text-sm);
+  line-height: var(--aidex-leading-sm);
 }
 
 .sm .button {
-  min-height: 32px;
-  padding: 0 var(--aidex-space-3);
-  font-size: var(--aidex-text-md);
+  min-height: var(--aidex-row-sm);
+  padding: 0 var(--aidex-control-pad-x-sm);
+  font-size: var(--aidex-text-label);
+  line-height: var(--aidex-leading-sm);
 }
 
 .active .button,
@@ -47,8 +54,8 @@
 }
 
 .icon svg {
-  width: 22px;
-  height: 22px;
+  width: var(--aidex-icon-md);
+  height: var(--aidex-icon-md);
 }
 
 .active .icon,
@@ -71,18 +78,18 @@
 .count {
   flex: none;
   color: var(--aidex-color-text-muted);
-  font-size: 13px;
+  font-size: var(--aidex-text-xs);
   font-variant-numeric: tabular-nums;
 }
 
 .hasActions .label {
-  padding-right: var(--aidex-space-8);
+  padding-inline-end: var(--aidex-control-sm);
 }
 
 .actions {
   position: absolute;
   top: 50%;
-  right: var(--aidex-space-2);
+  right: var(--aidex-space-1);
   display: flex;
   opacity: 0;
   transform: translateY(-50%);

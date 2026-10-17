@@ -35,6 +35,11 @@ export function selectDrive(path: string): Promise<AidexStatus> {
   return command<AidexStatus>("select_drive", { path });
 }
 
+/** `set_ui_scale`: zoom the whole window to `percent` (75-125). Nothing is saved on the host. */
+export function setUiScale(percent: number): Promise<void> {
+  return command<void>("set_ui_scale", { percent });
+}
+
 /** The daemon methods `rpc_call_long` accepts; the bridge refuses any other (`invalid_method`). */
 export type LongRpcMethod = "update.check" | "update.apply" | "update.rollback";
 
