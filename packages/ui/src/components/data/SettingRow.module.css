@@ -6,6 +6,11 @@
   border-bottom: 1px solid var(--aidex-color-border);
 }
 
+/* A lone row (e.g. one setting in a Card) has no neighbour to rule off; its container closes it. */
+.row:only-child {
+  border-bottom: 0;
+}
+
 /* The control column never drops below 160px, so short controls do not squeeze long text. */
 .layout {
   display: grid;

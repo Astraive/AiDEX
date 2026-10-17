@@ -9,7 +9,10 @@
   align-items: center;
   align-self: flex-start;
   gap: var(--aidex-space-2);
-  padding: var(--aidex-space-1) var(--aidex-space-2) var(--aidex-space-1) 0;
+  /* On the control scale at every density (28px comfortable), like a sm Button: the height comes from
+     the token, not from padding plus line height. */
+  min-height: var(--aidex-control-sm);
+  padding: 0 var(--aidex-space-2) 0 0;
   border: 0;
   border-radius: var(--aidex-radius-sm);
   background: transparent;

@@ -91,6 +91,14 @@
   white-space: nowrap;
 }
 
+.group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--aidex-space-2);
+  min-width: 0;
+  white-space: nowrap;
+}
+
 .separator {
   flex: none;
 }

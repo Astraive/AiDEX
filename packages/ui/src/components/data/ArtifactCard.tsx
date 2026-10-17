@@ -1,4 +1,4 @@
-import { Fragment, useId, type ComponentPropsWithRef, type ReactNode } from "react";
+import { useId, type ComponentPropsWithRef, type ReactNode } from "react";
 import { FileCodeIcon, FileIcon } from "../../icons/development";
 import { ClipboardCheckIcon, DatabaseIcon, GlobeIcon } from "../../icons/system";
 import { FileTextIcon, LayersIcon } from "../../icons/objects";
@@ -121,16 +121,21 @@ export function ArtifactCard({
           <Badge tone="neutral" size="sm">
             {kindLabel ?? KIND_LABEL[known]}
           </Badge>
-          {facts.map((fact, index) => (
-            <Fragment key={index}>
-              {index > 0 ? (
+          {facts.map((fact, index) =>
+            index > 0 ? (
+              // A separator wraps with the fact it introduces, so no line ends in an orphan "·".
+              <span key={index} className={styles.group}>
                 <span className={styles.separator} aria-hidden="true">
                   ·
                 </span>
-              ) : null}
-              <span className={styles.fact}>{fact}</span>
-            </Fragment>
-          ))}
+                <span className={styles.fact}>{fact}</span>
+              </span>
+            ) : (
+              <span key={index} className={styles.fact}>
+                {fact}
+              </span>
+            ),
+          )}
         </div>
       </div>
       {actions ? <div className={styles.actions}>{actions}</div> : null}
