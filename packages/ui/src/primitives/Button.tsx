@@ -17,6 +17,12 @@ export type ButtonProps = ComponentPropsWithRef<"button"> & {
   /** Trailing content such as a keyboard hint or arrow. */
   trailing?: ReactNode;
   fullWidth?: boolean;
+  /**
+   * While `disabled`, keep the button focusable: it is marked `aria-disabled` and ignores presses
+   * instead. Pass it while an action the button started runs, so focus stays on the button rather
+   * than dropping to the page when it turns disabled.
+   */
+  focusableWhenDisabled?: boolean;
 };
 
 export function Button({
@@ -27,11 +33,16 @@ export function Button({
   icon,
   trailing,
   fullWidth = false,
+  focusableWhenDisabled = false,
   type = "button",
+  disabled,
+  onClick,
   className,
   children,
   ...props
 }: ButtonProps) {
+  // A soft-disabled button ignores presses (preventDefault also stops a submit button's submit).
+  const softDisabled = !!disabled && focusableWhenDisabled;
   return (
     <button
       type={type}
@@ -46,6 +57,9 @@ export function Button({
         className,
       )}
       {...props}
+      disabled={softDisabled ? undefined : disabled}
+      aria-disabled={softDisabled ? true : props["aria-disabled"]}
+      onClick={softDisabled ? (event) => event.preventDefault() : onClick}
     >
       {icon ? <span className={styles.icon}>{icon}</span> : null}
       <span className={styles.label}>{children}</span>
