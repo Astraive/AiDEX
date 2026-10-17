@@ -50,6 +50,7 @@ import { LOCAL_PROVIDER_ID } from "../model-manager/catalog/providerAccounts";
 import { LocalInferenceNotice } from "../model-manager/LocalInferenceNotice";
 import { ApprovalRequestCard } from "../approvals/ApprovalRequestCard";
 import { approvalDecision } from "../approvals/approvalDecision";
+import { useDecisionFocus } from "../approvals/useDecisionFocus";
 import { HistoryMessages } from "../sessions/HistoryMessages";
 import { ArtifactsDialog } from "./artifacts/ArtifactsDialog";
 import { useArtifactDownload } from "./artifacts/useArtifactDownload";
@@ -171,6 +172,15 @@ export function ConversationPage({
   const headingRef = useRef<HTMLHeadingElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
+  // Until this conversation's messages first arrive (see the scroll effect).
+  const arrivalFocus = useRef(true);
+  const stopRef = useRef<HTMLButtonElement>(null);
+  /** Focuses the composer, or Stop while a run holds it, without scrolling. */
+  const focusComposer = () => {
+    const field = textareaRef.current;
+    const target = field && !field.disabled ? field : stopRef.current;
+    target?.focus({ preventScroll: true });
+  };
   const [arrivalPrompt] = useState(() => preferences.pendingPrompt);
   const [arrivalAttachments] = useState(
     () => (preferences.pendingAttachments?.length ?? 0) > 0,
@@ -331,6 +341,17 @@ export function ConversationPage({
     const container = endRef.current?.closest("main");
     if (container && following.current)
       container.scrollTop = container.scrollHeight;
+    // Opening a conversation focuses its title (MainLayout); its messages arrive a moment later
+    // and scroll to the latest one, leaving the focused title out of view. Focus then moves, without
+    // scrolling, to the composer (which also asks for it on mount, as in t3code), or to Stop while
+    // a run holds the composer.
+    if (!arrivalFocus.current || !container || !session.data) return;
+    arrivalFocus.current = false;
+    const heading = headingRef.current;
+    if (!heading || document.activeElement !== heading) return;
+    const top = container.getBoundingClientRect().top;
+    if (heading.getBoundingClientRect().bottom > top) return;
+    focusComposer();
   }, [session.data?.messages.length, lastMessage?.content]);
   useEffect(() => {
     preferences.setPendingPrompt(null);
@@ -889,6 +910,11 @@ export function ConversationPage({
   };
   const pendingApprovals =
     session.data?.approvals.filter((a) => a.status === "pending") ?? [];
+  // After a decision, focus moves to the next request's first action, else to the composer.
+  const decisionFocus = useDecisionFocus(
+    pendingApprovals.map((approval) => approval.id),
+    focusComposer,
+  );
   const runtimeModes = runtimeDriver?.modes ?? ["agent"];
   // The conversation's own model cannot run as an agent (it has no native tool calling).
   const agentUnavailable =
@@ -1076,6 +1102,7 @@ export function ConversationPage({
       toolbarEnd={
         running ? (
           <IconButton
+            ref={stopRef}
             size="sm"
             label="Stop generation"
             icon={<StopIcon />}
@@ -1216,14 +1243,18 @@ export function ConversationPage({
               key={approval.id}
               approval={approval}
               busy={busy}
-              onDecide={(approved) =>
+              onDecide={(approved) => {
+                decisionFocus.begin(approval.id);
                 void act(() =>
                   call(
                     "approval.respond",
                     approvalDecision(approval, approved, crypto.randomUUID()),
-                  ),
-                )
-              }
+                  ).catch((caught: unknown) => {
+                    decisionFocus.cancel();
+                    throw caught;
+                  }),
+                );
+              }}
             />
           ))}
           <div ref={endRef} />

@@ -329,6 +329,7 @@ export function UpdatesPanel() {
                 size="md"
                 icon={<ShieldCheckIcon />}
                 disabled={!idle || status.loading}
+                focusableWhenDisabled
                 onClick={status.refetch}
               >
                 {status.loading ? "Verifying…" : "Verify again"}
@@ -384,7 +385,13 @@ export function UpdatesPanel() {
               }
             />
             <Stack direction="row" justify="end">
-              <Button variant="outline" size="md" disabled={!idle || !source.trim() || !data || pending} onClick={check}>
+              <Button
+                variant="outline"
+                size="md"
+                disabled={!idle || !source.trim() || !data || pending}
+                focusableWhenDisabled={!idle}
+                onClick={check}
+              >
                 Check package
               </Button>
             </Stack>
@@ -507,11 +514,16 @@ export function UpdatesPanel() {
               Cancel
             </Button>
             {review === "apply" ? (
-              <Button variant="primary" disabled={!idle || !!applyRefusal} onClick={apply}>
+              <Button variant="primary" disabled={!idle || !!applyRefusal} focusableWhenDisabled={!idle} onClick={apply}>
                 {idle ? "Apply package" : "Applying…"}
               </Button>
             ) : (
-              <Button variant="primary" disabled={!idle || !data?.previous || pending} onClick={rollback}>
+              <Button
+                variant="primary"
+                disabled={!idle || !data?.previous || pending}
+                focusableWhenDisabled={!idle}
+                onClick={rollback}
+              >
                 {idle ? "Roll back" : "Rolling back…"}
               </Button>
             )}

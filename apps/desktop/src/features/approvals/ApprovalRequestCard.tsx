@@ -56,13 +56,16 @@ export function ApprovalRequestCard({ approval, busy = false, onDecide, showOrig
           <Notice tone="warning">This request is too large to show completely. Deny it, or ask for a smaller action.</Notice>
         ) : null}
         {pending ? (
-          <Stack direction="row" gap={2} justify="end">
+          // While a decision is sent the buttons stay focusable, so the pressed one keeps focus;
+          // `useDecisionFocus` moves it on once the request is decided (it finds them by DECISION_ATTRIBUTE).
+          <Stack direction="row" gap={2} justify="end" data-approval-decision={approval.id}>
             <Button
               variant="outline"
               size="md"
               icon={<XIcon />}
               aria-label={labels.deny}
               disabled={busy}
+              focusableWhenDisabled={busy}
               onClick={() => onDecide(false)}
             >
               Deny
@@ -73,6 +76,7 @@ export function ApprovalRequestCard({ approval, busy = false, onDecide, showOrig
               icon={<CheckIcon />}
               aria-label={labels.approve}
               disabled={busy || !approvable(approval)}
+              focusableWhenDisabled={busy}
               onClick={() => onDecide(true)}
             >
               Approve once
