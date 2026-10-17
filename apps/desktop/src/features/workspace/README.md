@@ -6,7 +6,7 @@ Screens for finding, adding, and inspecting workspaces. Everything is composed f
 
 | Route | Page · Sidebar | What it shows |
 | --- | --- | --- |
-| `workspaces` | `WorkspacesPage` · `WorkspacesSidebar` | Searchable list of workspaces with an All · Pinned · On drive · This computer filter. The filter lives in `route.tab`, so the sidebar's "All workspaces" item can reset it. Rows open the workspace and make it the default for chats and agent runs. |
+| `workspaces` | `WorkspacesPage` · `WorkspacesSidebar` | Searchable list of workspaces with an All · Pinned · On drive · This computer filter. The filter lives in `route.tab`, so the sidebar's "All workspaces" item can reset it. Rows open the workspace and make it the default for chats and agent runs. Remove registration asks in a confirmation dialog (Cancel first; a failure shows inside it; project files are kept), then moves focus to the row that took its place, or to the page title once none is left (`useRemovalFocus`). |
 | `workspace-create` | `CreateWorkspacePage` · `CreateWorkspaceSidebar` | Add a local folder, a git clone, or a drive project, with inline validation. The current setup step (`source`, `details`, `start`) is mirrored into `route.tab` so the sidebar shows progress; its step items move focus to that part of the form. |
 | `workspace` (id = workspace id) | `WorkspaceOverviewPage` · `WorkspaceOverviewSidebar` | Workspace header (branch, location, languages) and the tabs from `pageTabs.workspace`, bound to `route.tab`. The sidebar switches workspace and tab and lists recent sessions. |
 

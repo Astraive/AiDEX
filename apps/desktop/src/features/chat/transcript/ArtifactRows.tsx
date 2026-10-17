@@ -1,20 +1,22 @@
 import { useEffect, useState } from "react";
 import { ArtifactCard, Notice, PlanCard, WorkLogRow } from "@aidex/ui/components";
 import { ClipboardCheckIcon, CopyIcon, DownloadIcon, FileTextIcon } from "@aidex/ui/icons";
-import { Button, IconButton, Text } from "@aidex/ui/primitives";
+import { Button, IconButton } from "@aidex/ui/primitives";
 import { toAidexError } from "@aidex/client/errors";
 import type { ArtifactMeta, ArtifactToolResult, PlanToolResult } from "@aidex/client/dto/artifacts";
 import { useToast } from "../../../app/providers/toast";
 import { artifactFileName, downloadText, readArtifact } from "../artifacts/artifactContent";
+import { FailureDetail } from "./ToolRows";
 import { useTranscript } from "./TranscriptContext";
 import { jsonStringField, parseJson, toolOutcome, type ToolEntry } from "./transcriptModel";
 import { useFullContent } from "./useFullContent";
 
-/** A pending or failed producer call, before there is an artifact to show. */
+/**
+ * A pending or failed producer call, before there is an artifact to show. A failure's text is the
+ * row's detail, so a truncated one is read from history only once the row is expanded.
+ */
 function PendingRow({ entry, running, failed }: { entry: ToolEntry; running: string; failed: string }) {
-  const { scope } = useTranscript();
   const outcome = toolOutcome(entry);
-  const full = useFullContent(entry.result, scope, outcome.status === "failed");
   return (
     <WorkLogRow
       icon={entry.kind === "plan_propose" ? <ClipboardCheckIcon /> : <FileTextIcon />}
@@ -22,9 +24,7 @@ function PendingRow({ entry, running, failed }: { entry: ToolEntry; running: str
       status={outcome.status}
       statusText={outcome.statusText}
     >
-      {outcome.status === "failed" && entry.result ? (
-        <Text tone="muted">{full.content ?? full.error ?? "Loading…"}</Text>
-      ) : undefined}
+      {outcome.status === "failed" && entry.result ? <FailureDetail entry={entry} /> : undefined}
     </WorkLogRow>
   );
 }

@@ -8,7 +8,7 @@ Providers, local models, and model details, plus the Models sidebar and the shar
 | --- | --- |
 | `ModelCenterPage.tsx` | Route `models`. Underline tabs bound to the route tab: `providers` (default, "Providers") and `local` ("Local models"). |
 | `ProvidersPanel.tsx` | Thin composition of the Providers tab: header with "Add provider" and the "Refresh provider status" button ("Checked …"), the two panes, the add wizard, and the vault footnote. |
-| `LocalModelsPanel.tsx` | GGUF import, the verified llama.cpp runtime, start and stop, and `ModelInventory` for local models. |
+| `LocalModelsPanel.tsx` | GGUF import, the verified llama.cpp runtime, start and stop, and `ModelInventory` for local models. Remove asks in a confirmation dialog (Cancel first; a failure shows inside it; the original import is kept), then moves focus to the row that took its place, or to the import field once no model is left (`useRemovalFocus`). |
 | `ModelInventory.tsx` | Listed models with brand icon, context, capabilities, and capability source; "Use model" makes one the default for new chats. |
 | `ModelDetailsPage.tsx` | Route `model` (`id` = `provider/model`). Provider, limits, tools, capability source, favorite, and "Use this model" (`model.use` plus `preferences.setModelId`). |
 | `ModelsSidebar.tsx` | Favorites, then chat models grouped by provider with brand icons, then Manage links (Providers, Local models). |
