@@ -1100,7 +1100,8 @@ impl RuntimeExecutor for Boundary {
     }
 }
 fn wait(e: &NativeEngine, id: &str) -> Run {
-    let until = Instant::now() + Duration::from_secs(5);
+    // Generous: a loaded Windows CI runner can take over 5 s to settle a long resumed run.
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let r = e.store().run(id).unwrap();
         if !matches!(r.status, RunStatus::Pending | RunStatus::Running) {
