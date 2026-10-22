@@ -24,11 +24,12 @@ export type InstallJob = {
   error: string | null;
 };
 
-/** `inspect_drive`: the volume, whether it can be initialized, and any existing AiDEX state. */
+/** `inspect_drive` / `inspect_normal_target`: target volume, eligibility, and existing AiDEX state. */
 export type DriveInspection = {
+  /** Target path: a removable drive root in portable mode or a per-user directory in standard mode. */
   root: string;
   volume: VolumeInfo;
-  /** Portable media that is not the system volume. */
+  /** Whether this target can be initialized using its selected installation mode. */
   eligible: boolean;
   /** Why it cannot be initialized, when `eligible` is false. */
   ineligible_reason: string | null;

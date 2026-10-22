@@ -10,6 +10,8 @@ pub fn run() {
             commands::list_drives,
             commands::inspect_drive,
             commands::init_drive,
+            commands::inspect_normal_target,
+            commands::init_normal_target,
             commands::host_profile,
         ])
         .run(tauri::generate_context!())

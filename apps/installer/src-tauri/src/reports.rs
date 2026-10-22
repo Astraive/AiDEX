@@ -85,6 +85,74 @@ pub fn inspect(root: &Path) -> Result<DriveInspection, SetupError> {
         health_error,
     })
 }
+/// Inspect the standard per-user AiDEX target under the platform's local-data directory.
+/// The target may not exist yet; inspection only reads its containing volume and manifest.
+pub fn inspect_normal(base: &Path) -> Result<DriveInspection, SetupError> {
+    let base_reason = match std::fs::metadata(base) {
+        Ok(metadata) if metadata.is_dir() => None,
+        Ok(_) => Some("The per-user local-data location exists but is not a directory.".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(SetupError::internal(format!(
+                "cannot inspect per-user data directory {}: {error}",
+                base.display()
+            )));
+        }
+    };
+    let root = normal_root(base)?;
+    let volume_path = existing_directory_ancestor(base)?;
+    let mut volume = volume_for(volume_path)?;
+    let metadata = match std::fs::symlink_metadata(&root) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(SetupError::internal(format!(
+                "cannot inspect normal install target {}: {error}",
+                root.display()
+            )));
+        }
+    };
+    let target_reason = base_reason.or_else(|| {
+        metadata.as_ref().and_then(|metadata| {
+            if metadata.file_type().is_symlink() {
+                Some("The normal install target is a symbolic link.".to_owned())
+            } else if !metadata.is_dir() {
+                Some("The normal install target exists but is not a directory.".to_owned())
+            } else {
+                None
+            }
+        })
+    });
+    let ineligible_reason = normal_ineligible_reason(volume.removable, target_reason);
+    let target_is_directory = metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let has_manifest = target_is_directory && root.join("aidex-drive.json").is_file();
+    let (health, health_error) = if has_manifest {
+        match status_with(
+            &root,
+            StatusOptions {
+                require_removable: false,
+            },
+        ) {
+            Ok(status) => (Some(DriveHealth::from(&status)), None),
+            Err(error) => (None, Some(SetupError::from(error))),
+        }
+    } else {
+        (None, None)
+    };
+    volume.has_aidex_manifest = has_manifest;
+    volume.schema_version = health.as_ref().and_then(|health| health.schema_version);
+    Ok(DriveInspection {
+        root: display_path(&root),
+        eligible: ineligible_reason.is_none(),
+        ineligible_reason,
+        volume,
+        health,
+        health_error,
+    })
+}
+
 
 /// Why AiDEX will not initialize `root` on `volume`, or `None` when it will.
 pub fn ineligible_reason(root: &Path, volume: &VolumeInfo) -> Option<String> {
@@ -154,6 +222,74 @@ pub fn initialize_with(root: &Path, options: InitOptions) -> Result<InitReport, 
         directories,
     })
 }
+/// Initialize the per-user target after checking its location and refusing links/files.
+pub fn initialize_normal(base: &Path) -> Result<InitReport, SetupError> {
+    let inspection = inspect_normal(base)?;
+    if let Some(reason) = inspection.ineligible_reason {
+        return Err(SetupError::new(
+            ServiceErrorCode::InvalidArgument,
+            "not_eligible",
+            reason,
+        ));
+    }
+    std::fs::create_dir_all(base).map_err(|error| {
+        SetupError::internal(format!(
+            "cannot create per-user AiDEX directory {}: {error}",
+            base.display()
+        ))
+    })?;
+    let base = std::fs::canonicalize(base).map_err(|error| {
+        SetupError::internal(format!(
+            "cannot resolve per-user data directory {}: {error}",
+            base.display()
+        ))
+    })?;
+    let root = base.join("AiDEX");
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(SetupError::new(
+                ServiceErrorCode::InvalidArgument,
+                "not_eligible",
+                "The normal install target must be an ordinary directory, not a link or file.",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&root).map_err(|error| {
+                SetupError::internal(format!(
+                    "cannot create normal install target {}: {error}",
+                    root.display()
+                ))
+            })?;
+        }
+        Err(error) => {
+            return Err(SetupError::internal(format!(
+                "cannot inspect normal install target {}: {error}",
+                root.display()
+            )));
+        }
+    }
+    let canonical_root = std::fs::canonicalize(&root).map_err(|error| {
+        SetupError::internal(format!(
+            "cannot resolve normal install target {}: {error}",
+            root.display()
+        ))
+    })?;
+    if canonical_root.parent() != Some(base.as_path()) {
+        return Err(SetupError::new(
+            ServiceErrorCode::InvalidArgument,
+            "not_eligible",
+            "The normal install target must remain inside the per-user data directory.",
+        ));
+    }
+    initialize_with(
+        &canonical_root,
+        InitOptions {
+            require_removable: false,
+        },
+    )
+}
+
 
 /// A path for display: Windows verbatim disk prefixes (`\\?\H:\`) are removed.
 pub fn display_path(path: &Path) -> String {
@@ -174,6 +310,58 @@ fn same_path(left: &Path, right: &Path) -> bool {
         })
     };
     normalize(left) == normalize(right)
+}
+fn normal_root(base: &Path) -> Result<PathBuf, SetupError> {
+    let base = match std::fs::canonicalize(base) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => base.to_path_buf(),
+        Err(error) => {
+            return Err(SetupError::internal(format!(
+                "cannot resolve per-user data directory {}: {error}",
+                base.display()
+            )));
+        }
+    };
+    Ok(base.join("AiDEX"))
+}
+
+fn normal_ineligible_reason(removable: RemovableStatus, target_reason: Option<String>) -> Option<String> {
+    match removable {
+        RemovableStatus::Removable | RemovableStatus::UsbFixed => {
+            Some("The normal install location must be on this computer, not removable media.".into())
+        }
+        RemovableStatus::Fixed | RemovableStatus::Unknown => target_reason,
+    }
+}
+
+fn existing_directory_ancestor(path: &Path) -> Result<PathBuf, SetupError> {
+    let mut candidate = path;
+    loop {
+        match std::fs::metadata(candidate) {
+            Ok(metadata) if metadata.is_dir() => {
+                return std::fs::canonicalize(candidate).map_err(|error| {
+                    SetupError::internal(format!(
+                        "cannot resolve install volume for {}: {error}",
+                        path.display()
+                    ))
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(SetupError::internal(format!(
+                    "cannot inspect install volume for {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+        candidate = candidate.parent().ok_or_else(|| {
+            SetupError::internal(format!(
+                "cannot find an existing parent for install target {}",
+                path.display()
+            ))
+        })?;
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +445,78 @@ mod tests {
         let again = initialize_with(folder.path(), options).unwrap();
         assert_eq!(again.previous_schema_version, Some(CURRENT_SCHEMA_VERSION));
         assert_eq!(again.directories, report.directories);
+    }
+    #[test]
+    fn normal_target_inspection_is_read_only_and_initialization_preserves_user_files() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("AiDEX");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("notes.txt"), "keep this file").unwrap();
+
+        let inspection = inspect_normal(base.path()).unwrap();
+        assert!(inspection.eligible, "{:?}", inspection.ineligible_reason);
+        assert_eq!(inspection.root, display_path(&root));
+        assert_eq!(inspection.health, None);
+        assert_eq!(fs::read_to_string(root.join("notes.txt")).unwrap(), "keep this file");
+
+        let report = initialize_normal(base.path()).unwrap();
+        assert_eq!(report.previous_schema_version, None);
+        assert_eq!(report.health.schema_version, Some(CURRENT_SCHEMA_VERSION));
+        assert_eq!(fs::read_to_string(root.join("notes.txt")).unwrap(), "keep this file");
+        assert!(root.join("aidex-drive.json").is_file());
+    }
+
+    #[test]
+    fn normal_target_rejects_a_file_without_overwriting_it() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("AiDEX");
+        fs::write(&root, "unrelated user file").unwrap();
+
+        let inspection = inspect_normal(base.path()).unwrap();
+        assert!(!inspection.eligible);
+        assert!(
+            inspection
+                .ineligible_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not a directory"))
+        );
+        let error = initialize_normal(base.path()).unwrap_err();
+        assert_eq!(error.code, "invalid_argument");
+        assert_eq!(fs::read_to_string(root).unwrap(), "unrelated user file");
+    }
+    #[test]
+    fn normal_target_rejects_a_file_as_local_data_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("local-data");
+        fs::write(&base, "unrelated user file").unwrap();
+
+        let inspection = inspect_normal(&base).unwrap();
+        assert!(!inspection.eligible);
+        assert!(
+            inspection
+                .ineligible_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("local-data location"))
+        );
+        let error = initialize_normal(&base).unwrap_err();
+        assert_eq!(error.code, "invalid_argument");
+        assert_eq!(fs::read_to_string(base).unwrap(), "unrelated user file");
+    }
+
+
+    #[test]
+    fn normal_target_rejects_removable_volumes() {
+        for removable in [RemovableStatus::Removable, RemovableStatus::UsbFixed] {
+            assert!(
+                normal_ineligible_reason(removable, None)
+                    .unwrap()
+                    .contains("removable media")
+            );
+        }
+        assert_eq!(
+            normal_ineligible_reason(RemovableStatus::Fixed, None),
+            None
+        );
     }
 
     #[test]

@@ -17,3 +17,13 @@ export function inspectDrive(root: string): Promise<DriveInspection> {
 export function initDrive(root: string): Promise<InitReport> {
   return command<InitReport>("init_drive", { root });
 }
+
+/** `inspect_normal_target`: inspect the standard per-user AiDEX target without writing. */
+export function inspectNormalTarget(): Promise<DriveInspection> {
+  return command<DriveInspection>("inspect_normal_target");
+}
+
+/** `init_normal_target`: create the AiDEX layout under the current user's local data directory. */
+export function initNormalTarget(): Promise<InitReport> {
+  return command<InitReport>("init_normal_target");
+}

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ToastRegion } from "@aidex/ui/components";
-import { ArrowLeftIcon, ArrowRightIcon, ExternalLinkIcon } from "@aidex/ui/icons";
+import { ArrowLeftIcon, ArrowRightIcon } from "@aidex/ui/icons";
 import { SetupFooter, SetupWindow, StepTrack } from "@aidex/ui/installer";
 import { Badge, Button, Stack } from "@aidex/ui/primitives";
 import { isEligibleVolume } from "@aidex/client/dto/drive";
@@ -11,6 +11,7 @@ import { LAST_STEP, steps } from "./lib/steps";
 import { useDrives } from "./lib/useDrives";
 import { useInstallRun } from "./lib/useInstallRun";
 import { useToasts } from "./lib/useToasts";
+import { useNormalTarget } from "./lib/useNormalTarget";
 import { AgentsStep } from "./steps/agent-selection/AgentsStep";
 import { ConfigurationStep } from "./steps/configuration/ConfigurationStep";
 import { DriveStep } from "./steps/drive-selection/DriveStep";
@@ -24,8 +25,8 @@ const NOTE_ID = "setup-footer-note";
 const SECURITY_STEP = steps.findIndex((step) => step.id === "security");
 
 /**
- * AiDEX Setup. State lives here. Drives come from `list_drives`; the Install step initializes the
- * chosen removable drive with `init_drive` (AiDEX folders and manifest only; never formats or deletes).
+ * AiDEX Setup prepares a per-user or removable target with AiDEX folders and a manifest. The app
+ * bundle and selected components remain unavailable until packaged.
  */
 export default function App() {
   const [state, setState] = useState<SetupState>(initialSetup);
@@ -39,7 +40,16 @@ export default function App() {
   const { toasts, notify, dismiss } = useToasts();
   const run = useInstallRun();
   const drives = useDrives();
-  const volume = drives.volumes.find((candidate) => candidate.root === state.driveRoot) ?? null;
+  const normalTarget = useNormalTarget();
+  const portableVolume = drives.volumes.find((candidate) => candidate.root === state.driveRoot) ?? null;
+  const normalInspection = normalTarget.inspection;
+  const volume = state.installMode === "normal" ? normalInspection?.volume ?? null : portableVolume;
+  const targetRoot = state.installMode === "normal" ? normalInspection?.root ?? null : state.driveRoot;
+  const targetState = { ...state, driveRoot: targetRoot };
+  const targetReady =
+    state.installMode === "normal"
+      ? normalInspection?.eligible === true
+      : portableVolume !== null && isEligibleVolume(portableVolume);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const customPathRef = useRef<HTMLInputElement>(null);
@@ -75,8 +85,12 @@ export default function App() {
   };
 
   const stepIsValid = (): boolean => {
-    if (steps[stepIndex].id === "drive" && !(volume && isEligibleVolume(volume))) {
-      notify("Choose a removable drive or portable SSD to continue.", "danger");
+    if (steps[stepIndex].id === "drive" && !targetReady) {
+      const reason =
+        state.installMode === "normal"
+          ? normalInspection?.ineligible_reason ?? normalTarget.error?.message ?? "The per-user install target is not ready."
+          : "Choose a removable drive or portable SSD to continue.";
+      notify(reason, "danger");
       return false;
     }
     if (steps[stepIndex].id === "models" && state.models.includes("custom") && !state.customModelPath.trim()) {
@@ -107,9 +121,9 @@ export default function App() {
     goTo(0);
   };
 
-  const stepProps = { state, update, notify, titleRef, volume };
+  const stepProps = { state: targetState, update, notify, titleRef, volume };
   const vaultReady = state.vault === "none" || passwordAccepted;
-  const canInstall = volume !== null && isEligibleVolume(volume) && fitsOnDrive(state, volume) && vaultReady;
+  const canInstall = targetReady && volume !== null && fitsOnDrive(targetState, volume) && vaultReady;
 
   const track = steps.map((step, index) => ({
     id: step.id,
@@ -122,8 +136,8 @@ export default function App() {
     <>
       <SetupWindow
         title="AiDEX Setup"
-        subtitle="Portable environment installer"
-        badge={<Badge tone="neutral">Initializes the drive · components arrive later</Badge>}
+        subtitle="Standard or portable setup"
+        badge={<Badge tone="neutral">Prepares the target · app bundle unavailable</Badge>}
         contentRef={contentRef}
         steps={
           <StepTrack label="Installation steps" steps={track} onSelect={(id) => goTo(steps.findIndex((step) => step.id === id))} />
@@ -142,7 +156,7 @@ export default function App() {
   function renderStepBody() {
     switch (steps[stepIndex].id) {
       case "drive":
-        return <DriveStep {...stepProps} drives={drives} />;
+        return <DriveStep {...stepProps} drives={drives} normalTarget={normalTarget} />;
       case "setup":
         return <ConfigurationStep {...stepProps} />;
       case "models":
@@ -181,7 +195,7 @@ export default function App() {
       case "install":
         return (
           <InstallStep
-            state={state}
+            state={targetState}
             titleRef={titleRef}
             volume={volume}
             phase={run.phase}
@@ -216,7 +230,7 @@ export default function App() {
     if (run.phase === "running") {
       // Initialization is short and safe to retry, but stopping midway is not offered.
       return (
-        <SetupFooter noteId={NOTE_ID} note={`Setting up ${volume?.root ?? "the drive"}…`}>
+        <SetupFooter noteId={NOTE_ID} note={`Setting up ${targetState.driveRoot ?? "the installation target"}…`}>
           {null}
         </SetupFooter>
       );
@@ -227,7 +241,7 @@ export default function App() {
           <Button variant="outline" icon={<ArrowLeftIcon />} onClick={restart}>
             Start over
           </Button>
-          <Button variant="primary" onClick={() => void run.start(state)}>
+          <Button variant="primary" onClick={() => void run.start(targetState)}>
             Try again
           </Button>
         </SetupFooter>
@@ -235,29 +249,24 @@ export default function App() {
     }
     if (run.phase === "finished") {
       return (
-        <SetupFooter noteId={NOTE_ID} note={`AiDEX drive ready at ${run.report?.root ?? volume?.root ?? "the drive"}.`}>
+        <SetupFooter noteId={NOTE_ID} note={`AiDEX target ready at ${run.report?.root ?? targetState.driveRoot ?? "the target"}.`}>
           <Button variant="outline" onClick={restart}>
             New installation
-          </Button>
-          <Button
-            variant="primary"
-            trailing={<ExternalLinkIcon />}
-            onClick={() =>
-              notify("The AiDEX app is not on the drive yet; it is copied there once the portable bundle (issue #26) is available.")
-            }
-          >
-            Launch AiDEX
           </Button>
         </SetupFooter>
       );
     }
-    const blocked = !volume
-      ? "Choose a drive on the Drive step first."
-      : !fitsOnDrive(state, volume)
-      ? "Not enough free space on the selected drive."
-      : !vaultReady
-        ? "Set the vault password on the Security step first."
-        : `Step ${steps.length} of ${steps.length} · Review`;
+    const blocked = !targetReady
+      ? state.installMode === "normal"
+        ? "Check the standard per-user installation target."
+        : "Choose a removable drive on the Drive step first."
+      : !volume
+        ? "The target volume could not be inspected."
+        : !fitsOnDrive(targetState, volume)
+          ? "Not enough free space on the selected target."
+          : !vaultReady
+            ? "Set the vault password on the Security step first."
+            : `Step ${steps.length} of ${steps.length} · Review`;
     return (
       <SetupFooter noteId={NOTE_ID} note={blocked}>
         {back}
@@ -266,9 +275,9 @@ export default function App() {
           trailing={<ArrowRightIcon />}
           disabled={!canInstall}
           aria-describedby={canInstall ? undefined : NOTE_ID}
-          onClick={() => void run.start(state)}
+          onClick={() => void run.start(targetState)}
         >
-          Set up drive
+          Prepare install target
         </Button>
       </SetupFooter>
     );

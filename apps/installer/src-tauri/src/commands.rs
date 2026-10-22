@@ -8,10 +8,18 @@ use crate::{
 use aidex_drive::VolumeInfo;
 use aidex_host::HostProfile;
 use std::path::PathBuf;
+use tauri::{AppHandle, Manager};
 
 /// Every command; tests check `build.rs`, `app.rs`, and the capability file against it.
 #[cfg(test)]
-pub const COMMANDS: &[&str] = &["list_drives", "inspect_drive", "init_drive", "host_profile"];
+pub const COMMANDS: &[&str] = &[
+    "list_drives",
+    "inspect_drive",
+    "init_drive",
+    "inspect_normal_target",
+    "init_normal_target",
+    "host_profile",
+];
 
 async fn blocking<T: Send + 'static>(
     job: impl FnOnce() -> Result<T, SetupError> + Send + 'static,
@@ -37,6 +45,32 @@ pub async fn inspect_drive(root: String) -> Result<DriveInspection, SetupError> 
 #[tauri::command]
 pub async fn init_drive(root: String) -> Result<InitReport, SetupError> {
     blocking(move || reports::initialize(&PathBuf::from(root))).await
+}
+
+/// Inspect the standard per-user install target. Read only.
+#[tauri::command]
+pub async fn inspect_normal_target(app: AppHandle) -> Result<DriveInspection, SetupError> {
+    blocking(move || {
+        let base = app
+            .path()
+            .local_data_dir()
+            .map_err(|error| SetupError::internal(format!("cannot resolve local data directory: {error}")))?;
+        reports::inspect_normal(&base)
+    })
+    .await
+}
+
+/// Create the AiDEX layout in the standard per-user target without elevation or destructive writes.
+#[tauri::command]
+pub async fn init_normal_target(app: AppHandle) -> Result<InitReport, SetupError> {
+    blocking(move || {
+        let base = app
+            .path()
+            .local_data_dir()
+            .map_err(|error| SetupError::internal(format!("cannot resolve local data directory: {error}")))?;
+        reports::initialize_normal(&base)
+    })
+    .await
 }
 
 /// Read-only host facts (`aidex-host`).
