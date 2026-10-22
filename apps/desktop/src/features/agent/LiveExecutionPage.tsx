@@ -130,6 +130,43 @@ export function LiveExecutionPage() {
             Start an agent task
           </Button>
         )}
+        {session.data?.task_graphs.map((graph) => (
+          <Card key={graph.id} padding="md">
+            <Stack gap={3}>
+              <Text>
+                Task graph · {graph.status} · {graph.steps_used}/{graph.max_steps} steps · max parallel {graph.max_parallel}
+              </Text>
+              <Text tone="muted">Graph {graph.id} · root run {graph.root_run_id}</Text>
+              {graph.nodes.map((node) => (
+                <Card key={node.id} padding="md">
+                  <Stack gap={2}>
+                    <Text>
+                      {node.role} · {node.status} · {node.steps_used}/{node.step_budget} steps
+                    </Text>
+                    <Text tone="muted">Node {node.id}{node.run_id ? ` · run ${node.run_id}` : ""}</Text>
+                    <Text tone="muted">
+                      Dependencies: {node.depends_on.length ? node.depends_on.join(", ") : "none"}
+                    </Text>
+                    <Text tone="muted">
+                      Input artifacts: {node.input_artifacts.length ? node.input_artifacts.join(", ") : "none"}
+                    </Text>
+                    <Text tone="muted">
+                      Output artifacts: {node.output_artifacts.length ? node.output_artifacts.join(", ") : "none"}
+                    </Text>
+                    {node.error && <Notice tone="danger">{node.error}</Notice>}
+                    {node.verification ? (
+                      <Notice tone={node.verification.passed ? "success" : "danger"}>
+                        Verification {node.verification.passed ? "passed" : "failed"}: {node.verification.summary}
+                      </Notice>
+                    ) : node.role === "verifier" ? (
+                      <Notice tone="warning">Verification required; no verification result is recorded.</Notice>
+                    ) : null}
+                  </Stack>
+                </Card>
+              ))}
+            </Stack>
+          </Card>
+        ))}
         {runs.map((run) => {
           const liveText = isActive(run)
             ? runTexts.find((entry) => entry.runId === run.id)
