@@ -51,10 +51,9 @@ pub async fn init_drive(root: String) -> Result<InitReport, SetupError> {
 #[tauri::command]
 pub async fn inspect_normal_target(app: AppHandle) -> Result<DriveInspection, SetupError> {
     blocking(move || {
-        let base = app
-            .path()
-            .local_data_dir()
-            .map_err(|error| SetupError::internal(format!("cannot resolve local data directory: {error}")))?;
+        let base = app.path().local_data_dir().map_err(|error| {
+            SetupError::internal(format!("cannot resolve local data directory: {error}"))
+        })?;
         reports::inspect_normal(&base)
     })
     .await
@@ -64,10 +63,9 @@ pub async fn inspect_normal_target(app: AppHandle) -> Result<DriveInspection, Se
 #[tauri::command]
 pub async fn init_normal_target(app: AppHandle) -> Result<InitReport, SetupError> {
     blocking(move || {
-        let base = app
-            .path()
-            .local_data_dir()
-            .map_err(|error| SetupError::internal(format!("cannot resolve local data directory: {error}")))?;
+        let base = app.path().local_data_dir().map_err(|error| {
+            SetupError::internal(format!("cannot resolve local data directory: {error}"))
+        })?;
         reports::initialize_normal(&base)
     })
     .await

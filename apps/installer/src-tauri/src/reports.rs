@@ -153,7 +153,6 @@ pub fn inspect_normal(base: &Path) -> Result<DriveInspection, SetupError> {
     })
 }
 
-
 /// Why AiDEX will not initialize `root` on `volume`, or `None` when it will.
 pub fn ineligible_reason(root: &Path, volume: &VolumeInfo) -> Option<String> {
     if volume.system {
@@ -290,7 +289,6 @@ pub fn initialize_normal(base: &Path) -> Result<InitReport, SetupError> {
     )
 }
 
-
 /// A path for display: Windows verbatim disk prefixes (`\\?\H:\`) are removed.
 pub fn display_path(path: &Path) -> String {
     let text = path.to_string_lossy();
@@ -325,11 +323,14 @@ fn normal_root(base: &Path) -> Result<PathBuf, SetupError> {
     Ok(base.join("AiDEX"))
 }
 
-fn normal_ineligible_reason(removable: RemovableStatus, target_reason: Option<String>) -> Option<String> {
+fn normal_ineligible_reason(
+    removable: RemovableStatus,
+    target_reason: Option<String>,
+) -> Option<String> {
     match removable {
-        RemovableStatus::Removable | RemovableStatus::UsbFixed => {
-            Some("The normal install location must be on this computer, not removable media.".into())
-        }
+        RemovableStatus::Removable | RemovableStatus::UsbFixed => Some(
+            "The normal install location must be on this computer, not removable media.".into(),
+        ),
         RemovableStatus::Fixed | RemovableStatus::Unknown => target_reason,
     }
 }
@@ -455,14 +456,23 @@ mod tests {
 
         let inspection = inspect_normal(base.path()).unwrap();
         assert!(inspection.eligible, "{:?}", inspection.ineligible_reason);
-        assert_eq!(inspection.root, display_path(&root));
+        assert_eq!(
+            inspection.root,
+            display_path(&fs::canonicalize(&root).unwrap())
+        );
         assert_eq!(inspection.health, None);
-        assert_eq!(fs::read_to_string(root.join("notes.txt")).unwrap(), "keep this file");
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "keep this file"
+        );
 
         let report = initialize_normal(base.path()).unwrap();
         assert_eq!(report.previous_schema_version, None);
         assert_eq!(report.health.schema_version, Some(CURRENT_SCHEMA_VERSION));
-        assert_eq!(fs::read_to_string(root.join("notes.txt")).unwrap(), "keep this file");
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "keep this file"
+        );
         assert!(root.join("aidex-drive.json").is_file());
     }
 
@@ -474,12 +484,10 @@ mod tests {
 
         let inspection = inspect_normal(base.path()).unwrap();
         assert!(!inspection.eligible);
-        assert!(
-            inspection
-                .ineligible_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("not a directory"))
-        );
+        assert!(inspection
+            .ineligible_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("not a directory")));
         let error = initialize_normal(base.path()).unwrap_err();
         assert_eq!(error.code, "invalid_argument");
         assert_eq!(fs::read_to_string(root).unwrap(), "unrelated user file");
@@ -492,31 +500,23 @@ mod tests {
 
         let inspection = inspect_normal(&base).unwrap();
         assert!(!inspection.eligible);
-        assert!(
-            inspection
-                .ineligible_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("local-data location"))
-        );
+        assert!(inspection
+            .ineligible_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("local-data location")));
         let error = initialize_normal(&base).unwrap_err();
         assert_eq!(error.code, "invalid_argument");
         assert_eq!(fs::read_to_string(base).unwrap(), "unrelated user file");
     }
 
-
     #[test]
     fn normal_target_rejects_removable_volumes() {
         for removable in [RemovableStatus::Removable, RemovableStatus::UsbFixed] {
-            assert!(
-                normal_ineligible_reason(removable, None)
-                    .unwrap()
-                    .contains("removable media")
-            );
+            assert!(normal_ineligible_reason(removable, None)
+                .unwrap()
+                .contains("removable media"));
         }
-        assert_eq!(
-            normal_ineligible_reason(RemovableStatus::Fixed, None),
-            None
-        );
+        assert_eq!(normal_ineligible_reason(RemovableStatus::Fixed, None), None);
     }
 
     #[test]
