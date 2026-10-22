@@ -143,6 +143,24 @@ impl NativeEngine {
         call: &aidex_providers::ToolCall,
         tool_cancel: &aidex_tools::CancelToken,
     ) -> Result<bool, String> {
+        if run.task_graph_id.is_some()
+            && (call.name == AGENT_SPAWN
+                || call.name == AGENT_RESULT
+                || call.name == AGENT_ORCHESTRATE)
+        {
+            self.append_result(
+                id,
+                &call.id,
+                serde_json::json!({
+                    "is_error": true,
+                    "code": "tool_unavailable",
+                    "message": "child and task graph tools are unavailable in graph tasks",
+                    "effect": "not_started"
+                })
+                .to_string(),
+            )?;
+            return Ok(false);
+        }
         if call.name == AGENT_SPAWN || call.name == AGENT_RESULT || call.name == AGENT_ORCHESTRATE {
             if s.configuration.mode != Mode::Agent {
                 return Err("tools are unavailable in chat and plan modes".into());
@@ -353,9 +371,11 @@ impl NativeEngine {
                         parameters: spec.parameters,
                     })
                     .collect();
-                request.tools.push(ToolSpec{name:AGENT_SPAWN.into(),description:"Start a bounded child sharing this workspace and permission mode. Its status never completes the parent.".into(),parameters:serde_json::json!({"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"],"additionalProperties":false})});
-                request.tools.push(ToolSpec{name:AGENT_RESULT.into(),description:"Read the persisted status and final result of an immediate child run belonging to this parent. Poll again in a later turn if it is still active.".into(),parameters:serde_json::json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"],"additionalProperties":false})});
-                request.tools.push(ToolSpec{name:AGENT_ORCHESTRATE.into(),description:"Persist and execute a bounded task DAG in this native Agent session. Requires exactly one verifier that depends transitively on every worker and reviewer. Task outputs are handed to dependents only as same-session artifacts.".into(),parameters:serde_json::json!({"type":"object","properties":{"max_parallel":{"type":"integer","minimum":1,"maximum":4},"max_steps":{"type":"integer","minimum":1,"maximum":128},"nodes":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":128},"role":{"type":"string","enum":["worker","reviewer","verifier"]},"prompt":{"type":"string","maxLength":16384},"depends_on":{"type":"array","items":{"type":"string","maxLength":128}},"input_artifacts":{"type":"array","items":{"type":"string","maxLength":128}},"step_budget":{"type":"integer","minimum":1}},"required":["id","role","prompt","step_budget"],"additionalProperties":false}}},"required":["max_parallel","max_steps","nodes"],"additionalProperties":false})});
+                if run.task_graph_id.is_none() {
+                    request.tools.push(ToolSpec{name:AGENT_SPAWN.into(),description:"Start a bounded child sharing this workspace and permission mode. Its status never completes the parent.".into(),parameters:serde_json::json!({"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"],"additionalProperties":false})});
+                    request.tools.push(ToolSpec{name:AGENT_RESULT.into(),description:"Read the persisted status and final result of an immediate child run belonging to this parent. Poll again in a later turn if it is still active.".into(),parameters:serde_json::json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"],"additionalProperties":false})});
+                    request.tools.push(ToolSpec{name:AGENT_ORCHESTRATE.into(),description:"Persist and execute a bounded task DAG in this native Agent session. Requires exactly one verifier that depends transitively on every worker and reviewer. Task outputs are handed to dependents only as same-session artifacts.".into(),parameters:serde_json::json!({"type":"object","properties":{"max_parallel":{"type":"integer","minimum":1,"maximum":4},"max_steps":{"type":"integer","minimum":1,"maximum":128},"nodes":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":128},"role":{"type":"string","enum":["worker","reviewer","verifier"]},"prompt":{"type":"string","maxLength":16384},"depends_on":{"type":"array","items":{"type":"string","maxLength":128}},"input_artifacts":{"type":"array","items":{"type":"string","maxLength":128}},"step_budget":{"type":"integer","minimum":1}},"required":["id","role","prompt","step_budget"],"additionalProperties":false}}},"required":["max_parallel","max_steps","nodes"],"additionalProperties":false})});
+                }
             }
             request.tools.extend(offer.specs());
             if request.tools.is_empty() {

@@ -696,6 +696,7 @@ impl NativeEngine {
             self.cancel_task_graphs(id)?;
         }
         if status == RunStatus::Failed && r.status.active() {
+            self.fail_task_graphs(id)?;
             self.cancel_children(&r.session_id, id)?;
         }
         let (result, changed, expired, finished) = self.store.update(&r.session_id, |s| {
@@ -761,8 +762,9 @@ impl NativeEngine {
         if !result.status.active() {
             self.forget_offer(id);
             if status == RunStatus::Failed {
-                // A child begun while the parent was failing; an error here
-                // leaves it to reconciliation.
+                // A graph or child begun while the root was failing; an error
+                // here leaves it to reconciliation.
+                let _ = self.fail_task_graphs(id);
                 let _ = self.cancel_children(&r.session_id, id);
             }
             self.drop_paused(id);

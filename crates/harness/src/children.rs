@@ -770,6 +770,57 @@ impl NativeEngine {
         Ok(())
     }
 
+    pub(crate) fn fail_task_graphs(&self, parent: &str) -> Result<(), String> {
+        let session = self.store.get(&self.store.run(parent)?.session_id)?;
+        let active = session
+            .task_graphs
+            .iter()
+            .filter(|graph| {
+                graph.root_run_id == parent
+                    && !matches!(
+                        graph.status,
+                        TaskGraphStatus::Completed
+                            | TaskGraphStatus::Failed
+                            | TaskGraphStatus::Cancelled
+                    )
+            })
+            .flat_map(|graph| {
+                graph
+                    .nodes
+                    .iter()
+                    .filter(|node| node.status == TaskNodeStatus::Running)
+                    .filter_map(|node| node.run_id.clone())
+            })
+            .collect::<Vec<_>>();
+        self.store.update(&session.id, |session| {
+            for graph in session.task_graphs.iter_mut().filter(|graph| {
+                graph.root_run_id == parent
+                    && !matches!(
+                        graph.status,
+                        TaskGraphStatus::Completed
+                            | TaskGraphStatus::Failed
+                            | TaskGraphStatus::Cancelled
+                    )
+            }) {
+                graph.status = TaskGraphStatus::Failed;
+                for node in &mut graph.nodes {
+                    if matches!(
+                        node.status,
+                        TaskNodeStatus::Pending | TaskNodeStatus::Running
+                    ) {
+                        node.status = TaskNodeStatus::Failed;
+                        node.error = Some("root run failed".into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        for run in active {
+            let _ = self.cancel(&run);
+        }
+        Ok(())
+    }
+
     pub(crate) fn cancel_task_graphs(&self, parent: &str) -> Result<(), String> {
         let session = self.store.get(&self.store.run(parent)?.session_id)?;
         self.store.update(&session.id, |session| {

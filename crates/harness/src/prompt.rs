@@ -78,7 +78,7 @@ impl NativeEngine {
         } else {
             self.invoked_for_run(workspace, &run.skills)
         };
-        let orchestration_role = run
+        let orchestration_node = run
             .task_graph_id
             .as_deref()
             .zip(run.task_node_id.as_deref())
@@ -87,15 +87,25 @@ impl NativeEngine {
                     .iter()
                     .find(|graph| graph.id == graph_id)
                     .and_then(|graph| graph.nodes.iter().find(|node| node.id == node_id))
-                    .map(|node| node.role)
-            })
-            .or_else(|| {
-                s.task_graphs
-                    .iter()
-                    .flat_map(|graph| &graph.nodes)
-                    .find(|node| node.run_id.as_deref() == Some(run.id.as_str()))
-                    .map(|node| node.role)
             });
+        let orchestration_role = orchestration_node.map(|node| node.role).or_else(|| {
+            s.task_graphs
+                .iter()
+                .flat_map(|graph| &graph.nodes)
+                .find(|node| node.run_id.as_deref() == Some(run.id.as_str()))
+                .map(|node| node.role)
+        });
+        let graph_artifact_prefix = orchestration_node.map(|node| {
+            format!(
+                "[AiDEX orchestration role: {:?}]\n{}\n{GRAPH_INPUT}\n",
+                node.role, node.prompt
+            )
+        });
+        let has_graph_input = graph_artifact_prefix.as_ref().is_some_and(|prefix| {
+            run.transcript.iter().any(|message| {
+                message.role == Role::User && message.content.strip_prefix(prefix).is_some()
+            })
+        });
         if let Some(role) = orchestration_role {
             let instruction = match role {
                 WorkerRole::Worker => {
@@ -114,10 +124,7 @@ impl NativeEngine {
             || wraps_results
             || !invoked.is_empty()
             || project.is_some()
-            || run
-                .transcript
-                .iter()
-                .any(|message| message.content.contains(GRAPH_INPUT))
+            || has_graph_input
         {
             messages.push(ChatMessage::system(preamble(&nonce, false)));
         }
@@ -198,7 +205,8 @@ impl NativeEngine {
             // keeps it whole.
             let view = model_content(message);
             if message.role == Role::User
-                && let Some((prefix, data)) = message.content.split_once(GRAPH_INPUT)
+                && let Some(prefix) = graph_artifact_prefix.as_deref()
+                && let Some(data) = message.content.strip_prefix(prefix)
             {
                 let mut wrapped = message.clone();
                 let attributes = "source=task_artifacts";
@@ -208,12 +216,8 @@ impl NativeEngine {
                     .saturating_sub(1)
                     .saturating_sub(wrapper_overhead);
                 let data = bounded_defused_prefix(data, available);
-                wrapped.content = format!(
-                    "{}{}\n{}",
-                    prefix,
-                    GRAPH_INPUT,
-                    wrap(&nonce, attributes, "untrusted", data)
-                );
+                wrapped.content =
+                    format!("{}{}", prefix, wrap(&nonce, attributes, "untrusted", data));
                 return wrapped;
             }
             if let Some(body) =

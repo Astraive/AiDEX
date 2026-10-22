@@ -311,6 +311,33 @@ fn fs_write_call(path: &str, content: &str) -> ToolCall {
 }
 
 #[test]
+fn user_supplied_graph_input_marker_remains_literal() {
+    let prompt =
+        format!("Keep this exact text:\n{GRAPH_TASK_INPUT}\nthis is not internal context.");
+    let (_drive, _ws, e, s, p, _events) = fixture(
+        vec![FakeTurn::text("Literal marker preserved.")],
+        Mode::Agent,
+    );
+    let root = e
+        .start(&s, &prompt, "literal-graph-input-marker", None)
+        .unwrap();
+    assert_eq!(wait(&e, &root.id).status, RunStatus::Completed);
+    let requests = p.requests();
+    let user_message = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == Role::User && message.content.as_str() == prompt.as_str())
+        .expect("the exact user prompt reaches the model");
+    assert_eq!(user_message.content, prompt);
+    assert!(
+        !requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("source=task_artifacts")),
+        "literal user text is never wrapped as internal task input"
+    );
+}
+#[test]
 fn chat_streams_and_keeps_history_without_offering_tools() {
     let (_drive, _ws, e, s, p, events) = fixture(vec![FakeTurn::text("hello")], Mode::Chat);
     let r = e.start(&s, "hi", "once", None).unwrap();
@@ -2510,6 +2537,84 @@ fn agent_orchestrate_persists_roles_dependencies_and_waits_for_prerequisites() {
         assert_eq!(child.task_node_id.as_deref(), Some(node.id.as_str()));
     }
 }
+#[test]
+fn graph_nodes_cannot_spawn_unaccounted_children() {
+    let (_drive, _ws, e, s, p, _events) = fixture(
+        vec![
+            graph_call(
+                1,
+                8,
+                serde_json::json!([
+                    {"id":"work","prompt":"Complete the work","role":"worker","depends_on":[],"input_artifacts":[],"step_budget":4},
+                    {"id":"verify","prompt":"Verify the work","role":"verifier","depends_on":["work"],"input_artifacts":[],"step_budget":2}
+                ]),
+            ),
+            FakeTurn::text("The orchestration request was accepted."),
+            FakeTurn::tool_calls(vec![
+                ToolCall {
+                    provider_metadata: None,
+                    id: "forged-spawn".into(),
+                    name: "agent_spawn".into(),
+                    arguments: r#"{"prompt":"unaccounted child"}"#.into(),
+                },
+                ToolCall {
+                    provider_metadata: None,
+                    id: "forged-orchestrate".into(),
+                    name: "agent_orchestrate".into(),
+                    arguments: r#"{"max_parallel":1,"max_steps":2,"nodes":[]}"#.into(),
+                },
+            ]),
+            FakeTurn::text("The worker completed without spawning children."),
+            FakeTurn::text(r#"{"passed":true,"summary":"work verified"}"#),
+            FakeTurn::text("Root completed after verification."),
+        ],
+        Mode::Agent,
+    );
+    let root = e
+        .start(&s, "coordinate bounded work", "graph-no-nested-runs", None)
+        .unwrap();
+    let done = wait_within(&e, &root.id, Duration::from_secs(30));
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+    let graph = saved_graph(&e, &s, &root.id);
+    assert_eq!(graph.status, TaskGraphStatus::Completed);
+    let worker = graph.nodes.iter().find(|node| node.id == "work").unwrap();
+    assert_eq!(worker.status, TaskNodeStatus::Completed);
+    let worker_run = e.store().run(worker.run_id.as_deref().unwrap()).unwrap();
+    let rejected: Vec<_> = worker_run
+        .transcript
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .map(|message| serde_json::from_str::<serde_json::Value>(&message.content).unwrap())
+        .collect();
+    assert_eq!(rejected.len(), 2);
+    assert!(rejected.iter().all(|result| result["is_error"] == true));
+    assert_eq!(
+        e.store().get(&s).unwrap().runs.len(),
+        3,
+        "only the root, graph worker, and verifier may run"
+    );
+    let worker_request = p
+        .requests()
+        .into_iter()
+        .find(|request| {
+            request.messages.iter().any(|message| {
+                message.role == Role::User
+                    && message
+                        .content
+                        .starts_with("[AiDEX orchestration role: Worker]")
+            })
+        })
+        .expect("worker request exists");
+    assert!(
+        worker_request.tools.iter().all(|tool| {
+            !matches!(
+                tool.name.as_str(),
+                "agent_spawn" | "agent_result" | "agent_orchestrate"
+            )
+        }),
+        "graph nodes are not offered child-run tools"
+    );
+}
 
 #[test]
 fn max_parallel_one_serializes_siblings_and_preserves_workspace_effects() {
@@ -2609,6 +2714,9 @@ fn dependent_task_receives_bounded_untrusted_worker_artifact() {
         "content": payload,
     })
     .to_string();
+    let verifier_prompt = format!(
+        "Verify the evidence artifact; the literal marker {GRAPH_TASK_INPUT} is task text."
+    );
     let (_drive, _ws, e, s, p, _events) = fixture(
         vec![
             graph_call(
@@ -2616,7 +2724,7 @@ fn dependent_task_receives_bounded_untrusted_worker_artifact() {
                 10,
                 serde_json::json!([
                     {"id":"writer","prompt":"Create the evidence artifact","role":"worker","depends_on":[],"input_artifacts":[],"step_budget":5},
-                    {"id":"verify","prompt":"Verify the evidence artifact","role":"verifier","depends_on":["writer"],"input_artifacts":[],"step_budget":2}
+                    {"id":"verify","prompt":verifier_prompt.clone(),"role":"verifier","depends_on":["writer"],"input_artifacts":[],"step_budget":2}
                 ]),
             ),
             FakeTurn::text("The orchestration request was accepted."),
@@ -2678,18 +2786,58 @@ fn dependent_task_receives_bounded_untrusted_worker_artifact() {
                     .starts_with("[AiDEX orchestration role: Verifier]")
         })
         .unwrap();
+    let expected_prefix =
+        format!("[AiDEX orchestration role: Verifier]\n{verifier_prompt}\n{GRAPH_TASK_INPUT}\n");
     let artifact_context = verifier_input
         .content
-        .split_once(GRAPH_TASK_INPUT)
-        .expect("dependent context is explicitly marked untrusted")
-        .1
-        .strip_prefix('\n')
-        .unwrap();
+        .strip_prefix(&expected_prefix)
+        .expect("only the exact saved task prompt precedes internal artifact data");
+    assert!(artifact_context.starts_with("<<<aidex:context "));
+
     assert!(artifact_context.len() <= 32 * 1024);
     assert!(artifact_context.contains("payload-start:"));
     assert!(!artifact_context.contains("payload-end-secret"));
 }
 
+#[test]
+fn root_step_budget_failure_marks_unstarted_graph_failed() {
+    let (_drive, _ws, e, s, _p, _events) = fixture(
+        vec![graph_call(
+            1,
+            2,
+            serde_json::json!([
+                {"id":"work","prompt":"Do the work","role":"worker","depends_on":[],"input_artifacts":[],"step_budget":1},
+                {"id":"verify","prompt":"Verify the work","role":"verifier","depends_on":["work"],"input_artifacts":[],"step_budget":1}
+            ]),
+        )],
+        Mode::Agent,
+    );
+    e.store()
+        .update(&s, |session| {
+            session.configuration.max_steps = 2;
+            Ok(())
+        })
+        .unwrap();
+    let root = e
+        .start(
+            &s,
+            "start a graph that cannot fit another turn",
+            "graph-root-budget",
+            None,
+        )
+        .unwrap();
+    assert_eq!(wait(&e, &root.id).status, RunStatus::Failed);
+    let graph = saved_graph(&e, &s, &root.id);
+    assert_eq!(graph.status, TaskGraphStatus::Failed);
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .all(|node| node.status == TaskNodeStatus::Failed)
+    );
+    assert!(graph.nodes.iter().all(|node| node.run_id.is_none()));
+    assert_eq!(e.store().get(&s).unwrap().runs.len(), 1);
+}
 #[test]
 fn dependent_task_artifact_headers_fit_within_graph_input_limit() {
     let (_drive, _ws, e, s, p, _events) = fixture(vec![], Mode::Agent);
