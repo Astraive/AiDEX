@@ -1644,10 +1644,12 @@ fn a_cancelled_parent_stops_waiting_for_its_children() {
     assert_eq!(wait(&e, &child.id).status, RunStatus::Cancelled);
     assert_eq!(p.requests().len(), 2);
 }
+// Isolated scripts keep concurrent parent/child runs from consuming each other's responses.
 struct ChildBeforeRootRetry {
     inner: Arc<FakeProvider>,
+    root: Arc<FakeProvider>,
+    child: Arc<FakeProvider>,
     root_calls: AtomicUsize,
-    root_first_completed: AtomicBool,
     child_completed: AtomicBool,
 }
 
@@ -1666,35 +1668,29 @@ impl ModelProvider for ChildBeforeRootRetry {
         on_event: &mut dyn FnMut(&StreamEvent),
         cancel: &aidex_core::CancelToken,
     ) -> Result<ChatResponse, ProviderError> {
-        let has_prompt = |prompt: &str| {
+        let has_user_message = |message_text: &str| {
             request
                 .messages
                 .iter()
-                .any(|message| message.role == Role::User && message.content == prompt)
+                .any(|message| message.role == Role::User && message.content.contains(message_text))
         };
-        let is_root = has_prompt("budget-root");
-        let is_child = has_prompt("budget-child");
 
-        let root_call = is_root.then(|| self.root_calls.fetch_add(1, Ordering::SeqCst));
-        if is_child {
-            while !self.root_first_completed.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(1));
+        if has_user_message("parent") {
+            if self.root_calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                while !self.child_completed.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
-        }
-        if root_call.is_some_and(|call| call > 0) {
-            while !self.child_completed.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(1));
+            self.root.chat(request, on_event, cancel)
+        } else if has_user_message("child") {
+            let result = self.child.chat(request, on_event, cancel);
+            if result.is_ok() {
+                self.child_completed.store(true, Ordering::SeqCst);
             }
+            result
+        } else {
+            self.inner.chat(request, on_event, cancel)
         }
-
-        let result = self.inner.chat(request, on_event, cancel);
-        if root_call == Some(0) {
-            self.root_first_completed.store(true, Ordering::SeqCst);
-        }
-        if is_child && result.is_ok() {
-            self.child_completed.store(true, Ordering::SeqCst);
-        }
-        result
     }
 
     fn health(&self) -> ProviderHealth {
@@ -1704,22 +1700,32 @@ impl ModelProvider for ChildBeforeRootRetry {
 
 #[test]
 fn a_retried_last_step_completes_without_another_turn_for_child_results() {
-    let (_d, _ws, e, s, p, events) = fixture_wrapped(
-        vec![
-            FakeTurn::error(ProviderError::unavailable("transient"))
-                .with_delay(Duration::from_millis(300)),
-            FakeTurn::text("child evidence"),
-            FakeTurn::text("root final"),
-        ],
+    let (_d, _ws, e, s, _p, events) = fixture_wrapped(
+        vec![],
         Mode::Agent,
         65536,
         None,
         CapabilitySource::Configured,
         |inner| {
+            let model = inner.models().unwrap().remove(0);
+            let provider = |script: Vec<FakeTurn>| {
+                Arc::new(
+                    FakeProvider::new(ProviderId::new("fixture").unwrap(), Locality::Local)
+                        .with_model(model.clone())
+                        .with_script(script.into_iter().collect()),
+                )
+            };
+            let root = provider(vec![
+                FakeTurn::error(ProviderError::unavailable("transient"))
+                    .with_delay(Duration::from_millis(300)),
+                FakeTurn::text("root final"),
+            ]);
+            let child = provider(vec![FakeTurn::text("child evidence")]);
             Arc::new(ChildBeforeRootRetry {
                 inner,
+                root,
+                child,
                 root_calls: AtomicUsize::new(0),
-                root_first_completed: AtomicBool::new(false),
                 child_completed: AtomicBool::new(false),
             })
         },
@@ -1731,9 +1737,6 @@ fn a_retried_last_step_completes_without_another_turn_for_child_results() {
         })
         .unwrap();
     let root = e.start(&s, "parent", "budget-root", None).unwrap();
-    while p.requests().is_empty() {
-        std::thread::sleep(Duration::from_millis(5));
-    }
     let child = e
         .start(&s, "child", "budget-child", Some(root.id.clone()))
         .unwrap();
@@ -1751,7 +1754,6 @@ fn a_retried_last_step_completes_without_another_turn_for_child_results() {
             .iter()
             .any(|m| m.content.starts_with(CHILD_RESULTS))
     );
-    assert_eq!(p.requests().len(), 3);
     assert_eq!(count(&events, "agent.retry"), 1);
 }
 
