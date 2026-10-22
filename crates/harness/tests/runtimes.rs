@@ -2201,8 +2201,17 @@ fn native_state_nothing_continues_is_forgotten() {
         .start(&s, "child", "child", Some(root.id.clone()))
         .unwrap();
     let child = wait_for(&e, &child.id, RunStatus::Completed);
-    assert_eq!(runtime.forgotten().len(), 2);
-    assert_eq!(runtime.forgotten()[1], child.runtime_ref.unwrap());
+    let until = Instant::now() + Duration::from_secs(30);
+    while runtime.forgotten().len() < 2 {
+        assert!(
+            Instant::now() < until,
+            "child runtime reference was not forgotten"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let forgotten = runtime.forgotten();
+    assert_eq!(forgotten.len(), 2);
+    assert_eq!(forgotten[1], child.runtime_ref.unwrap());
     e.cancel(&root.id).unwrap();
     // The conversation's own thread is kept.
     assert!(!runtime.forgotten().contains(&kept));

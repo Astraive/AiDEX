@@ -1647,6 +1647,7 @@ fn a_cancelled_parent_stops_waiting_for_its_children() {
 struct ChildBeforeRootRetry {
     inner: Arc<FakeProvider>,
     root_calls: AtomicUsize,
+    root_first_completed: AtomicBool,
     child_completed: AtomicBool,
 }
 
@@ -1674,13 +1675,22 @@ impl ModelProvider for ChildBeforeRootRetry {
         let is_root = has_prompt("budget-root");
         let is_child = has_prompt("budget-child");
 
-        if is_root && self.root_calls.fetch_add(1, Ordering::SeqCst) > 0 {
+        let root_call = is_root.then(|| self.root_calls.fetch_add(1, Ordering::SeqCst));
+        if is_child {
+            while !self.root_first_completed.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if root_call.is_some_and(|call| call > 0) {
             while !self.child_completed.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
 
         let result = self.inner.chat(request, on_event, cancel);
+        if root_call == Some(0) {
+            self.root_first_completed.store(true, Ordering::SeqCst);
+        }
         if is_child && result.is_ok() {
             self.child_completed.store(true, Ordering::SeqCst);
         }
@@ -1709,6 +1719,7 @@ fn a_retried_last_step_completes_without_another_turn_for_child_results() {
             Arc::new(ChildBeforeRootRetry {
                 inner,
                 root_calls: AtomicUsize::new(0),
+                root_first_completed: AtomicBool::new(false),
                 child_completed: AtomicBool::new(false),
             })
         },
