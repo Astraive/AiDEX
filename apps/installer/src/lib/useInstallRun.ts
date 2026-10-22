@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import type { DriveInspection, InitReport } from "@aidex/client/dto/installer";
 import { toAidexError, type AidexError } from "@aidex/client/errors";
-import { initDrive, inspectDrive } from "@aidex/client/installer";
+import { initDrive, initNormalTarget, inspectDrive, inspectNormalTarget } from "@aidex/client/installer";
 import type { SetupState } from "./setup";
 
 export type RunPhase = "review" | "running" | "finished" | "failed";
@@ -21,16 +21,16 @@ function laterTasks(state: SetupState): InstallTask[] {
   return [
     {
       id: "bundle",
-      title: "Copy the AiDEX app and runtime to the drive",
+      title: "Copy the AiDEX app and runtime to the target",
       status: "unavailable",
-      detail: "Available when the portable bundle is packaged (issue #26).",
+      detail: "Available when the verified desktop bundle is packaged (issue #55).",
     },
     state.vault === "password"
       ? {
           id: "vault",
           title: "Create the encrypted vault",
           status: "unavailable",
-          detail: "Created in AiDEX on this drive's first launch, where you set the password. Setup did not keep it.",
+          detail: "Created in AiDEX on first launch, where you set the password. Setup did not keep it.",
         }
       : { id: "vault", title: "Vault", status: "skipped", detail: "No-password mode chosen; no vault is created." },
     state.models.length
@@ -53,18 +53,17 @@ function laterTasks(state: SetupState): InstallTask[] {
 }
 
 const REAL_TASKS: readonly InstallTask[] = [
-  { id: "inspect", title: "Check the target drive", status: "pending" },
+  { id: "inspect", title: "Check the installation target", status: "pending" },
   { id: "init", title: "Create the AiDEX folders and drive manifest", status: "pending" },
-  { id: "verify", title: "Verify the drive", status: "pending" },
+  { id: "verify", title: "Verify the installation target", status: "pending" },
 ];
 
 /** Steps with a backend today; progress counts only these. */
 export const REAL_TASK_COUNT = REAL_TASKS.length;
 
-/**
- * Runs the real part of setup: inspect the drive, `init_drive` (creates only AiDEX folders and
- * `aidex-drive.json`; never formats or deletes), then inspect again to verify. Each step reports
- * its own outcome; later steps without a backend stay "unavailable".
+/** Runs the real part of setup: inspect the selected target, initialize only the AiDEX folders
+ * and manifest, then inspect again to verify. Application components without a packaged bundle
+ * stay unavailable.
  */
 export function useInstallRun() {
   const [phase, setPhase] = useState<RunPhase>("review");
@@ -99,23 +98,27 @@ export function useInstallRun() {
     let inspection: DriveInspection;
     mark("inspect", "active");
     try {
-      inspection = await inspectDrive(root);
+      inspection = state.installMode === "normal" ? await inspectNormalTarget() : await inspectDrive(root);
     } catch (caught) {
       return fail("inspect", caught);
     }
     if (!inspection.eligible) {
-      return fail("inspect", new Error(inspection.ineligible_reason ?? "This drive cannot be used."));
+      return fail("inspect", new Error(inspection.ineligible_reason ?? "This installation target cannot be used."));
     }
     mark(
       "inspect",
       "done",
-      inspection.health ? `Existing AiDEX drive, schema v${inspection.health.schema_version ?? "?"}` : "Removable and ready",
+      inspection.health
+        ? `Existing AiDEX target, schema v${inspection.health.schema_version ?? "?"}`
+        : state.installMode === "normal"
+          ? "Per-user location ready"
+          : "Removable drive ready",
     );
 
     let initialized: InitReport;
     mark("init", "active");
     try {
-      initialized = await initDrive(root);
+      initialized = state.installMode === "normal" ? await initNormalTarget() : await initDrive(root);
     } catch (caught) {
       return fail("init", caught);
     }
@@ -133,10 +136,11 @@ export function useInstallRun() {
 
     mark("verify", "active");
     try {
-      const verified = await inspectDrive(root);
+      const verified =
+        state.installMode === "normal" ? await inspectNormalTarget() : await inspectDrive(root);
       const health = verified.health;
       if (!health || health.migration_required || health.schema_version !== health.current_schema_version) {
-        return fail("verify", new Error(verified.health_error?.message ?? "The drive manifest did not verify."));
+        return fail("verify", new Error(verified.health_error?.message ?? "The installation target did not verify."));
       }
       mark("verify", "done", `Schema v${health.schema_version}${health.writable ? ", writable" : ", read-only"}`);
     } catch (caught) {

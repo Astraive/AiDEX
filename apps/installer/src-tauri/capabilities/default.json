@@ -1,11 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The AiDEX setup window: drive discovery, inspection, initialization, and host facts, nothing else.",
+  "description": "The AiDEX setup window: portable drive discovery and per-user target inspection/initialization, nothing else.",
   "windows": ["main"],
   "permissions": [
     "allow-list-drives",
     "allow-inspect-drive",
+    "allow-inspect-normal-target",
+    "allow-init-normal-target",
     "allow-init-drive",
     "allow-host-profile"
   ]

@@ -5,6 +5,8 @@ fn main() {
         "list_drives",
         "inspect_drive",
         "init_drive",
+        "inspect_normal_target",
+        "init_normal_target",
         "host_profile",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))

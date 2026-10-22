@@ -10,10 +10,12 @@ export type AgentId = "codex" | "claude" | "omp";
 export type ExtensionId = "skills" | "mcp" | "toolchains";
 export type Backend = "auto" | "cpu" | "gpu";
 export type VaultMode = "password" | "none";
+export type InstallMode = "normal" | "portable";
 
 export type SetupState = {
-  /** Root of the chosen volume (`H:\`), or `null` before one is chosen. */
+  /** Target root: per-user app directory in normal mode, removable volume root in portable mode. */
   driveRoot: string | null;
+  installMode: InstallMode;
   preset: Preset;
   models: readonly ModelId[];
   customModelPath: string;
@@ -60,6 +62,7 @@ export function applyPreset(state: SetupState, preset: Preset): SetupState {
 
 export const initialSetup: SetupState = {
   driveRoot: null,
+  installMode: "normal",
   preset: "developer",
   ...PRESET_SELECTIONS.developer,
   customModelPath: "",

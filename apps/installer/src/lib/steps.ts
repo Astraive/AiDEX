@@ -2,7 +2,7 @@ export type StepId = "drive" | "setup" | "models" | "agents" | "security" | "ins
 
 /** The six setup steps in order; `kicker` names each step's subject above its title. */
 export const steps = [
-  { id: "drive", title: "Drive", kicker: "Target device" },
+  { id: "drive", title: "Target", kicker: "Installation mode" },
   { id: "setup", title: "Setup", kicker: "Configuration" },
   { id: "models", title: "Models", kicker: "Inference" },
   { id: "agents", title: "Agents", kicker: "Toolchains" },

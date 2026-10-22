@@ -36,8 +36,8 @@ function summary(state: SetupState, volume: VolumeInfo | null, passwordAccepted:
   const vault =
     state.vault === "none" ? "No password (unencrypted)" : passwordAccepted ? "Password-protected (set on first launch)" : "Password not set yet";
   return [
-    { label: "Drive", value: volume ? `${volume.label ?? "Untitled drive"} (${volume.root})` : "None chosen" },
-    { label: "Install location", value: volume ? `${volume.root} (drive root)` : "None" },
+    { label: "Install type", value: state.installMode === "normal" ? "Standard · per-user" : "Portable · removable drive" },
+    { label: "Install location", value: state.driveRoot ?? "None chosen" },
     { label: "Free space", value: formatBytes(volume?.free_bytes) },
     { label: "Installation", value: PRESET_LABEL[state.preset] },
     { label: "Models", value: state.models.map((model) => MODEL_LABEL[model]).join(", ") || "None (cloud-ready)" },
@@ -54,7 +54,7 @@ function steps(tasks: readonly InstallTask[]): Step[] {
   }));
 }
 
-/** Step 6: review, then initialize the drive for real. Components without a backend are listed as not available, never simulated. */
+/** Step 6: review, then prepare the selected target. Unavailable components are never simulated. */
 export function InstallStep({ state, titleRef, volume, phase, tasks, completed, report, error, passwordAccepted }: Props) {
   const [showDetails, setShowDetails] = useState(false);
   const percent = Math.round((completed / REAL_TASK_COUNT) * 100);
@@ -64,8 +64,8 @@ export function InstallStep({ state, titleRef, volume, phase, tasks, completed, 
       <>
         <PageHeader
           eyebrow={stepKicker(5)}
-          title="Ready to set up the drive"
-          description="Confirm your configuration before preparing the portable drive."
+          title="Ready to prepare AiDEX"
+          description={`Confirm the ${state.installMode === "normal" ? "standard per-user target" : "portable drive"} before setup.`}
           titleRef={titleRef}
         />
         <Stack gap={3}>
@@ -73,12 +73,12 @@ export function InstallStep({ state, titleRef, volume, phase, tasks, completed, 
           <KeyValueList items={summary(state, volume, passwordAccepted)} />
         </Stack>
         <Notice>
-          Setting up creates the AiDEX folders and the aidex-drive.json manifest at {volume?.root ?? "the drive root"}. Nothing is formatted
-          or deleted. The AiDEX app bundle, vault, models, and agents are not part of this build yet and are listed as such.
+          Setup creates AiDEX folders and an aidex-drive.json manifest at {state.driveRoot ?? "the selected target"}. Nothing is formatted
+          or deleted. The app bundle, vault, models, and agents are not part of this build yet and are listed as such.
         </Notice>
         {volume && !fitsOnDrive(state, volume) ? (
           <Notice tone="danger" role="alert">
-            Not enough free space on {volume.root}. Choose another drive or a smaller installation.
+            Not enough free space at {state.driveRoot}. Choose another target or a smaller installation.
           </Notice>
         ) : null}
       </>
@@ -103,12 +103,12 @@ export function InstallStep({ state, titleRef, volume, phase, tasks, completed, 
     const active = tasks.find((task) => task.status === "active");
     return (
       <>
-        <PageHeader eyebrow="Setting up" title="Preparing your AiDEX drive" description={volume?.root} titleRef={titleRef} />
+        <PageHeader eyebrow="Setting up" title="Preparing AiDEX target" description={state.driveRoot ?? undefined} titleRef={titleRef} />
         <Stack gap={4}>
           <Heading level={2} size="title">
             {percent}%
           </Heading>
-          <ProgressBar label="Drive setup progress" value={completed} max={REAL_TASK_COUNT} />
+          <ProgressBar label="Target setup progress" value={completed} max={REAL_TASK_COUNT} />
           <Text>{active?.title ?? "Working…"}</Text>
         </Stack>
         <StepList steps={steps(tasks)} />
@@ -123,7 +123,7 @@ export function InstallStep({ state, titleRef, volume, phase, tasks, completed, 
   if (phase === "failed") {
     return (
       <>
-        <PageHeader eyebrow="Setup stopped" title="The drive was not set up" description={volume?.root} titleRef={titleRef} />
+        <PageHeader eyebrow="Setup stopped" title="The target was not set up" description={state.driveRoot ?? undefined} titleRef={titleRef} />
         <Notice tone="danger" role="alert" variant="banner">
           {error?.message ?? "Setup stopped."} Nothing else was changed after this step.
         </Notice>
@@ -136,19 +136,18 @@ export function InstallStep({ state, titleRef, volume, phase, tasks, completed, 
   return (
     <>
       <PageHeader
-        eyebrow="Drive ready"
-        title="AiDEX drive initialized"
+        eyebrow="Target ready"
+        title="AiDEX target initialized"
         description={report ? `${report.root} now holds the AiDEX layout (schema v${report.health.schema_version}).` : undefined}
         titleRef={titleRef}
       />
       <Notice tone="success" variant="banner">
-        {report?.root} is an AiDEX drive with {report?.directories.length ?? 0} folders and a verified manifest
+        {report?.root} is an AiDEX target with {report?.directories.length ?? 0} folders and a verified manifest
         {report?.health.writable ? "" : " (read-only)"}.
       </Notice>
       {pendingComponents.length ? (
         <Notice tone="warning">
-          Not installed yet: {pendingComponents.map((task) => task.title.toLowerCase()).join("; ")}. These arrive as their components
-          ship; the drive is ready for them.
+          Not installed yet: {pendingComponents.map((task) => task.title.toLowerCase()).join("; ")}. This build prepares the target only.
         </Notice>
       ) : null}
       <StepList steps={steps(tasks)} />
