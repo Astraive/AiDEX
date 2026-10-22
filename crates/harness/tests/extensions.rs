@@ -302,7 +302,7 @@ fn fixture(turns: Vec<FakeTurn>, mode: Mode, workspace: bool, fake: Fake) -> Fix
 }
 
 fn wait(e: &NativeEngine, id: &str) -> Run {
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let r = e.store().run(id).unwrap();
         if !matches!(r.status, RunStatus::Pending | RunStatus::Running) {

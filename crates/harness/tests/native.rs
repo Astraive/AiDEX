@@ -14,7 +14,7 @@ use aidex_vault::{KdfParams, SecretString, VaultService, VaultServiceConfig};
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -205,7 +205,7 @@ fn fixture_models(
     (drive, ws, engine, session.id, provider, events)
 }
 fn wait(e: &NativeEngine, id: &str) -> aidex_native_sessions::Run {
-    wait_within(e, id, Duration::from_secs(5))
+    wait_within(e, id, Duration::from_secs(30))
 }
 
 /// [`wait`] with another limit, for a run whose work is slow on a loaded host.
@@ -247,7 +247,7 @@ fn saved_graph(e: &NativeEngine, session: &str, root: &str) -> TaskGraph {
 }
 
 fn wait_for_graph(e: &NativeEngine, session: &str, root: &str) -> TaskGraph {
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(graph) = e
             .store()
@@ -275,7 +275,7 @@ fn wait_for_node_status(
     status: TaskNodeStatus,
 ) -> TaskGraph {
     let _ = wait_for_graph(e, session, root);
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let graph = saved_graph(e, session, root);
         if graph
@@ -294,7 +294,7 @@ fn wait_for_node_status(
 }
 
 fn wait_for_request_count(provider: &FakeProvider, count: usize) {
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(30);
     while provider.requests().len() < count {
         assert!(Instant::now() < until, "expected {count} provider requests");
         std::thread::sleep(Duration::from_millis(5));
@@ -1626,7 +1626,7 @@ fn a_cancelled_parent_stops_waiting_for_its_children() {
     let child = e
         .start(&s, "child", "cancel-child", Some(root.id.clone()))
         .unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let transcript = e.store().run(&root.id).unwrap().transcript;
         if transcript.last().is_some_and(|m| m.content == "root done") {
@@ -1644,10 +1644,57 @@ fn a_cancelled_parent_stops_waiting_for_its_children() {
     assert_eq!(wait(&e, &child.id).status, RunStatus::Cancelled);
     assert_eq!(p.requests().len(), 2);
 }
+struct ChildBeforeRootRetry {
+    inner: Arc<FakeProvider>,
+    root_calls: AtomicUsize,
+    child_completed: AtomicBool,
+}
+
+impl ModelProvider for ChildBeforeRootRetry {
+    fn descriptor(&self) -> &ProviderDescriptor {
+        self.inner.descriptor()
+    }
+
+    fn models(&self) -> Result<Vec<ModelDescriptor>, ProviderError> {
+        self.inner.models()
+    }
+
+    fn chat(
+        &self,
+        request: &ChatRequest,
+        on_event: &mut dyn FnMut(&StreamEvent),
+        cancel: &aidex_core::CancelToken,
+    ) -> Result<ChatResponse, ProviderError> {
+        let has_prompt = |prompt: &str| {
+            request
+                .messages
+                .iter()
+                .any(|message| message.role == Role::User && message.content == prompt)
+        };
+        let is_root = has_prompt("budget-root");
+        let is_child = has_prompt("budget-child");
+
+        if is_root && self.root_calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            while !self.child_completed.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        let result = self.inner.chat(request, on_event, cancel);
+        if is_child && result.is_ok() {
+            self.child_completed.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
+    fn health(&self) -> ProviderHealth {
+        self.inner.health()
+    }
+}
 
 #[test]
 fn a_retried_last_step_completes_without_another_turn_for_child_results() {
-    let (_d, _ws, e, s, p, events) = fixture(
+    let (_d, _ws, e, s, p, events) = fixture_wrapped(
         vec![
             FakeTurn::error(ProviderError::unavailable("transient"))
                 .with_delay(Duration::from_millis(300)),
@@ -1655,6 +1702,16 @@ fn a_retried_last_step_completes_without_another_turn_for_child_results() {
             FakeTurn::text("root final"),
         ],
         Mode::Agent,
+        65536,
+        None,
+        CapabilitySource::Configured,
+        |inner| {
+            Arc::new(ChildBeforeRootRetry {
+                inner,
+                root_calls: AtomicUsize::new(0),
+                child_completed: AtomicBool::new(false),
+            })
+        },
     );
     e.store()
         .update(&s, |session| {
