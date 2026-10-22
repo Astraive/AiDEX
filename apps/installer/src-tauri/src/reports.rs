@@ -102,14 +102,18 @@ pub fn inspect_normal(base: &Path) -> Result<DriveInspection, SetupError> {
     let root = normal_root(base)?;
     let volume_path = existing_directory_ancestor(base)?;
     let mut volume = volume_for(volume_path)?;
-    let metadata = match std::fs::symlink_metadata(&root) {
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(SetupError::internal(format!(
-                "cannot inspect normal install target {}: {error}",
-                root.display()
-            )));
+    let metadata = if base_reason.is_some() {
+        None
+    } else {
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(SetupError::internal(format!(
+                    "cannot inspect normal install target {}: {error}",
+                    root.display()
+                )));
+            }
         }
     };
     let target_reason = base_reason.or_else(|| {
