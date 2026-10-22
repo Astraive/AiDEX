@@ -159,6 +159,47 @@ export type Checkpoint = {
   after_digest: string;
   content_omitted: boolean;
 };
+export type TaskGraphStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "cancelled";
+export type TaskNodeStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "cancelled";
+export type WorkerRole = "worker" | "reviewer" | "verifier";
+export type TaskVerification = { passed: boolean; summary: string };
+export type TaskNode = {
+  id: string;
+  role: WorkerRole;
+  prompt: string;
+  depends_on: string[];
+  run_id: string | null;
+  status: TaskNodeStatus;
+  input_artifacts: string[];
+  output_artifacts: string[];
+  step_budget: number;
+  steps_used: number;
+  verification: TaskVerification | null;
+  error: string | null;
+};
+export type TaskGraph = {
+  id: string;
+  root_run_id: string;
+  status: TaskGraphStatus;
+  max_parallel: number;
+  max_steps: number;
+  steps_used: number;
+  nodes: TaskNode[];
+};
+
+/** Snapshot of the persisted bounded orchestration state. */
 export type SessionDetail = SessionConfig & {
   id: string;
   pinned: boolean;
@@ -169,6 +210,9 @@ export type SessionDetail = SessionConfig & {
   messages_truncated: boolean;
   next_message_offset: number | null;
   runs: Run[];
+  task_graphs: TaskGraph[];
+  total_task_graphs: number;
+  task_graphs_truncated: boolean;
   total_runs: number;
   runs_truncated: boolean;
   approvals: Approval[];

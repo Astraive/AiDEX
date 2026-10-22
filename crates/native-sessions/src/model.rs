@@ -146,6 +146,11 @@ pub struct Run {
     /// ignores this field and drops it when it saves the session again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_outputs: Vec<ToolOutputRecord>,
+    /// Task graph and node that created this run, when it is a graph child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_graph_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_node_id: Option<String>,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -167,10 +172,15 @@ pub struct RunOptions {
     /// Staged attachment ids to send with the user message, in order (root
     /// runs only). They join the command fingerprint only when present.
     pub attachments: Vec<String>,
+    /// Graph/node identity for an internally scheduled child run.
+    pub task: Option<TaskRunRef>,
 }
 impl RunOptions {
     pub fn is_empty(&self) -> bool {
-        self.skills.is_empty() && !self.web_search && self.attachments.is_empty()
+        self.skills.is_empty()
+            && !self.web_search
+            && self.attachments.is_empty()
+            && self.task.is_none()
     }
 }
 /// Where a forked conversation came from: its first `message_count` messages
@@ -235,6 +245,211 @@ pub struct RunSummary {
     pub session_id: String,
     pub status: RunStatus,
 }
+/// Identity assigned to a run created for one task graph node.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskRunRef {
+    pub graph_id: String,
+    pub node_id: String,
+}
+/// A persisted bounded orchestration graph.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TaskGraph {
+    pub id: String,
+    pub root_run_id: String,
+    pub status: TaskGraphStatus,
+    pub max_parallel: u32,
+    pub max_steps: u32,
+    #[serde(default)]
+    pub steps_used: u32,
+    #[serde(default)]
+    pub nodes: Vec<TaskNode>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskGraphStatus {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TaskNode {
+    pub id: String,
+    pub prompt: String,
+    pub role: WorkerRole,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    pub status: TaskNodeStatus,
+    #[serde(default)]
+    pub input_artifacts: Vec<String>,
+    #[serde(default)]
+    pub output_artifacts: Vec<String>,
+    pub step_budget: u32,
+    #[serde(default)]
+    pub steps_used: u32,
+    #[serde(default)]
+    pub verification: Option<TaskVerification>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskNodeStatus {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerRole {
+    Worker,
+    Reviewer,
+    Verifier,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TaskVerification {
+    pub passed: bool,
+    pub summary: String,
+}
+
+impl TaskGraph {
+    /// Validate persisted graph structure and runtime bounds before mutation.
+    pub fn validate(&self) -> Result<(), String> {
+        const ID_MAX: usize = 128;
+        const TEXT_MAX: usize = 4096;
+        let valid_id = |s: &str| !s.is_empty() && s.len() <= ID_MAX;
+        if !valid_id(&self.id) || !valid_id(&self.root_run_id) {
+            return Err("invalid task graph identifier".into());
+        }
+        if !(1..=4).contains(&self.max_parallel)
+            || !(1..=128).contains(&self.max_steps)
+            || self.steps_used > self.max_steps
+        {
+            return Err("invalid task graph limits".into());
+        }
+        if self.nodes.len() > 128 {
+            return Err("too many task graph nodes".into());
+        }
+        let mut indexes = std::collections::BTreeMap::new();
+        for (i, node) in self.nodes.iter().enumerate() {
+            if !valid_id(&node.id)
+                || indexes.insert(node.id.as_str(), i).is_some()
+                || node.step_budget == 0
+                || node.step_budget > self.max_steps
+                || node.steps_used > node.step_budget
+            {
+                return Err("invalid or duplicate task node".into());
+            }
+            if node.run_id.as_deref().is_some_and(|id| !valid_id(id))
+                || node.depends_on.len() > 128
+                || node.input_artifacts.len() > 128
+                || node.output_artifacts.len() > 128
+                || node.prompt.len() > 16 * 1024
+                || node.error.as_deref().is_some_and(|s| s.len() > TEXT_MAX)
+                || node
+                    .verification
+                    .as_ref()
+                    .is_some_and(|v| v.summary.len() > TEXT_MAX)
+            {
+                return Err("invalid task node fields".into());
+            }
+            for artifact in node.input_artifacts.iter().chain(&node.output_artifacts) {
+                if !valid_id(artifact) {
+                    return Err("invalid artifact identifier".into());
+                }
+            }
+            if node
+                .depends_on
+                .iter()
+                .any(|dependency| !valid_id(dependency))
+            {
+                return Err("invalid dependency identifier".into());
+            }
+        }
+        let mut marks = vec![0u8; self.nodes.len()];
+        fn visit(
+            i: usize,
+            nodes: &[TaskNode],
+            indexes: &std::collections::BTreeMap<&str, usize>,
+            marks: &mut [u8],
+        ) -> Result<(), String> {
+            if marks[i] == 1 {
+                return Err("cyclic task graph dependency".into());
+            }
+            if marks[i] == 2 {
+                return Ok(());
+            }
+            marks[i] = 1;
+            for dep in &nodes[i].depends_on {
+                let j = *indexes
+                    .get(dep.as_str())
+                    .ok_or("unknown task graph dependency")?;
+                visit(j, nodes, indexes, marks)?;
+            }
+            marks[i] = 2;
+            Ok(())
+        }
+        for i in 0..self.nodes.len() {
+            visit(i, &self.nodes, &indexes, &mut marks)?;
+        }
+        if self.status == TaskGraphStatus::Completed {
+            let has_verifier = self
+                .nodes
+                .iter()
+                .any(|node| node.role == WorkerRole::Verifier);
+            let all_nodes_completed = self
+                .nodes
+                .iter()
+                .all(|node| node.status == TaskNodeStatus::Completed);
+            let has_passed_verifier = self.nodes.iter().any(|node| {
+                node.role == WorkerRole::Verifier
+                    && node
+                        .verification
+                        .as_ref()
+                        .is_some_and(|verification| verification.passed)
+            });
+            if !has_verifier {
+                return Err("completed task graph requires a verifier".into());
+            }
+            if !all_nodes_completed {
+                return Err("completed task graph requires all nodes completed".into());
+            }
+            if !has_passed_verifier {
+                return Err("completed task graph requires a passed verifier".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SessionDetail {
+    pub fn validate_task_graph(&self, graph: &TaskGraph) -> Result<(), String> {
+        graph.validate()?;
+        if self
+            .task_graphs
+            .iter()
+            .any(|existing| existing.id == graph.id)
+        {
+            return Err("duplicate task graph identifier".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionDetail {
     pub id: String,
@@ -253,6 +468,8 @@ pub struct SessionDetail {
     /// Set on a conversation created by [`fork`](crate::SessionStore::fork).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ForkOrigin>,
+    #[serde(default)]
+    pub task_graphs: Vec<TaskGraph>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionSummary {

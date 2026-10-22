@@ -1,5 +1,7 @@
 use aidex_native_sessions::{
-    NATIVE_RECORD_KEY_SECRET, Run, RunStatus, SessionConfig, SessionStore,
+    NATIVE_RECORD_KEY_SECRET, Run, RunOptions, RunStatus, SessionConfig, SessionDetail,
+    SessionStore, TaskGraph, TaskGraphStatus, TaskNode, TaskNodeStatus, TaskRunRef,
+    TaskVerification, WorkerRole,
 };
 use aidex_vault::{KdfParams, SecretString, VaultService, VaultServiceConfig};
 use std::sync::Arc;
@@ -203,4 +205,224 @@ fn context_trims_keep_the_largest_count() {
     // Zero is a no-op that needs no lookup; a real count needs a known run.
     store.record_context_trim("run_missing", 0).unwrap();
     assert!(store.record_context_trim("run_missing", 1).is_err());
+}
+
+fn graph(status: TaskGraphStatus, node_status: TaskNodeStatus, verifier: bool) -> TaskGraph {
+    TaskGraph {
+        id: "graph-1".into(),
+        root_run_id: "run-1".into(),
+        status,
+        max_parallel: 2,
+        max_steps: 8,
+        steps_used: 0,
+        nodes: vec![TaskNode {
+            id: "node-1".into(),
+            prompt: "work".into(),
+            role: if verifier {
+                WorkerRole::Verifier
+            } else {
+                WorkerRole::Worker
+            },
+            depends_on: vec![],
+            run_id: None,
+            status: node_status,
+            input_artifacts: vec![],
+            output_artifacts: vec![],
+            step_budget: 4,
+            steps_used: 0,
+            verification: if verifier {
+                Some(TaskVerification {
+                    passed: true,
+                    summary: "verified".into(),
+                })
+            } else {
+                None
+            },
+            error: None,
+        }],
+    }
+}
+
+#[test]
+fn legacy_session_detail_without_task_graphs_defaults_empty() {
+    let (_dir, _vault, store) = fixture();
+    let session = store.create(config()).unwrap();
+    let mut value = serde_json::to_value(session).unwrap();
+    value.as_object_mut().unwrap().remove("task_graphs");
+    let decoded: SessionDetail = serde_json::from_value(value).unwrap();
+    assert!(decoded.task_graphs.is_empty());
+}
+
+#[test]
+fn task_graph_validation_rejects_invalid_structure_and_bounds() {
+    let valid = graph(TaskGraphStatus::Running, TaskNodeStatus::Pending, false);
+    let mut invalid = valid.clone();
+    invalid.nodes.push(invalid.nodes[0].clone());
+    assert!(invalid.validate().is_err(), "duplicate node ids");
+
+    let mut invalid = valid.clone();
+    invalid.nodes[0].depends_on.push("missing".into());
+    assert!(invalid.validate().is_err(), "missing dependency");
+
+    let mut invalid = valid.clone();
+    let mut second = invalid.nodes[0].clone();
+    second.id = "node-2".into();
+    invalid.nodes[0].depends_on.push("node-2".into());
+    second.depends_on.push("node-1".into());
+    invalid.nodes.push(second);
+    assert!(invalid.validate().is_err(), "dependency cycle");
+
+    for (max_parallel, max_steps) in [(0, 1), (5, 1), (1, 0), (1, 129)] {
+        let mut invalid = valid.clone();
+        invalid.max_parallel = max_parallel;
+        invalid.max_steps = max_steps;
+        assert!(
+            invalid.validate().is_err(),
+            "limits {max_parallel}/{max_steps}"
+        );
+    }
+
+    let completed_without_verifier =
+        graph(TaskGraphStatus::Completed, TaskNodeStatus::Completed, false);
+    assert!(
+        completed_without_verifier.validate().is_err(),
+        "missing verifier"
+    );
+
+    let mut completed_without_verification =
+        graph(TaskGraphStatus::Completed, TaskNodeStatus::Completed, true);
+    completed_without_verification.nodes[0].verification = None;
+    assert!(
+        completed_without_verification.validate().is_err(),
+        "missing verifier result"
+    );
+
+    let mut completed_with_failed_verification =
+        graph(TaskGraphStatus::Completed, TaskNodeStatus::Completed, true);
+    completed_with_failed_verification.nodes[0]
+        .verification
+        .as_mut()
+        .unwrap()
+        .passed = false;
+    assert!(
+        completed_with_failed_verification.validate().is_err(),
+        "failed verifier result"
+    );
+
+    for node_status in [
+        TaskNodeStatus::Pending,
+        TaskNodeStatus::Running,
+        TaskNodeStatus::Failed,
+        TaskNodeStatus::Interrupted,
+        TaskNodeStatus::Cancelled,
+    ] {
+        let invalid = graph(TaskGraphStatus::Completed, node_status, true);
+        assert!(
+            invalid.validate().is_err(),
+            "incomplete node status {node_status:?}"
+        );
+    }
+
+    assert!(
+        graph(TaskGraphStatus::Completed, TaskNodeStatus::Completed, true)
+            .validate()
+            .is_ok()
+    );
+}
+
+#[test]
+fn reopening_interrupts_active_graphs_and_nodes_only() {
+    let (dir, vault, store) = fixture();
+    let session = store.create(config()).unwrap();
+    let root = store
+        .begin(&session.id, "root", "root-command", None)
+        .unwrap();
+    store
+        .update(&session.id, |detail| {
+            detail.runs[0].status = RunStatus::Running;
+            detail.task_graphs = vec![
+                graph(TaskGraphStatus::Pending, TaskNodeStatus::Pending, false),
+                graph(TaskGraphStatus::Running, TaskNodeStatus::Running, false),
+                graph(TaskGraphStatus::Completed, TaskNodeStatus::Completed, true),
+                graph(TaskGraphStatus::Failed, TaskNodeStatus::Failed, false),
+            ];
+            detail.task_graphs[1].id = "graph-2".into();
+            detail.task_graphs[2].id = "graph-3".into();
+            detail.task_graphs[3].id = "graph-4".into();
+            for task_graph in &mut detail.task_graphs {
+                task_graph.root_run_id = root.id.clone();
+            }
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    let reopened = SessionStore::open(dir.path().join("sessions.sqlite3"), vault).unwrap();
+    let graphs = reopened.get(&session.id).unwrap().task_graphs;
+    assert_eq!(graphs[0].status, TaskGraphStatus::Interrupted);
+    assert_eq!(graphs[0].nodes[0].status, TaskNodeStatus::Interrupted);
+    assert_eq!(graphs[1].status, TaskGraphStatus::Interrupted);
+    assert_eq!(graphs[1].nodes[0].status, TaskNodeStatus::Interrupted);
+    assert_eq!(graphs[2].status, TaskGraphStatus::Completed);
+    assert_eq!(graphs[2].nodes[0].status, TaskNodeStatus::Completed);
+    assert_eq!(graphs[3].status, TaskGraphStatus::Failed);
+    assert_eq!(graphs[3].nodes[0].status, TaskNodeStatus::Failed);
+}
+
+#[test]
+fn inference_retry_rejects_settled_task_child_without_changing_counters() {
+    let (_dir, _vault, store) = fixture();
+    let session = store.create(config()).unwrap();
+    let root = store
+        .begin(&session.id, "root", "root-command", None)
+        .unwrap();
+    store
+        .update(&session.id, |detail| {
+            detail.runs[0].status = RunStatus::Running;
+            detail.task_graphs = vec![graph(
+                TaskGraphStatus::Running,
+                TaskNodeStatus::Pending,
+                false,
+            )];
+            detail.task_graphs[0].root_run_id = root.id.clone();
+            Ok(())
+        })
+        .unwrap();
+    let child = store
+        .begin_with(
+            &session.id,
+            "child",
+            "child-command",
+            Some(root.id.clone()),
+            &RunOptions {
+                task: Some(TaskRunRef {
+                    graph_id: "graph-1".into(),
+                    node_id: "node-1".into(),
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+    store
+        .update(&session.id, |detail| {
+            detail
+                .runs
+                .iter_mut()
+                .find(|run| run.id == child.id)
+                .unwrap()
+                .status = RunStatus::Running;
+            detail.task_graphs[0].status = TaskGraphStatus::Failed;
+            detail.task_graphs[0].nodes[0].status = TaskNodeStatus::Failed;
+            detail.task_graphs[0].steps_used = 2;
+            detail.task_graphs[0].nodes[0].steps_used = 2;
+            Ok(())
+        })
+        .unwrap();
+
+    let error = store.reserve_inference_retry(&child.id).unwrap_err();
+    assert!(error.contains("task"), "{error}");
+    let saved = store.get(&session.id).unwrap();
+    let saved_child = saved.runs.iter().find(|run| run.id == child.id).unwrap();
+    assert_eq!((saved_child.steps, saved_child.inference_retries), (0, 0));
+    assert_eq!(saved.task_graphs[0].steps_used, 2);
+    assert_eq!(saved.task_graphs[0].nodes[0].steps_used, 2);
 }

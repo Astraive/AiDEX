@@ -3,7 +3,7 @@ use crate::errors::RpcError;
 use crate::methods::attachments::{AttachmentRef, attachment_ref};
 use aidex_native_sessions::{
     Approval, AttachmentMeta, Checkpoint, ForkOrigin, Mode, PermissionMode, Run, SessionConfig,
-    SessionDetail,
+    SessionDetail, TaskGraph,
 };
 use aidex_providers::{ChatMessage, Role};
 use serde::{Deserialize, Serialize};
@@ -127,6 +127,9 @@ pub struct SessionView {
     pub checkpoints: Vec<CheckpointView>,
     pub total_checkpoints: usize,
     pub checkpoints_truncated: bool,
+    pub task_graphs: Vec<TaskGraph>,
+    pub total_task_graphs: usize,
+    pub task_graphs_truncated: bool,
     pub runtime_ref_omitted: bool,
     pub commands_omitted: bool,
     /// Set on a conversation created by `conversation.fork`: its first
@@ -388,6 +391,9 @@ pub fn session(
             .collect(),
         total_checkpoints: s.checkpoints.len(),
         checkpoints_truncated: s.checkpoints.len() > 100,
+        task_graphs: s.task_graphs.iter().rev().take(8).rev().cloned().collect(),
+        total_task_graphs: s.task_graphs.len(),
+        task_graphs_truncated: s.task_graphs.len() > 8,
         runtime_ref_omitted: s.runtime_ref.is_some(),
         commands_omitted: true,
         forked_from: s.forked_from.clone(),
@@ -466,6 +472,7 @@ pub fn bounded(mut value: Value, recent: bool) -> Result<Value, RpcError> {
     {
         let mut removed = false;
         for field in [
+            "task_graphs",
             "messages",
             "approvals",
             "checkpoints",
@@ -600,5 +607,28 @@ mod tests {
             let view = run(&stored(json!({"runtime_ref": reference})));
             assert_eq!(view.has_runtime_ref, resumable, "{reference}");
         }
+    }
+
+    #[test]
+    fn oversized_task_graph_snapshots_keep_the_latest_with_truncation_metadata() {
+        let graphs = (0..3)
+            .map(|index| json!({"id": index, "snapshot": "x".repeat(400 * 1024)}))
+            .collect::<Vec<_>>();
+        let input = json!({
+            "task_graphs": graphs,
+            "total_task_graphs": 3,
+            "task_graphs_truncated": false,
+        });
+        assert!(serde_json::to_vec(&input).unwrap().len() > WIRE_BUDGET);
+
+        let bounded = bounded(input, true).unwrap();
+
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= WIRE_BUDGET);
+        assert_eq!(bounded["total_task_graphs"], 3);
+        assert_eq!(bounded["task_graphs_truncated"], true);
+        assert_eq!(bounded["truncated"], true);
+        assert_eq!(bounded["task_graphs"].as_array().unwrap().len(), 2);
+        assert_eq!(bounded["task_graphs"][0]["id"], 1);
+        assert_eq!(bounded["task_graphs"][1]["id"], 2);
     }
 }
