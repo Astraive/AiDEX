@@ -211,10 +211,10 @@ impl NativeEngine {
         let mut transitive = HashSet::new();
         fn collect(node: &TaskNode, by_id: &HashMap<&str, &TaskNode>, found: &mut HashSet<String>) {
             for id in &node.depends_on {
-                if found.insert(id.clone()) {
-                    if let Some(dep) = by_id.get(id.as_str()) {
-                        collect(dep, by_id, found);
-                    }
+                if found.insert(id.clone())
+                    && let Some(dep) = by_id.get(id.as_str())
+                {
+                    collect(dep, by_id, found);
                 }
             }
         }
