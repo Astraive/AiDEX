@@ -3183,10 +3183,9 @@ fn explicitly_resuming_interrupted_graph_recovers_children_and_verifier() {
     wait_for_request_count(&p, 1);
     let resumed_root = e.store().run(&root.id).unwrap();
     assert_eq!(resumed_root.status, RunStatus::Running);
-    assert_eq!(
-        p.requests().len(),
-        1,
-        "root resume turn is requested before any child turn"
+    assert!(
+        all_text(&p.requests()[0]).contains("resume graph task"),
+        "the root resume turn is requested before any child turn"
     );
     let worker_running = wait_for_node_status(&e, &s, &root.id, "worker", TaskNodeStatus::Running);
     assert_eq!(worker_running.status, TaskGraphStatus::Running);
@@ -3237,7 +3236,12 @@ fn explicitly_resuming_interrupted_graph_recovers_children_and_verifier() {
             summary: "evidence verified".into(),
         })
     );
-    assert_eq!(p.requests().len(), 4);
+    let requests = p.requests();
+    assert_eq!(requests.len(), 4);
+    assert!(all_text(&requests[0]).contains("resume graph task"));
+    assert!(all_text(&requests[1]).contains("Complete the interrupted work"));
+    assert!(all_text(&requests[2]).contains("Verify the worker evidence"));
+    assert!(all_text(&requests[3]).contains("resume graph task"));
     for run in resumed.runs {
         assert_eq!(
             run.status,
