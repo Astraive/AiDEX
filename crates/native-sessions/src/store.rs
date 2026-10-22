@@ -178,15 +178,22 @@ impl SessionStore {
             }
         }
         for graph in &mut session.task_graphs {
-            let run_interrupted = session.runs.iter().any(|run| {
-                run.id == graph.root_run_id && run.status == RunStatus::Interrupted
-            });
+            let run_interrupted = session
+                .runs
+                .iter()
+                .any(|run| run.id == graph.root_run_id && run.status == RunStatus::Interrupted);
             if run_interrupted {
-                if matches!(graph.status, TaskGraphStatus::Pending | TaskGraphStatus::Running) {
+                if matches!(
+                    graph.status,
+                    TaskGraphStatus::Pending | TaskGraphStatus::Running
+                ) {
                     graph.status = TaskGraphStatus::Interrupted;
                 }
                 for node in &mut graph.nodes {
-                    if matches!(node.status, TaskNodeStatus::Pending | TaskNodeStatus::Running) {
+                    if matches!(
+                        node.status,
+                        TaskNodeStatus::Pending | TaskNodeStatus::Running
+                    ) {
                         node.status = TaskNodeStatus::Interrupted;
                     }
                 }
@@ -374,7 +381,10 @@ impl SessionStore {
             let run_id = crate::store::id("run")?;
             if let Some(task) = &options.task {
                 let parent_id = parent.as_deref().ok_or("task run requires a parent run")?;
-                let graph = s.task_graphs.iter_mut().find(|graph| graph.id == task.graph_id)
+                let graph = s
+                    .task_graphs
+                    .iter_mut()
+                    .find(|graph| graph.id == task.graph_id)
                     .ok_or("task graph not found")?;
                 if graph.root_run_id != parent_id {
                     return Err("task graph root does not match parent run".into());
@@ -382,7 +392,10 @@ impl SessionStore {
                 if graph.status != TaskGraphStatus::Running {
                     return Err("task graph is not active".into());
                 }
-                let node = graph.nodes.iter_mut().find(|node| node.id == task.node_id)
+                let node = graph
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id == task.node_id)
                     .ok_or("task node not found")?;
                 if node.status != TaskNodeStatus::Pending || node.run_id.is_some() {
                     return Err("task node is not pending or already has a run".into());
@@ -489,8 +502,12 @@ impl SessionStore {
         let session = self.session_of(run_id)?;
         self.update(&session, |s| {
             let maximum = s.configuration.max_steps;
-            let run_index = s.runs.iter().position(|run| run.id == run_id).ok_or("run not found")?;
-            let (task_graph_id, task_node_id, steps) = {
+            let run_index = s
+                .runs
+                .iter()
+                .position(|run| run.id == run_id)
+                .ok_or("run not found")?;
+            let (task_graph_id, task_node_id) = {
                 let run = &s.runs[run_index];
                 if !run.status.active() {
                     return Err("run is no longer active".into());
@@ -498,7 +515,7 @@ impl SessionStore {
                 if run.steps >= maximum {
                     return Err("native run step budget exhausted before inference retry".into());
                 }
-                (run.task_graph_id.clone(), run.task_node_id.clone(), run.steps)
+                (run.task_graph_id.clone(), run.task_node_id.clone())
             };
             let task = match (task_graph_id, task_node_id) {
                 (None, None) => None,
@@ -506,11 +523,23 @@ impl SessionStore {
                 _ => return Err("incomplete task run identity".into()),
             };
             let task_indexes = if let Some((graph_id, node_id)) = task {
-                let graph_index = s.task_graphs.iter().position(|graph| graph.id == graph_id)
+                let graph_index = s
+                    .task_graphs
+                    .iter()
+                    .position(|graph| graph.id == graph_id)
                     .ok_or("task graph not found")?;
                 let graph = &s.task_graphs[graph_index];
-                let node_index = graph.nodes.iter().position(|node| node.id == node_id)
+                let node_index = graph
+                    .nodes
+                    .iter()
+                    .position(|node| node.id == node_id)
                     .ok_or("task node not found")?;
+                if graph.status != TaskGraphStatus::Running {
+                    return Err("task graph is no longer running; inference retry refused".into());
+                }
+                if graph.nodes[node_index].status != TaskNodeStatus::Running {
+                    return Err("task node is no longer running; inference retry refused".into());
+                }
                 if graph.steps_used >= graph.max_steps {
                     return Err("task graph step budget exhausted before inference retry".into());
                 }

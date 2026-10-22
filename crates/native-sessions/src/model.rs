@@ -335,8 +335,10 @@ impl TaskGraph {
         if !valid_id(&self.id) || !valid_id(&self.root_run_id) {
             return Err("invalid task graph identifier".into());
         }
-        if !(1..=4).contains(&self.max_parallel) || !(1..=128).contains(&self.max_steps)
-            || self.steps_used > self.max_steps {
+        if !(1..=4).contains(&self.max_parallel)
+            || !(1..=128).contains(&self.max_steps)
+            || self.steps_used > self.max_steps
+        {
             return Err("invalid task graph limits".into());
         }
         if self.nodes.len() > 128 {
@@ -344,42 +346,91 @@ impl TaskGraph {
         }
         let mut indexes = std::collections::BTreeMap::new();
         for (i, node) in self.nodes.iter().enumerate() {
-            if !valid_id(&node.id) || indexes.insert(node.id.as_str(), i).is_some()
-                || node.step_budget == 0 || node.step_budget > self.max_steps
-                || node.steps_used > node.step_budget {
+            if !valid_id(&node.id)
+                || indexes.insert(node.id.as_str(), i).is_some()
+                || node.step_budget == 0
+                || node.step_budget > self.max_steps
+                || node.steps_used > node.step_budget
+            {
                 return Err("invalid or duplicate task node".into());
             }
             if node.run_id.as_deref().is_some_and(|id| !valid_id(id))
                 || node.depends_on.len() > 128
-                || node.input_artifacts.len() > 128 || node.output_artifacts.len() > 128
+                || node.input_artifacts.len() > 128
+                || node.output_artifacts.len() > 128
                 || node.prompt.len() > 16 * 1024
                 || node.error.as_deref().is_some_and(|s| s.len() > TEXT_MAX)
-                || node.verification.as_ref().is_some_and(|v| v.summary.len() > TEXT_MAX) {
+                || node
+                    .verification
+                    .as_ref()
+                    .is_some_and(|v| v.summary.len() > TEXT_MAX)
+            {
                 return Err("invalid task node fields".into());
             }
             for artifact in node.input_artifacts.iter().chain(&node.output_artifacts) {
-                if !valid_id(artifact) { return Err("invalid artifact identifier".into()); }
+                if !valid_id(artifact) {
+                    return Err("invalid artifact identifier".into());
+                }
             }
-            if node.depends_on.iter().any(|dependency| !valid_id(dependency)) {
+            if node
+                .depends_on
+                .iter()
+                .any(|dependency| !valid_id(dependency))
+            {
                 return Err("invalid dependency identifier".into());
             }
         }
         let mut marks = vec![0u8; self.nodes.len()];
-        fn visit(i: usize, nodes: &[TaskNode], indexes: &std::collections::BTreeMap<&str, usize>, marks: &mut [u8]) -> Result<(), String> {
-            if marks[i] == 1 { return Err("cyclic task graph dependency".into()); }
-            if marks[i] == 2 { return Ok(()); }
+        fn visit(
+            i: usize,
+            nodes: &[TaskNode],
+            indexes: &std::collections::BTreeMap<&str, usize>,
+            marks: &mut [u8],
+        ) -> Result<(), String> {
+            if marks[i] == 1 {
+                return Err("cyclic task graph dependency".into());
+            }
+            if marks[i] == 2 {
+                return Ok(());
+            }
             marks[i] = 1;
             for dep in &nodes[i].depends_on {
-                let j = *indexes.get(dep.as_str()).ok_or("unknown task graph dependency")?;
+                let j = *indexes
+                    .get(dep.as_str())
+                    .ok_or("unknown task graph dependency")?;
                 visit(j, nodes, indexes, marks)?;
             }
             marks[i] = 2;
             Ok(())
         }
-        for i in 0..self.nodes.len() { visit(i, &self.nodes, &indexes, &mut marks)?; }
-        if self.status == TaskGraphStatus::Completed
-            && !self.nodes.iter().any(|n| n.role == WorkerRole::Verifier) {
-            return Err("completed task graph requires a verifier".into());
+        for i in 0..self.nodes.len() {
+            visit(i, &self.nodes, &indexes, &mut marks)?;
+        }
+        if self.status == TaskGraphStatus::Completed {
+            let has_verifier = self
+                .nodes
+                .iter()
+                .any(|node| node.role == WorkerRole::Verifier);
+            let all_nodes_completed = self
+                .nodes
+                .iter()
+                .all(|node| node.status == TaskNodeStatus::Completed);
+            let has_passed_verifier = self.nodes.iter().any(|node| {
+                node.role == WorkerRole::Verifier
+                    && node
+                        .verification
+                        .as_ref()
+                        .is_some_and(|verification| verification.passed)
+            });
+            if !has_verifier {
+                return Err("completed task graph requires a verifier".into());
+            }
+            if !all_nodes_completed {
+                return Err("completed task graph requires all nodes completed".into());
+            }
+            if !has_passed_verifier {
+                return Err("completed task graph requires a passed verifier".into());
+            }
         }
         Ok(())
     }
@@ -388,7 +439,11 @@ impl TaskGraph {
 impl SessionDetail {
     pub fn validate_task_graph(&self, graph: &TaskGraph) -> Result<(), String> {
         graph.validate()?;
-        if self.task_graphs.iter().any(|existing| existing.id == graph.id) {
+        if self
+            .task_graphs
+            .iter()
+            .any(|existing| existing.id == graph.id)
+        {
             return Err("duplicate task graph identifier".into());
         }
         Ok(())

@@ -5,13 +5,13 @@
 //! result in its model view ([`crate::tool_view`]) before any wrapping.
 use crate::{
     NativeEngine,
-    children::{CHILD_RESULTS, child_results_body},
+    children::{CHILD_RESULTS, GRAPH_INPUT, GRAPH_INPUT_BYTES, child_results_body},
     native_tools::{Offer, untrusted_trust},
     tool_view::model_content,
     untrusted::{bounded, nonce, preamble, quote, wrap},
 };
 use aidex_core::EntityId;
-use aidex_native_sessions::{Mode, Run, SessionDetail};
+use aidex_native_sessions::{Mode, Run, SessionDetail, WorkerRole};
 use aidex_providers::{ChatMessage, Role};
 use std::collections::{HashMap, HashSet};
 
@@ -78,7 +78,47 @@ impl NativeEngine {
         } else {
             self.invoked_for_run(workspace, &run.skills)
         };
-        if offer.has_untrusted() || wraps_results || !invoked.is_empty() || project.is_some() {
+        let orchestration_role = run
+            .task_graph_id
+            .as_deref()
+            .zip(run.task_node_id.as_deref())
+            .and_then(|(graph_id, node_id)| {
+                s.task_graphs
+                    .iter()
+                    .find(|graph| graph.id == graph_id)
+                    .and_then(|graph| graph.nodes.iter().find(|node| node.id == node_id))
+                    .map(|node| node.role)
+            })
+            .or_else(|| {
+                s.task_graphs
+                    .iter()
+                    .flat_map(|graph| &graph.nodes)
+                    .find(|node| node.run_id.as_deref() == Some(run.id.as_str()))
+                    .map(|node| node.role)
+            });
+        if let Some(role) = orchestration_role {
+            let instruction = match role {
+                WorkerRole::Worker => {
+                    "Execute the assigned task. Use available brokered tools for work and create artifacts for substantial outputs."
+                }
+                WorkerRole::Reviewer => {
+                    "Review the prerequisite task outputs and report substantive defects or confirmation. Do not claim work you did not inspect."
+                }
+                WorkerRole::Verifier => {
+                    "Verify the prerequisite worker and reviewer outputs. Your final response MUST be exactly one JSON object matching {\"passed\": boolean, \"summary\": string}; return no prose, fences, or extra keys."
+                }
+            };
+            messages.push(ChatMessage::system(instruction));
+        }
+        if offer.has_untrusted()
+            || wraps_results
+            || !invoked.is_empty()
+            || project.is_some()
+            || run
+                .transcript
+                .iter()
+                .any(|message| message.content.contains(GRAPH_INPUT))
+        {
             messages.push(ChatMessage::system(preamble(&nonce, false)));
         }
         if offer.web_search || offer.web_fetch {
@@ -157,7 +197,25 @@ impl NativeEngine {
             // place of an applied diff) before anything wraps it; history
             // keeps it whole.
             let view = model_content(message);
-            let content = view.as_deref().unwrap_or(&message.content);
+            if message.role == Role::User
+                && let Some((prefix, data)) = message.content.split_once(GRAPH_INPUT)
+            {
+                let mut wrapped = message.clone();
+                let attributes = "source=task_artifacts";
+                let data = data.trim_start_matches('\n');
+                let wrapper_overhead = wrap(&nonce, attributes, "untrusted", "").len();
+                let available = GRAPH_INPUT_BYTES
+                    .saturating_sub(1)
+                    .saturating_sub(wrapper_overhead);
+                let data = bounded_defused_prefix(data, available);
+                wrapped.content = format!(
+                    "{}{}\n{}",
+                    prefix,
+                    GRAPH_INPUT,
+                    wrap(&nonce, attributes, "untrusted", data)
+                );
+                return wrapped;
+            }
             if let Some(body) =
                 child_results_body(&message.content).filter(|_| message.role == Role::User)
             {
@@ -180,7 +238,7 @@ impl NativeEngine {
                         &nonce,
                         &format!("source=tool name={} call={}", quote(name), quote(id)),
                         trust,
-                        content,
+                        &message.content,
                     );
                     wrapped
                 }
@@ -223,6 +281,32 @@ impl NativeEngine {
 /// ([`crate::children`]).
 fn is_child_results(message: &ChatMessage) -> bool {
     message.role == Role::User && child_results_body(&message.content).is_some()
+}
+
+/// Longest original prefix whose delimiter-defused form fits `max` bytes.
+fn bounded_defused_prefix(text: &str, max: usize) -> &str {
+    let mut end = 0;
+    let mut size: usize = 0;
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        let (consumed, added) = if rest.starts_with(crate::untrusted::DELIMITER_PREFIX) {
+            (
+                crate::untrusted::DELIMITER_PREFIX.len(),
+                crate::untrusted::DEFUSED_PREFIX.len(),
+            )
+        } else {
+            let character = rest.chars().next().expect("index is a character boundary");
+            (character.len_utf8(), character.len_utf8())
+        };
+        if size.saturating_add(added) > max {
+            break;
+        }
+        size += added;
+        index += consumed;
+        end = index;
+    }
+    &text[..end]
 }
 
 /// How strictly a tool's results are wrapped (higher wraps more).

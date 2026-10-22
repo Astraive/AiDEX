@@ -154,7 +154,7 @@ impl NativeEngine {
             && caps
                 .enforcement(aidex_sandbox::Requirement::NetworkDeny)
                 .satisfies(aidex_sandbox::Requirement::NetworkDeny);
-        serde_json::json!({"sandbox":caps,"automatic_reviewer":false,"auto_falls_back_to":"supervised","shell_requires_full_access_on_windows":cfg!(windows),"filesystem_confinement":filesystem,"network_confinement":network,"max_children":4,"max_child_depth":2,"max_steps":128,"configured_fallback":true})
+        serde_json::json!({"sandbox":caps,"automatic_reviewer":false,"auto_falls_back_to":"supervised","shell_requires_full_access_on_windows":cfg!(windows),"filesystem_confinement":filesystem,"network_confinement":network,"max_children":4,"max_child_depth":2,"max_steps":128,"max_orchestration_nodes":4,"max_orchestration_parallel":4,"orchestration_requires_verifier":true,"configured_fallback":true})
     }
     pub fn start(
         self: &Arc<Self>,
@@ -266,8 +266,16 @@ impl NativeEngine {
             }
         }
         aidex_providers::ModelId::new(&s.configuration.model_id).map_err(|e| e.to_string())?;
-        let options = if external || parent.is_some() {
+        if options.task.is_some() && (external || parent.is_none()) {
+            return Err("orchestration task linkage requires a native child run".into());
+        }
+        let options = if external {
             RunOptions::default()
+        } else if parent.is_some() {
+            RunOptions {
+                task: options.task,
+                ..RunOptions::default()
+            }
         } else {
             self.check_options(&s.configuration, options)?
         };
@@ -424,6 +432,7 @@ impl NativeEngine {
             skills,
             web_search: options.web_search,
             attachments: options.attachments,
+            task: None,
         })
     }
     /// Launch a run again (a native run after an approval decision or a
@@ -683,6 +692,9 @@ impl NativeEngine {
         error: Option<String>,
     ) -> Result<(Run, bool), String> {
         let r = self.store.run(id)?;
+        if status == RunStatus::Cancelled && r.status.active() {
+            self.cancel_task_graphs(id)?;
+        }
         if status == RunStatus::Failed && r.status.active() {
             self.cancel_children(&r.session_id, id)?;
         }

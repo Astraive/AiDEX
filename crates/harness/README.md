@@ -1,6 +1,45 @@
 # Native execution
 
-`NativeEngine` composes the encrypted `SessionStore`, real `ProviderRegistry`, selected `WorkspaceRegistry`, typed tool registry and `aidex-policy` with sandbox-managed process trees. Agent turns offer confined read/list/search/write/patch, Git and shell functions, plus bounded `agent_spawn`/`agent_result` child execution. `NativeEngine::with_extensions` adds the embedder's skills, web search and fetch, and MCP servers (`Extensions`; the daemon implements it in `crates/aidexd/src/services/extensions.rs`).
+`NativeEngine` composes the encrypted `SessionStore`, real `ProviderRegistry`, selected `WorkspaceRegistry`, typed tool registry and `aidex-policy` with brokered process trees. Agent turns offer read/list/search/write/patch, Git and shell tools through the broker, plus bounded `agent_spawn`/`agent_result` child execution. `NativeEngine::with_extensions` adds the embedder's skills, web search and fetch, and MCP servers (`Extensions`; the daemon implements it in `crates/aidexd/src/services/extensions.rs`).
+
+## Bounded task graphs
+
+In a native Agent session, an active parent run can call `agent_orchestrate` with exactly this JSON shape (unknown fields are rejected):
+
+```json
+{
+  "max_parallel": 4,
+  "max_steps": 16,
+  "nodes": [
+    {
+      "id": "work",
+      "role": "worker",
+      "prompt": "Complete the task",
+      "depends_on": [],
+      "input_artifacts": [],
+      "step_budget": 8
+    },
+    {
+      "id": "verify",
+      "role": "verifier",
+      "prompt": "Verify the completed work",
+      "depends_on": ["work"],
+      "input_artifacts": [],
+      "step_budget": 8
+    }
+  ]
+}
+```
+
+`max_parallel` is required and must be 1–4. `max_steps` is required, 1–128, and no greater than the session's `max_steps`. `nodes` is required and contains 1–4 entries. Each task requires a unique nonempty `id` (at most 128 bytes), `role` (`worker`, `reviewer`, or `verifier`), `prompt` (at most 16 KiB), and positive `step_budget` no greater than graph `max_steps`; `depends_on` and `input_artifacts` are optional arrays of ids (at most 128 each). Dependencies must name nodes in this graph and form an acyclic DAG. The graph requires exactly one verifier, and that verifier must transitively depend on every worker and reviewer. Artifact ids must resolve to artifacts in the same session. The persisted graph is also validated for bounds, duplicate ids, node step usage, and valid dependencies before it is stored.
+
+The graph has at most four nodes, and at most `max_parallel` run concurrently. Nodes become eligible when all declared dependencies complete. The graph-wide step budget is `max_steps`, bounded by the session maximum; each node also has its own `step_budget`, and an inference/tool step is charged against both its node and graph budget. Worker runs are children of the active parent in the same native session, inheriting its workspace, model, permission mode, and policy.
+
+Declared input artifacts and output artifacts from directly depended-on nodes are supplied to each task as context. The handoff is marked as untrusted data, not instructions; only same-session artifacts are accepted. Artifacts are not a trusted instruction channel.
+
+The verifier's final response must be a JSON object with exactly `passed` (boolean) and `summary` (string, at most 4096 bytes), matching `TaskVerification`. The graph completes only if all nodes complete and the verifier returns `passed: true`. A failed child, invalid verifier response, failed verification, or failed prerequisite fails the graph; the parent reports graph failure rather than success.
+
+Cancellation marks a nonterminal graph and its pending/running nodes cancelled; a failure marks pending nodes failed and the graph failed. On store restart, pending/running graphs and nodes are marked interrupted; completed, failed, and cancelled graph state remains persisted. An interrupted root requires explicit `run.resume`; resumed execution continues from persisted node state without replaying completed nodes.
 
 ## Skills, web, MCP, artifacts, and plans
 

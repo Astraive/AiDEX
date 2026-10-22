@@ -1,12 +1,12 @@
 //! Harness-level tools that need no workspace: web search and fetch, skill
 //! loading, artifacts, plans, and the dynamic tools of MCP servers.
 //!
-//! Model-facing names are stable (the desktop renders them specially):
-//! `web_search`, `web_fetch`, `skill_load`, `artifact_create`,
-//! `artifact_update`, `plan_propose`, and `mcp__<server>__<tool>`. They are the
-//! model-safe forms of `web.search`, `web.fetch`, `skill.load`,
-//! `artifact.create`, `artifact.update`, and `plan.propose` (dots become
-//! underscores, as for the built-in `fs_write`).
+//! Model-facing harness tool names are stable (the desktop renders them
+//! specially): `web_search`, `web_fetch`, `skill_load`, `artifact_create`,
+//! `artifact_update`, `plan_propose`, and `mcp__<server>__<tool>`. Agent mode
+//! also offers the engine-handled `agent_spawn`, `agent_result`, and
+//! `agent_orchestrate` tools. Dotted extension names become underscores, as
+//! for the built-in `fs_write`.
 mod exec;
 mod mcp;
 mod plan;
@@ -30,6 +30,8 @@ pub(crate) const MCP_PREFIX: &str = "mcp__";
 /// Child-run tools of Agent mode (handled by the engine itself).
 pub(crate) const AGENT_SPAWN: &str = "agent_spawn";
 pub(crate) const AGENT_RESULT: &str = "agent_result";
+/// Bounded durable DAG tool of Agent mode.
+pub(crate) const AGENT_ORCHESTRATE: &str = "agent_orchestrate";
 
 /// Most model-invocable skills listed in the system prompt.
 const MAX_CATALOG_SKILLS: usize = 64;
@@ -82,7 +84,7 @@ impl ExtTool {
 /// The tools one request offers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Offer {
-    /// Workspace tools plus `agent_spawn`/`agent_result` (Agent mode).
+    /// Workspace tools plus Agent mode child and orchestration tools.
     pub builtin: bool,
     pub web_search: bool,
     pub web_fetch: bool,

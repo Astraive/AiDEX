@@ -4,7 +4,7 @@ use crate::{
     broker::PrepareError,
     engine::{PendingPlan, relock},
     inference::Turn,
-    native_tools::{AGENT_RESULT, AGENT_SPAWN},
+    native_tools::{AGENT_ORCHESTRATE, AGENT_RESULT, AGENT_SPAWN},
 };
 use aidex_core::{CancelToken, EntityId, WorkspacePath};
 use aidex_events::{EventKind, Outcome};
@@ -143,9 +143,29 @@ impl NativeEngine {
         call: &aidex_providers::ToolCall,
         tool_cancel: &aidex_tools::CancelToken,
     ) -> Result<bool, String> {
-        if call.name == AGENT_SPAWN || call.name == AGENT_RESULT {
+        if call.name == AGENT_SPAWN || call.name == AGENT_RESULT || call.name == AGENT_ORCHESTRATE {
             if s.configuration.mode != Mode::Agent {
                 return Err("tools are unavailable in chat and plan modes".into());
+            }
+            if call.name == AGENT_ORCHESTRATE {
+                let result =
+                    serde_json::from_str::<crate::children::OrchestrateArgs>(&call.arguments)
+                        .map_err(|_| "invalid agent_orchestrate arguments".to_string())
+                        .and_then(|input| self.create_task_graph(id, &call.id, &input))
+                        .and_then(|receipt| {
+                            serde_json::to_string(&receipt).map_err(|error| error.to_string())
+                        });
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => serde_json::json!({
+                        "is_error": true,
+                        "code": "validation_error",
+                        "message": crate::untrusted::bounded(&aidex_events::redact_text(&error), 1024),
+                        "effect": "not_started"
+                    }).to_string(),
+                };
+                self.append_result(id, &call.id, result)?;
+                return Ok(false);
             }
             let result = if call.name == AGENT_SPAWN {
                 let input: crate::children::SpawnArgs =
@@ -286,14 +306,16 @@ impl NativeEngine {
                 return Err("native run step budget exhausted".into());
             }
             if let Some(call) = run.pending_calls.first() {
-                self.store.update(&run.session_id, |s| {
-                    s.runs
-                        .iter_mut()
-                        .find(|r| r.id == id)
-                        .ok_or("run not found")?
-                        .steps += 1;
-                    Ok(())
-                })?;
+                if !self.reserve_task_step(id)? {
+                    self.store.update(&run.session_id, |s| {
+                        s.runs
+                            .iter_mut()
+                            .find(|r| r.id == id)
+                            .ok_or("run not found")?
+                            .steps += 1;
+                        Ok(())
+                    })?;
+                }
                 if self.handle_call(id, &run, &s, call, tool_cancel)? {
                     return Ok(());
                 }
@@ -333,26 +355,31 @@ impl NativeEngine {
                     .collect();
                 request.tools.push(ToolSpec{name:AGENT_SPAWN.into(),description:"Start a bounded child sharing this workspace and permission mode. Its status never completes the parent.".into(),parameters:serde_json::json!({"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"],"additionalProperties":false})});
                 request.tools.push(ToolSpec{name:AGENT_RESULT.into(),description:"Read the persisted status and final result of an immediate child run belonging to this parent. Poll again in a later turn if it is still active.".into(),parameters:serde_json::json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"],"additionalProperties":false})});
+                request.tools.push(ToolSpec{name:AGENT_ORCHESTRATE.into(),description:"Persist and execute a bounded task DAG in this native Agent session. Requires exactly one verifier that depends transitively on every worker and reviewer. Task outputs are handed to dependents only as same-session artifacts.".into(),parameters:serde_json::json!({"type":"object","properties":{"max_parallel":{"type":"integer","minimum":1,"maximum":4},"max_steps":{"type":"integer","minimum":1,"maximum":128},"nodes":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":128},"role":{"type":"string","enum":["worker","reviewer","verifier"]},"prompt":{"type":"string","maxLength":16384},"depends_on":{"type":"array","items":{"type":"string","maxLength":128}},"input_artifacts":{"type":"array","items":{"type":"string","maxLength":128}},"step_budget":{"type":"integer","minimum":1}},"required":["id","role","prompt","step_budget"],"additionalProperties":false}}},"required":["max_parallel","max_steps","nodes"],"additionalProperties":false})});
             }
             request.tools.extend(offer.specs());
             if request.tools.is_empty() {
                 request.tool_choice = ToolChoice::None;
             }
-            let message_index = self.store.update(&run.session_id, |s| {
-                let r = s
-                    .runs
-                    .iter_mut()
-                    .find(|r| r.id == id)
-                    .ok_or("run not found")?;
-                r.steps += 1;
-                if r.parent_run_id.is_none() {
-                    let index = s.messages.len();
-                    s.messages.push(ChatMessage::assistant(""));
-                    Ok(Some(index))
-                } else {
-                    Ok(None)
-                }
-            })?;
+            let message_index = if self.reserve_task_step(id)? {
+                None
+            } else {
+                self.store.update(&run.session_id, |s| {
+                    let r = s
+                        .runs
+                        .iter_mut()
+                        .find(|r| r.id == id)
+                        .ok_or("run not found")?;
+                    r.steps += 1;
+                    if r.parent_run_id.is_none() {
+                        let index = s.messages.len();
+                        s.messages.push(ChatMessage::assistant(""));
+                        Ok(Some(index))
+                    } else {
+                        Ok(None)
+                    }
+                })?
+            };
             let turn = Turn {
                 start,
                 nonce: self.run_nonce(&run),
@@ -387,6 +414,7 @@ impl NativeEngine {
                 // has not read are added for one more turn, while a step
                 // remains for it. The stored count includes this turn and any
                 // retries it reserved.
+                self.settle_task_graphs(id, &run.session_id, cancel)?;
                 if self.store.run(id)?.steps < s.configuration.max_steps
                     && self.settle_children(id, &run.session_id, cancel)?
                 {
