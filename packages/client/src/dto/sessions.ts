@@ -211,6 +211,8 @@ export type SessionDetail = SessionConfig & {
   next_message_offset: number | null;
   runs: Run[];
   task_graphs: TaskGraph[];
+  total_task_graphs: number;
+  task_graphs_truncated: boolean;
   total_runs: number;
   runs_truncated: boolean;
   approvals: Approval[];

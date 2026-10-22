@@ -403,6 +403,7 @@ pub(crate) fn register(router: &mut Router, services: &Arc<Services>) -> Result<
                 skills,
                 web_search: p.web_search.unwrap_or(false),
                 attachments,
+                task: None,
             };
             to_result(&view::run(
                 &s.native()

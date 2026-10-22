@@ -130,6 +130,11 @@ export function LiveExecutionPage() {
             Start an agent task
           </Button>
         )}
+        {session.data?.task_graphs_truncated && (
+          <Notice tone="warning">
+            Showing the latest {session.data.task_graphs.length} of {session.data.total_task_graphs} task graph snapshots; older snapshots were omitted.
+          </Notice>
+        )}
         {session.data?.task_graphs.map((graph) => (
           <Card key={graph.id} padding="md">
             <Stack gap={3}>
