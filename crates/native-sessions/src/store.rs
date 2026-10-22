@@ -73,14 +73,15 @@ impl SessionStore {
         let attachment_blobs =
             crate::sealed::BlobDir::beside(path, crate::sealed::Domain::Attachment);
         crate::attachments::open_maintenance(&db, &attachment_blobs)?;
-        Ok(Self {
+        let store = Self {
             db: Mutex::new(db),
             vault,
             blobs,
             attachment_blobs,
             uploads: crate::attachments::Uploads::new(),
             staged_expiry: crate::attachments::StagedExpiry::new(),
-        })
+        };
+        Ok(store)
     }
     pub(crate) fn key(&self) -> Result<SecretBytes, StoreError> {
         let name = SecretName::new(NATIVE_RECORD_KEY_SECRET).map_err(|e| e.to_string())?;
@@ -176,6 +177,21 @@ impl SessionStore {
                 run.status = RunStatus::Interrupted;
             }
         }
+        for graph in &mut session.task_graphs {
+            let run_interrupted = session.runs.iter().any(|run| {
+                run.id == graph.root_run_id && run.status == RunStatus::Interrupted
+            });
+            if run_interrupted {
+                if matches!(graph.status, TaskGraphStatus::Pending | TaskGraphStatus::Running) {
+                    graph.status = TaskGraphStatus::Interrupted;
+                }
+                for node in &mut graph.nodes {
+                    if matches!(node.status, TaskNodeStatus::Pending | TaskNodeStatus::Running) {
+                        node.status = TaskNodeStatus::Interrupted;
+                    }
+                }
+            }
+        }
         for approval in &mut session.approvals {
             if approval.status == "pending"
                 && session
@@ -216,6 +232,7 @@ impl SessionStore {
             commands: Default::default(),
             runtime_ref: None,
             forked_from: None,
+            task_graphs: vec![],
         };
         let mut db = self.db.lock().map_err(|_| "session store poisoned")?;
         let tx = db.transaction().map_err(|e| e.to_string())?;
@@ -303,7 +320,7 @@ impl SessionStore {
             // Options join the fingerprint only when present, so command ids
             // recorded before they existed keep their fingerprints; attachment
             // ids join only when present, so skill and web fingerprints stay.
-            let fp = if options.is_empty() {
+            let mut fp = if options.is_empty() {
                 digest(format!("{content}\0{parent:?}").as_bytes())
             } else if options.attachments.is_empty() {
                 digest(
@@ -322,6 +339,9 @@ impl SessionStore {
                     .as_bytes(),
                 )
             };
+            if let Some(task) = &options.task {
+                fp = digest(format!("{fp}\0{}\0{}", task.graph_id, task.node_id).as_bytes());
+            }
             if let Some(existing) = s.commands.get(command) {
                 if existing.fingerprint != fp {
                     return Err("command id reused with different arguments".into());
@@ -351,6 +371,25 @@ impl SessionStore {
             {
                 return Err("child requires an active parent".into());
             }
+            let run_id = crate::store::id("run")?;
+            if let Some(task) = &options.task {
+                let parent_id = parent.as_deref().ok_or("task run requires a parent run")?;
+                let graph = s.task_graphs.iter_mut().find(|graph| graph.id == task.graph_id)
+                    .ok_or("task graph not found")?;
+                if graph.root_run_id != parent_id {
+                    return Err("task graph root does not match parent run".into());
+                }
+                if graph.status != TaskGraphStatus::Running {
+                    return Err("task graph is not active".into());
+                }
+                let node = graph.nodes.iter_mut().find(|node| node.id == task.node_id)
+                    .ok_or("task node not found")?;
+                if node.status != TaskNodeStatus::Pending || node.run_id.is_some() {
+                    return Err("task node is not pending or already has a run".into());
+                }
+                node.run_id = Some(run_id.clone());
+                node.status = TaskNodeStatus::Running;
+            }
             let content = if content.trim().is_empty() {
                 ATTACHMENT_ONLY_CONTENT
             } else {
@@ -364,7 +403,7 @@ impl SessionStore {
             };
             transcript.push(message.clone());
             let run = Run {
-                id: crate::store::id("run")?,
+                id: run_id,
                 session_id: id.into(),
                 parent_run_id: parent.clone(),
                 status: RunStatus::Pending,
@@ -392,6 +431,8 @@ impl SessionStore {
                 inference_retries: 0,
                 context_trimmed_messages: 0,
                 tool_outputs: Vec::new(),
+                task_graph_id: options.task.as_ref().map(|task| task.graph_id.clone()),
+                task_node_id: options.task.as_ref().map(|task| task.node_id.clone()),
             };
             if !run.attachments.is_empty() {
                 self.link_attachments(db, s, &run.attachments, command, &run.id, s.messages.len())?;
@@ -448,19 +489,46 @@ impl SessionStore {
         let session = self.session_of(run_id)?;
         self.update(&session, |s| {
             let maximum = s.configuration.max_steps;
-            let run = s
-                .runs
-                .iter_mut()
-                .find(|r| r.id == run_id)
-                .ok_or("run not found")?;
-            if !run.status.active() {
-                return Err("run is no longer active".into());
-            }
-            if run.steps >= maximum {
-                return Err("native run step budget exhausted before inference retry".into());
-            }
+            let run_index = s.runs.iter().position(|run| run.id == run_id).ok_or("run not found")?;
+            let (task_graph_id, task_node_id, steps) = {
+                let run = &s.runs[run_index];
+                if !run.status.active() {
+                    return Err("run is no longer active".into());
+                }
+                if run.steps >= maximum {
+                    return Err("native run step budget exhausted before inference retry".into());
+                }
+                (run.task_graph_id.clone(), run.task_node_id.clone(), run.steps)
+            };
+            let task = match (task_graph_id, task_node_id) {
+                (None, None) => None,
+                (Some(graph_id), Some(node_id)) => Some((graph_id, node_id)),
+                _ => return Err("incomplete task run identity".into()),
+            };
+            let task_indexes = if let Some((graph_id, node_id)) = task {
+                let graph_index = s.task_graphs.iter().position(|graph| graph.id == graph_id)
+                    .ok_or("task graph not found")?;
+                let graph = &s.task_graphs[graph_index];
+                let node_index = graph.nodes.iter().position(|node| node.id == node_id)
+                    .ok_or("task node not found")?;
+                if graph.steps_used >= graph.max_steps {
+                    return Err("task graph step budget exhausted before inference retry".into());
+                }
+                if graph.nodes[node_index].steps_used >= graph.nodes[node_index].step_budget {
+                    return Err("task node step budget exhausted before inference retry".into());
+                }
+                Some((graph_index, node_index))
+            } else {
+                None
+            };
+            let run = &mut s.runs[run_index];
             run.steps += 1;
             run.inference_retries = run.inference_retries.saturating_add(1);
+            if let Some((graph_index, node_index)) = task_indexes {
+                let graph = &mut s.task_graphs[graph_index];
+                graph.steps_used += 1;
+                graph.nodes[node_index].steps_used += 1;
+            }
             Ok(run.inference_retries)
         })
     }

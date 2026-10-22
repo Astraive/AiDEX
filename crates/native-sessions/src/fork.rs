@@ -73,6 +73,7 @@ impl SessionStore {
                 session_id: source_id.into(),
                 message_count: messages.len(),
             }),
+            task_graphs: vec![],
             messages,
             runs: vec![],
             approvals: vec![],
